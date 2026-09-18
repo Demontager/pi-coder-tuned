@@ -1,6 +1,6 @@
 # Extensions reference
 
-22 extensions load from this package. Twelve are single files in `extensions/`, ten are directories whose entry point is `index.ts`. Two more directories (`thinking-collapse/`, `tool-diff/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
+22 extensions load from this package. Twelve are single files in `extensions/`, ten are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -110,9 +110,16 @@ The probe must be registered with `placement: "belowEditor"`. Omitting it silent
 
 ### `prompt-editor.ts` — the input box
 
-Two cosmetic changes to the editor: a `❯ ` gutter (the real editing area is narrowed and the gutter is re-added per line, so cursor placement, IME positioning and mouse clicks all stay correct), and one blank line between a visible autocomplete list and the statusline. The blank line is only added when the list is actually rendered, judged by the public `isShowingAutocomplete()`.
+Three changes to the editor.
+
+**A `❯ ` gutter.** The real editing area is narrowed and the gutter is re-added per line, so cursor placement, IME positioning and mouse clicks all stay correct.
+
+**A blank line** between a visible autocomplete list and the statusline, added only when the list is actually rendered (judged by the public `isShowingAutocomplete()`), so the static layout is unchanged.
+
+**`!` bash mode**, matching Claude Code: when the prompt starts with `!` the gutter shows `!` instead of `❯` and the `!` you typed is hidden, so the body reads as the command itself. The mode is render-only — not a single character of the text changes. Detection copies pi's own (`text.trimStart().startsWith("!")`, the same flag that colors the editor border), and Enter submission, ↑ history and Esc clearing keep going through pi's own paths, so there is nothing to keep in sync. Hiding a column has two consequences: the body shifts one column left, so mouse clicks count one extra column, and the cursor has to be pushed off column 0 — otherwise the reverse-video cursor lands on the blank column, and typing there would inject `x!ls` into the text and drop pi out of bash mode. Leaving the mode needs no code: backspacing over the `!`, submitting, or Esc all make pi's own `isBashMode` false again and the next frame draws `❯`. `PI_EDITOR_PROMPT` changes the `❯` but not the bash `!`.
 
 - `PI_EDITOR_PROMPT` (default `❯`), `PI_EDITOR_AUTOCOMPLETE_GAP=off`, `PI_EDITOR_AUTOCOMPLETE_SHIFT` (default 1 column).
+- Pure logic lives in [`prompt-editor/bash-prompt.ts`](../extensions/prompt-editor/bash-prompt.ts); the render contract is covered by [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts), which loads the real extension through pi's own loader.
 
 ### `working-indicator/` — the working message
 
@@ -243,7 +250,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_CWD_STATUSLINE=off` | on | `cwd-statusline` | Do not print the cwd status line. |
 | `PI_EDITOR_AUTOCOMPLETE_GAP=off` | on | `prompt-editor` | Do not add the blank line under the autocomplete list. |
 | `PI_EDITOR_AUTOCOMPLETE_SHIFT` | `1` | `prompt-editor` | Columns to shift the autocomplete list left. |
-| `PI_EDITOR_PROMPT` | `❯` | `prompt-editor` | Editor prompt character. |
+| `PI_EDITOR_PROMPT` | `❯` | `prompt-editor` | Editor prompt character. The bash-mode `!` is not affected. |
 | `PI_EXIT_WORDS` | `exit,quit,bye` | `exit-command` | Comma-separated quit words; `off` disables the input interception. |
 | `PI_FENCELESS_CODE=off` | on | `fenceless-code-block` | Keep Markdown code fences. |
 | `PI_FOLDER_HISTORY_INJECT` | `100` | `folder-history` | History entries injected from previous sessions. |
@@ -281,5 +288,5 @@ Every switch is an environment variable read at use time, not cached at load, so
 ## Adding, disabling and removing extensions
 
 - **Disable one** — `pi config` lists every resource from packages and local directories with an on/off toggle, in global or project scope. Or set the switch listed above when the extension has one.
-- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the two helper pairs: `thinking-collapse/`, `tool-diff/` and `simple-task/` are imported by other files.
+- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, and `simple-task/`, whose `gap.ts` is imported by `recap`.
 - **Edit one** — work in a checkout and run pi against it; see [development.md](development.md).

@@ -15,7 +15,7 @@ First release. A complete pi coding-agent environment packaged for npm.
   - Model and tooling: `auto-default-model/`, `ask-user-question/`, `subagent-log-guard/`
 - **3 themes** under `themes/`: `summer-night` (default), `catppuccin`, `ayu` — including the two custom diff-background tokens and `bashOutput`.
 - **Global config files** under `config/`: `AGENTS.md`, `settings.json`, `web-search.json`, `pi-statusline.json`.
-- **436 unit tests** runnable with `npm test`, plus the pure-logic module split that makes them possible.
+- **454 unit tests** runnable with `npm test`, plus the pure-logic module split that makes them possible.
 - English documentation: [installation](docs/installation.md), [configuration](docs/configuration.md), [extensions](docs/extensions.md), [themes](docs/themes.md), [development](docs/development.md).
 - The original Chinese handbook, kept verbatim as [docs/handbook.zh.md](docs/handbook.zh.md).
 

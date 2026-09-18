@@ -12,7 +12,7 @@ These come from pi's extension discovery and they decide where a file may live:
 | `extensions/<dir>/*.test.ts` | No — only the directory's `index.ts` is loaded. |
 | `extensions/*.test.ts` (top level) | **Yes** — pi would try to load it. Never put tests at the top level. |
 
-`thinking-collapse/` and `tool-diff/` are the two helper-only directories here: `thinking-collapse.ts` and `tool-diff.ts` import them, and pi never loads them directly.
+`thinking-collapse/`, `tool-diff/` and `prompt-editor/` are the three helper-only directories here: `thinking-collapse.ts`, `tool-diff.ts` and `prompt-editor.ts` import them, and pi never loads them directly.
 
 Two consequences worth remembering:
 
@@ -22,10 +22,12 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 436 tests, ~70 s
+npm test        # node --test — 454 tests, ~72 s
 ```
 
-The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts` and the rest can run under plain `node --test`.
+The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts` and the rest can run under plain `node --test`.
+
+One test file goes the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match). It locates pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and it **skips** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point it at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 
 **Tests passing is not enough.** pi loads `.ts` with its own loader, and a construct node accepts can still fail there:
 
@@ -72,6 +74,7 @@ tmux kill-session -t pi-check
 
 Everything below is documented because it cost real debugging time. The full reasoning is in the file headers named next to each item.
 
+- **A hidden column still accepts the cursor.** `prompt-editor` hides the `!` of bash mode, but `Editor` keeps the cursor column in private state with no public setter, so the extension calls `setCursorCol(1)` directly and degrades to "the cursor stays at column 0" if pi ever renames it — a cosmetic regression only. Letting the cursor sit on the hidden column writes `x!ls` into the text, at which point pi decides it is no longer bash mode.
 - **A `ctx` captured before a session replacement goes stale**, and reading `ctx.ui` throws `This extension ctx is stale after session replacement or reload`. The throw happens when you read the property, before any widget `render()` runs, so a `try/catch` inside `render()` cannot catch it. A timer that outlives the session takes the host process down with it (`exit=1`). `simple-task/` and `working-indicator/` therefore all three: catch inside the callback and stop the timer, wrap every `ctx.ui` access, and stop timers in `session_shutdown`.
 - **A throwing `renderCall` is silently swallowed** and replaced by `createCallFallback()`: something disappears from the UI and nothing is logged.
 - **Tool registration is first-registration-wins per name.** A second extension registering `bash` is ignored without a warning — which is why everything that shapes `bash` rendering lives in one file.

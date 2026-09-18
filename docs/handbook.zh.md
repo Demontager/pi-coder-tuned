@@ -33,6 +33,7 @@ cp clients/pi/config/pi-statusline.json ~/.pi/agent/pi-statusline.json   # 可�
 cp clients/pi/config/web-search.json    ~/.pi/agent/web-search.json
 cp clients/pi/extensions/*.ts           ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/tool-diff          ~/.pi/agent/extensions/   # tool-diff.ts 的纯排版模块（无 index.ts，不会被当成扩展）
+cp -R clients/pi/extensions/prompt-editor     ~/.pi/agent/extensions/   # prompt-editor.ts 的纯逻辑模块（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/simple-task        ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/recap              ~/.pi/agent/extensions/   # 依赖上一行的 gap.ts（跨目录相对 import）
 cp -R clients/pi/extensions/rewind             ~/.pi/agent/extensions/
@@ -274,7 +275,7 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 | --- | --- |
 | `thinking-collapse.ts` | thinking 块渲染成**一条连续横向滚动的行**（固定 1 行，不注册命令）：所有换行（模型自己折的行、空行分段、列表项、代码围栏内）全部拼进同一条行 —— 上一段结束后下一段直接接续在上一段的结尾，**不另起一行**，Think 区域从头到尾只有一行不间断的 token 流；**段落接缝（空行处）中文 ↔ 中文补一个逗号**（上段末尾已有标点不重复补，英文/混排仍按空格规则，段内折行不补），行首 `Think: ` 标签（顶格，无竖线 gutter），整行超宽时从头部丢掉溢出字符、行首补 `…`，行尾永远是最新 token，不折行；**没有短段回填补满逻辑**（曾有，会打断流动观感，已移除），短 thinking 行尾留白不补 |
 | `fenceless-code-block/` | Markdown 代码块去掉开合围栏（连 `lang` 标签一起），代码正文按 pi 的缩进铺开、语法着色保留，**不加底色**（观感来自 npm `@itc-steve/pi-theme`，但只取去围栏这一半）；`render.ts` 是纯逻辑（量度 / 折行 / Markdown 类都注入），入口只接线。`PI_FENCELESS_CODE=off` 关闭 |
-| `prompt-editor.ts` | 输入框 `❯ ` gutter + 补全列表与 statusline 之间补一行空行 |
+| `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |
 | `clear-command.ts` | `/clear` 别名 → `ctx.newSession()`（先 `waitForIdle`，与内置 `/new` 同一条流程） |
@@ -354,6 +355,14 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
   `bash-command-collapse.ts` 是为了让「流式接命令字符时屏幕上一行都不出」成为可能 —— 代价是
   pi 不再套 bgFn，底色得自己用 `Box(1,0, theme.bg(…))` 画，且 **`paddingY` 必须置 0**
   （否则两个 Box 的 padding 会叠出**三个空行**，上下边界空行改为只在最外侧补）。
+- **`prompt-editor.ts` 的 `!` bash 模式只改渲染层，正文一个字符都不动**：判定照抄 pi 的
+  `interactive-mode.js`（`text.trimStart().startsWith("!")` —— 边框颜色 `updateEditorBorderColor`
+  用的就是同一个标志），所以 gutter 和输入框颜色永远一致；正文里那个 `!` 只是「摘掉第一个可见字符
+  + 行尾补一列空格」，Enter 提交（`text.startsWith("!")`）、↑ 历史、Esc 清空全都不用配合。
+  代价是隐藏列会变成可落点，所以 `handleInput` / `handleMouse` 之后都要把光标从 (0,0) 挡回 (0,1)
+  （调 Editor private 的 `setCursorCol`，没有公开 setter），点选坐标也要多算 1 列 —— 正文在视觉上
+  整体左移了一列。放进那一列的话，反显光标会落在空列上（看起来光标消失），而且在那儿打字会把
+  `x!ls` 写进正文、pi 当场判定退出 bash 模式。
 - **`theme-command.ts` 的预览/落盘/取消三条路径全靠 `ctx.ui.setTheme()` 的两条路径语义区分**：
   传 **Theme 对象** → `setThemeInstance()`（只换色、不写 `settings.json`）；传**名字** →
   `setThemeName()`（应用**且立刻写盘**）。所以预览必须走对象路径，只有回车才走名字路径。
@@ -408,7 +417,8 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 - **改完扩展的最低验证**是真起一次 pi（见上文「pi 平台的坑」——`node --test` 不校验语法）。
 - **面向本机 pi 的写法约定**：纯逻辑模块刻意**不 import pi / pi-tui**（鸭子类型 + 结构化最小接口），
   这样 `node --test` 能直接跑；`tool-diff/`、`statusline/`、`recap/`、`rewind/`、`simple-task/`、
-  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/` 都按这个约定拆出了可单测的伴生模块
+  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`
+  都按这个约定拆出了可单测的伴生模块
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
 - **`AGENTS.md` 自设 8000 字符预算**（当前 **7996 字符** ≈ 1999 tokens，落在盘上是 8028 字节，余量仅 4 字符）：
   pi 本身没有上限 —— 0.85.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在

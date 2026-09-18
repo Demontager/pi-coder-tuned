@@ -33,12 +33,13 @@ A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh
 
 ### `ayu`
 
-A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput` (see below).
+A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput`.
 
-Two deliberate deviations from upstream, both documented in the file's own comments:
+Three deliberate deviations from upstream:
 
 1. **Strings vs. added diff lines.** Upstream points `syntaxString` (strings in code) and `toolDiffAdded` (the foreground of added diff lines, including line numbers and `+`) at the same green `#AAD94C`. Here `syntaxString` points at a darker `stringGreen` (`#67a567`) so code strings and diff additions do not glow identically; diff additions keep the upstream green. Side effect: the new green is close in luminance to `muted`, so strings and comments are told apart mostly by hue.
 2. **Thinking borders.** Upstream paints `thinkingXhigh` red (`#D95757`). Here `thinkingXhigh` and `thinkingMax` are both a neutral grey (`#626262`), because the editor border takes the color of the current level and this setup defaults to `xhigh` — a red border reads as an error. The top two levels are now distinguished from each other only by luminance.
+3. **Pending and finished tool cards are inverted.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter); this file swaps them, so a tool call that is still running gets the lighter background and a finished one the darker. Nothing in the file explains the choice — it is a value inversion, not a renamed variable.
 
 ## Anatomy of a theme file
 
