@@ -132,10 +132,43 @@ npm publish
   PI_CODING_AGENT_DIR=$(mktemp -d) pi install /tmp/pi-pkg/package
   ```
 
-Optional, to show a preview in the gallery, add to `package.json`:
+## How the package appears on pi.dev
 
-```json
-"pi": { "extensions": ["./extensions"], "themes": ["./themes"], "image": "https://.../screenshot.png" }
+The [package catalog](https://pi.dev/packages) is indexed from npm — there is no submission form or upload endpoint (`/api/*` answers `501 API routes are reserved for future features`). Publishing to npm with `pi-package` in `keywords` is the whole mechanism; the crawl picks the package up within minutes and it appears in the *Recently published* feed and in the full list.
+
+The **detail page renders this README as its body**, so `README.md` is the gallery landing page, not just npm metadata:
+
+- Relative links (`docs/extensions.md`, `extensions/tool-diff.ts`) are rewritten against the `repository` field, so they resolve in the gallery — both `https://github.com/jayli/pi-coder/blob/main/docs/...` and a jsDelivr CDN form are used.
+- The page leads with the description, badges, and any `pi.image` / `pi.video` preview, then the README.
+- Resource chips (`extension`, `theme`, …) come from the `pi` manifest, so an accurate manifest is also accurate marketing.
+- The catalog adds a `report` link to `earendil-works/pi` issues automatically.
+
+### Post-publish checklist
+
+```bash
+npm view @bachi/pi-coder version --registry=https://registry.npmjs.org   # the version you just pushed
+curl -s -o /dev/null -w '%{http_code}\n' https://pi.dev/packages/@bachi/pi-coder   # 404 before indexing, 200 after
+pi install npm:@bachi/pi-coder
 ```
 
-`video` takes precedence over `image` when both are set; MP4 only.
+Once the package exists on npm, two optional additions become safe (they render as broken until then):
+
+1. **Badges** at the top of the README, as the reference packages do:
+
+   ```markdown
+   ![npm](https://img.shields.io/npm/v/@bachi/pi-coder?style=for-the-badge)
+   ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)
+   ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)
+   ```
+
+2. **A preview asset**, which is what makes a TUI package legible in the gallery. Upload a screenshot (PNG/JPEG/GIF/WebP) or a screencast (MP4 only) — a `github.com/user-attachments/...` URL from a README upload works — then declare it:
+
+   ```json
+   "pi": {
+     "extensions": ["./extensions"],
+     "themes": ["./themes"],
+     "video": "https://github.com/user-attachments/assets/..."
+   }
+   ```
+
+   `video` takes precedence over `image` when both are set; on desktop the video autoplays on hover and opens fullscreen on click. Re-publish after changing the manifest.

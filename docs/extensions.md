@@ -29,7 +29,7 @@ pi registers one handler per tool name (first registration wins), so each of the
 
 ### `bash-command-collapse.ts` — the `bash` tool
 
-Collapses long commands to N visual lines (default 3) followed by `… (123 tokens hidden)`, hard-wrapping at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. `ctrl+o` expansion shows the command in full. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput)).
+Collapses long commands to N visual lines (default 3) followed by `… (123 tokens hidden)`, hard-wrapping at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. `ctrl+o` expansion shows the command in full. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
 
 - `PI_BASH_MIN_TIME_MS` (default `2000`) — only show the elapsed-time footer above this duration.
 - `PI_BASH_HIGHLIGHT=off` — disable shell syntax highlighting.
@@ -223,6 +223,41 @@ This extension wraps `process.stderr.write` in processes that have a UI and stop
 
 - `PI_SUBAGENT_LOG_GUARD=notify` — route the messages through `ctx.ui.notify(..., "warning")` instead of dropping them.
 - `PI_SUBAGENT_LOG_GUARD=off` — remove the guard (useful when tracing who printed a line).
+
+## Environment switches
+
+Every switch is an environment variable read at use time, not cached at load, so it can be scoped per project or set in a shell alias. An unset variable means "on"; `off` always disables.
+
+| Variable | Default | Owning extension | Effect |
+| --- | --- | --- | --- |
+| `PI_ASK_USER_QUESTION=off` | on | `ask-user-question` | Do not register the `ask_user_question` tool. |
+| `PI_AUTO_DEFAULT_MODEL=off` | on | `auto-default-model` | Do not persist model switches to `settings.json`. |
+| `PI_BASH_HIGHLIGHT=off` | on | `bash-command-collapse` | Disable shell syntax highlighting in bash title rows. |
+| `PI_BASH_MIN_TIME_MS` | `2000` | `bash-command-collapse` | Only show the elapsed-time footer above this duration. |
+| `PI_BASH_PREVIEW` | `3` | `bash-command-collapse` | bash output preview lines (1–50); `off` restores pi's built-in preview. |
+| `PI_BASH_SPINNER=off` | on | `working-indicator` | Disable the `●` spinner on running bash rows. |
+| `PI_BASH_STREAM=on` | off | `bash-command-collapse` | Use pi's native streaming for bash instead of the collapse path. |
+| `PI_BASH_TREE=off` | on | `bash-command-collapse` | Disable tree indentation (`│`/`└`) for bash output. |
+| `PI_BELOW_EDITOR_AFTER_STATUSLINE=off` | on | `below-editor-after-statusline` | Leave `belowEditor` widgets where pi puts them. |
+| `PI_CWD_ICON` | ` 📁` | `cwd-statusline` | Icon used by the cwd status line. |
+| `PI_CWD_STATUSLINE=off` | on | `cwd-statusline` | Do not print the cwd status line. |
+| `PI_EDITOR_AUTOCOMPLETE_GAP=off` | on | `prompt-editor` | Do not add the blank line under the autocomplete list. |
+| `PI_EDITOR_AUTOCOMPLETE_SHIFT` | `1` | `prompt-editor` | Columns to shift the autocomplete list left. |
+| `PI_EDITOR_PROMPT` | `❯` | `prompt-editor` | Editor prompt character. |
+| `PI_EXIT_WORDS` | `exit,quit,bye` | `exit-command` | Comma-separated quit words; `off` disables the input interception. |
+| `PI_FENCELESS_CODE=off` | on | `fenceless-code-block` | Keep Markdown code fences. |
+| `PI_FOLDER_HISTORY_INJECT` | `100` | `folder-history` | History entries injected from previous sessions. |
+| `PI_LOGO=off` | on | `startup-logo` | Do not install the startup header. |
+| `PI_READ_COLLAPSE=off` | on | `read-path-collapse` | Keep pi's built-in `read` title row. |
+| `PI_SPINNER_COLOR_HOLD` | `19` | `working-indicator` | Frames per color in the spinner cycle. |
+| `PI_SPINNER_RAINBOW=off` | on | `working-indicator` | Disable the rainbow spinner. |
+| `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
+| `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
+| `PI_WORKING_SUMMARY=off` | on | `working-indicator` | Disable the prompt summary line. |
+| `PI_WORKING_SUMMARY_GAP` | `1` | `working-indicator` | Minimum blank columns between the working label and the summary. |
+| `PI_WORKING_SUMMARY_LLM=off` | on | `working-indicator` | Truncate the summary instead of asking a model to compress it. |
+| `PI_WORKING_SUMMARY_MODEL` | session model | `working-indicator` | `provider/modelId` used for the summary request. |
+| `PI_WORKING_SUMMARY_TRIGGER` | `1.2` | `working-indicator` | Ask for a summary when the prompt exceeds this multiple of the available width. |
 
 ## Extension interactions
 
