@@ -1,0 +1,38 @@
+{
+  "lastChangelogVersion": "0.85.1",
+  "theme": "summer-night",
+  "defaultThinkingLevel": "xhigh",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 52429,
+    "keepRecentTokens": 20000
+  },
+  "npmCommand": [
+    "pnpm",
+    "--config.node-linker=hoisted"
+  ],
+  "extensions": [],
+  "tuiMode": "regular",
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-subagents"
+  ],
+  "steeringMode": "one-at-a-time",
+  "markdown": {
+    "mermaid": "streaming"
+  },
+  "doubleEscapeAction": "none",
+  "subagents": {
+    "agentOverrides": {
+      "researcher": {
+        "tools": "inherit"
+      },
+      "delegate": {
+        "tools": "inherit"
+      },
+      "worker": {
+        "tools": "inherit"
+      }
+    }
+  }
+}

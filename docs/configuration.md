@@ -1,0 +1,123 @@
+# Configuration
+
+`@bachi/pi-coder` ships extensions and themes as package resources, which pi loads by itself. It also ships the **global config files** the environment was built with, because those are files pi reads from `~/.pi/agent/` and no package can install them for you.
+
+| In this package | Destination | Purpose |
+| --- | --- | --- |
+| `config/AGENTS.md` | `~/.pi/agent/AGENTS.md` | The agent's global working rules: persistence, authorization, destructive-action care, shell hygiene, editing and verification rules, communication style. |
+| `config/settings.json` | `~/.pi/agent/settings.json` | Everything in the key table below. |
+| `config/web-search.json` | `~/.pi/agent/web-search.json` | `pi-web-access` configuration; one required key (see below). |
+| `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json` | Legacy. See [pi-statusline.json](#pi-statuslinejson-is-legacy). |
+
+Copy commands are in [installation.md](installation.md#apply-the-global-config-files).
+
+## Read `settings.json` before copying it
+
+`cp` overwrites your file completely — there is no merge. Two entries are specific to the author's machine:
+
+### `npmCommand` pins pnpm
+
+```json
+"npmCommand": ["pnpm", "--config.node-linker=hoisted"]
+```
+
+This routes every pi npm operation (install, remove, dependency install for git packages) through pnpm with a hoisted layout. **If you do not have pnpm installed, `pi install` will fail.** Delete the key to use plain npm, or replace it with your own wrapper, e.g.:
+
+```json
+"npmCommand": ["mise", "exec", "node@20", "--", "npm"]
+```
+
+### `doubleEscapeAction` hands Esc-Esc to `rewind`
+
+```json
+"doubleEscapeAction": "none"
+```
+
+pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` extension takes over the double-Escape gesture and consumes the second press, so with `"tree"` you would get rewind's menu and never pi's tree. `"none"` states that intent explicitly. To go back: remove `extensions/rewind/` and set the value to `"tree"`.
+
+## What each `settings.json` key does
+
+| Key | Value here | Notes |
+| --- | --- | --- |
+| `lastChangelogVersion` | `"0.85.1"` | Internal marker for "last changelog the user saw". It only suppresses a changelog notice; harmless to keep or delete. |
+| `theme` | `"summer-night"` | Must equal the `name` field inside `themes/summer-night.json`, not just the file name. |
+| `defaultThinkingLevel` | `"xhigh"` | Startup thinking level. Not available on every model; see `thinkingLevelMap` in your `models.json`. |
+| `compaction.enabled` / `reserveTokens` / `keepRecentTokens` | `true` / `52429` / `20000` | `keepRecentTokens` is pi's default; `reserveTokens` is raised well above pi's `16384` default because this setup's models stream long thinking blocks. |
+| `npmCommand` | `["pnpm", "--config.node-linker=hoisted"]` | See above. Machine-specific. |
+| `extensions` | `[]` | No explicit extension paths — auto-discovery of `~/.pi/agent/extensions/` and package resources only. The author's real file pointed at a telemetry extension from another tool; that absolute path was intentionally dropped. |
+| `tuiMode` | `"regular"` | pi's default, written out explicitly. |
+| `packages` | `["npm:pi-web-access", "npm:pi-subagents"]` | The two companion packages. This array is exactly what `pi install` writes. |
+| `steeringMode` | `"one-at-a-time"` | pi's default, explicit. |
+| `markdown.mermaid` | `"streaming"` | pi's default, explicit. |
+| `doubleEscapeAction` | `"none"` | See above. |
+| `subagents.agentOverrides` | `researcher` / `delegate` / `worker` → `tools: "inherit"` | A `pi-subagents` setting, not a pi core one. |
+
+### Why `tools: "inherit"` on three subagents
+
+`pi-subagents` filters a child agent's tools against a strict whitelist. Core builtins that the host lacks are removed with a warning; **non-core names are passed through and validated by the child session's own registry** — so a tool silently disappears when its name does not exist there.
+
+That is exactly what happens with the built-in `researcher` agent: its frontmatter asks for `web_search`, while `web-search.json` renames that tool to `pi_web_search`. The child registry has no `web_search`, so the tool is dropped and the subagent cannot search at all.
+
+`inherit` deletes the whitelist entirely (`applyToolsOverride` does `delete target.tools`), and the subagent gets every tool the child registry has. It is applied only to the three **write-capable** agents:
+
+- `researcher`, `delegate`, `worker` — they already may write, so nothing is lost.
+- Read-only agents (`scout`, `reviewer`, `oracle`) must **not** get `inherit`: it would hand them `write`, `edit` and `bash` and break their read-only contract. `evidence-auditor` has a whitelist of the same broken shape, but inheriting it would silently grant write access, so it is left alone.
+
+Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and removes itself from child sessions.
+
+## What is not shipped
+
+### `models.json`
+
+Provider and model registrations are machine-specific: this setup's `litellm-any` provider points at a LiteLLM gateway on `127.0.0.1:996` (LAN address on other machines), carries a compat configuration, and registers six model ids that must match the gateway's routes exactly. Shipping it would be wrong on every other machine, so it is excluded.
+
+`models.json` is the only file excluded, and the three settings keys that select a model were removed along with it:
+
+| Removed key | Why |
+| --- | --- |
+| `defaultProvider: "litellm-any"` | The provider only exists in the excluded `models.json`. |
+| `defaultModel: "deepseek-flash"` | Depends on that provider. |
+| `modelThinkingLevels` | Pins `deepseek-flash` and `deepseek-flash-qd` to `max`; model ids again. |
+
+Everything else in `settings.json` is byte-for-byte the author's file. If you run your own gateway you can add them back:
+
+```json
+"defaultProvider": "<provider>",
+"defaultModel": "<model-id>",
+"modelThinkingLevels": { "<provider>/<model-id>": "max" }
+```
+
+For how providers and thinking levels work, see pi's own `docs/models.md` and `docs/custom-provider.md`.
+
+### `pi-statusline.json` is legacy
+
+This file configures `npm:@narumitw/pi-statusline`, a package this environment no longer uses — `extensions/statusline/` replaced it. The local statusline reads **no config file at all**: colors come from `theme.fg(...)`, so it follows whatever theme is active, and the second line comes from other extensions calling `ctx.ui.setStatus()`.
+
+The file is kept only so you can switch back to the npm package without re-deriving the palette (it holds a Tokyo Night palette, segment order and per-extension status icons). Nothing in this package reads it.
+
+## `web-search.json` — one key, and it is required
+
+```json
+{ "toolNames": { "webSearch": "pi_web_search" } }
+```
+
+pi registers the `pi-web-access` search tool as `web_search` by default. A LiteLLM Anthropic→OpenAI translation layer treats **any tool literally named `web_search`** as Anthropic's built-in web search (`_is_web_search_tool`), strips it from `tools`, and substitutes an empty `web_search_options: {}` — which the backend rejects. The result is not an error: the request succeeds and the tool simply does not exist for the model.
+
+Renaming the tool changes the same request from `tools=7` to `tools=8` in the gateway log (and to `tools=0` when only `web_search` was sent). If you are not routing through such a gateway, the rename is still harmless.
+
+> When a tool vanishes like this, do not trust the model's own explanation — it will guess from the stale `promptSnippet` still present in the system prompt. Count `tools=N` in the gateway log instead.
+
+## Machine-local files that are intentionally not in the package
+
+| File | Why not |
+| --- | --- |
+| `~/.pi/agent/auth.json` | Credentials. |
+| `~/.pi/agent/trust.json` | Per-machine project trust decisions, keyed by absolute path. |
+| `~/.pi/agent/models-store.json` | Cache of pi's built-in model catalog. |
+| `~/.pi/agent/sessions/` | Session transcripts. |
+| `~/.pi/agent/missions/`, `run-history.jsonl` | `pi-subagents` mission and run history. |
+| `~/.pi/agent/rewind/` | The `rewind` extension's shadow snapshot repositories. |
+| `~/.pi/agent/npm/`, `bin/` | Installed packages (use `pi install`) and pi's bundled `fd`/`rg`. |
+| `~/.pi/agent/web-search-cache/`, `~/.pi/folder-history/*.jsonl` | Runtime caches and history. |
+
+The [Chinese handbook](handbook.zh.md) documents the same list with the reasoning behind each entry, plus the gateway and model routing this environment was tuned for.

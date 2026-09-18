@@ -1,0 +1,71 @@
+{
+  "name": "@bachi/pi-coder",
+  "version": "1.0.0",
+  "description": "A complete Pi coding-agent environment: 22 TUI extensions, 3 themes and the global config files that make them work together.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extensions",
+    "themes",
+    "theme",
+    "statusline",
+    "tui",
+    "terminal",
+    "coding-agent",
+    "agent"
+  ],
+  "homepage": "https://github.com/jayli/pi-coder#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jayli/pi-coder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jayli/pi-coder/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "extensions",
+    "themes",
+    "config",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

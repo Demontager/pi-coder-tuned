@@ -1,0 +1,140 @@
+{
+	"palettePreset": "tokyo-night",
+	"density": "compact",
+	"separator": "none",
+	"segments": [
+		"model",
+		"thinking",
+		"branch",
+		"context",
+		"tokens",
+		"tools"
+	],
+	"segmentText": {
+		"brand": {
+			"prefix": "",
+			"suffix": ""
+		},
+		"provider": {
+			"prefix": "🔌 ",
+			"suffix": ""
+		},
+		"model": {
+			"prefix": "🤖 ",
+			"suffix": "",
+			"truncationLength": 36,
+			"truncationSymbol": "…",
+			"truncationDirection": "start"
+		},
+		"thinking": {
+			"prefix": "✨ ",
+			"suffix": ""
+		},
+		"cwd": {
+			"prefix": "📁 ",
+			"suffix": ""
+		},
+		"branch": {
+			"prefix": "🌿 ",
+			"suffix": ""
+		},
+		"tools": {
+			"prefix": "",
+			"suffix": ""
+		},
+		"context": {
+			"prefix": "🪟 ctx ",
+			"suffix": ""
+		},
+		"tokens": {
+			"prefix": "🔢 ",
+			"suffix": ""
+		},
+		"cache": {
+			"prefix": "📦 ",
+			"suffix": ""
+		},
+		"cost": {
+			"prefix": "💸 $",
+			"suffix": ""
+		},
+		"time": {
+			"prefix": "🕒 ",
+			"suffix": ""
+		},
+		"turn": {
+			"prefix": "🔁 #",
+			"suffix": ""
+		}
+	},
+	"extensionStatusIcons": {
+		"accounts": "👤",
+		"caffeinate": "💊",
+		"chrome-devtools": "🌐",
+		"cwd": " 📁",
+		"firecrawl": "🔥",
+		"github-pr": "🔎",
+		"goal": "🎯",
+		"google-genai": "✨",
+		"lsp": "🧰",
+		"plan-mode": "📝",
+		"retry": "🔁",
+		"subagents": "🧑‍🤝‍🧑",
+		"sync": "🔄",
+		"usage": "📊"
+	},
+	"palette": {
+		"brand": {
+			"fg": "#090c0c",
+			"bg": "#a3aed2"
+		},
+		"provider": {
+			"fg": "#090c0c",
+			"bg": "#a3aed2"
+		},
+		"model": {
+			"fg": "#090c0c",
+			"bg": "#a3aed2"
+		},
+		"thinking": {
+			"fg": "#090c0c",
+			"bg": "#a3aed2"
+		},
+		"cwd": {
+			"fg": "#e3e5e5",
+			"bg": "#769ff0"
+		},
+		"branch": {
+			"fg": "#769ff0",
+			"bg": "#394260"
+		},
+		"tools": {
+			"fg": "#769ff0",
+			"bg": "#212736"
+		},
+		"context": {
+			"fg": "#769ff0",
+			"bg": "#212736"
+		},
+		"tokens": {
+			"fg": "#769ff0",
+			"bg": "#212736"
+		},
+		"cache": {
+			"fg": "#769ff0",
+			"bg": "#212736"
+		},
+		"cost": {
+			"fg": "#a0a9cb",
+			"bg": "#1d2230"
+		},
+		"time": {
+			"fg": "#a0a9cb",
+			"bg": "#1d2230"
+		},
+		"turn": {
+			"fg": "#a0a9cb",
+			"bg": "#1d2230"
+		}
+	}
+}
