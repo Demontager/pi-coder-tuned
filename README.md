@@ -42,9 +42,9 @@ Colors come from the active theme rather than from hardcoded values, so `/theme`
 
 Two captures in `ayu`:
 
-![ayu theme, first capture](https://raw.githubusercontent.com/jayli/pi-coder/main/assets/ayu1.png)
+![ayu theme, first capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png)
 
-![ayu theme, second capture](https://raw.githubusercontent.com/jayli/pi-coder/main/assets/ayu2.png)
+![ayu theme, second capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu2.png)
 
 ## Install
 
