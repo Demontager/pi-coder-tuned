@@ -31,12 +31,18 @@
  * 清掉所有 `setStatus`，新会话 `session_start` 才让我们重装 —— 中间那几十毫秒会真的出帧，
  * 于是底部「闪」一下。本扩展用 `footer-guard.ts` 在渲染路径上把这段窗口冻住（重放上一帧的
  * 行），原因与约束见那个文件的头注释；关掉它只需把 `PI_STATUSLINE_FREEZE` 设为 `off`。
+ *
+ * 启动那一段（进程刚起来、`session_start` 还没轮到我们）走的是另一条路：`footer-suppress.ts`
+ * 在扩展工厂里就把 `FooterComponent.prototype.render` 换成返回 0 行，内置 statusline 一帧
+ * 都不出现（原因、时机与兜底见那个文件的头注释）。它由 `PI_STATUSLINE_BOOT_SUPPRESS=off` 关闭。
  */
 
+import { FooterComponent as PiFooterComponent } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { readGitDiffStat } from "./git.ts";
 import { findRenderContainer, freezeFooterContainer, releaseFooterGuard } from "./footer-guard.ts";
+import { suppressBuiltInFooter } from "./footer-suppress.ts";
 import {
 	STATUSLINE_KEY,
 	ELLIPSIS,
@@ -47,6 +53,7 @@ import {
 const GIT_POLL_INTERVAL_MS = 30_000;
 const GIT_DEBOUNCE_MS = 400;
 const FROZEN_DISABLED = (process.env.PI_STATUSLINE_FREEZE ?? "").trim().toLowerCase() === "off";
+const BOOT_SUPPRESS_DISABLED = (process.env.PI_STATUSLINE_BOOT_SUPPRESS ?? "").trim().toLowerCase() === "off";
 
 /** footer 容器要的是这个组件对象；只要 render/dispose 形状，便于在守卫里按身份比对。 */
 interface FooterComponent {
@@ -56,6 +63,11 @@ interface FooterComponent {
 }
 
 export default function statusline(pi: ExtensionAPI) {
+	// 工厂在 TUI 创建之前跑，所以这里就能把内置 footer 静音：窗口内它渲染 0 行，
+	// 等下面 `installFooter` 把我们的组件挂上去再交还（见 footer-suppress.ts）。
+	const releaseBuiltInFooter: (() => void) | undefined = BOOT_SUPPRESS_DISABLED
+		? undefined
+		: suppressBuiltInFooter(PiFooterComponent);
 	let generation = 0;
 	let activeTarget: { cwd: string; generation: number } | undefined;
 	let requestRender: (() => void) | undefined;
@@ -155,10 +167,15 @@ export default function statusline(pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUSLINE_KEY, undefined);
 		if (!activeTarget) {
 			requestRender = undefined;
+			// print / rpc 模式没有 footer，不会有人来装，直接交还内置那只。
+			releaseBuiltInFooter?.();
 			return;
 		}
 		const target = activeTarget;
 
+		// 挂上我们的组件前先交还内置那只：两条语句之间是同一个同步块，出不了帧。
+		// 放在 `setFooter` 之前（而不是之后）是为了万一它抛错也不会让底部空着。
+		releaseBuiltInFooter?.();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			requestRender = () => tui.requestRender();
 			tuiHandle = tui;

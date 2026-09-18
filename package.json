@@ -1,7 +1,7 @@
 {
   "name": "@bachi/pi-coder",
-  "version": "1.0.0",
-  "description": "A complete Pi coding-agent environment: 22 TUI extensions, 3 themes and the global config files that make them work together.",
+  "version": "1.1.0",
+  "description": "A complete Pi coding-agent environment: 23 TUI extensions, 3 themes and the global config files that make them work together.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -44,7 +44,8 @@
     ],
     "themes": [
       "./themes"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/jayli/pi-coder/main/assets/ayu1.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

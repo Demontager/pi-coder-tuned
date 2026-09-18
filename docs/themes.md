@@ -35,11 +35,12 @@ A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh
 
 A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput`.
 
-Three deliberate deviations from upstream:
+Four deliberate deviations from upstream:
 
 1. **Strings vs. added diff lines.** Upstream points `syntaxString` (strings in code) and `toolDiffAdded` (the foreground of added diff lines, including line numbers and `+`) at the same green `#AAD94C`. Here `syntaxString` points at a darker `stringGreen` (`#67a567`) so code strings and diff additions do not glow identically; diff additions keep the upstream green. Side effect: the new green is close in luminance to `muted`, so strings and comments are told apart mostly by hue.
 2. **Thinking borders.** Upstream paints `thinkingXhigh` red (`#D95757`). Here `thinkingXhigh` and `thinkingMax` are both a neutral grey (`#626262`), because the editor border takes the color of the current level and this setup defaults to `xhigh` — a red border reads as an error. The top two levels are now distinguished from each other only by luminance.
-3. **Pending and finished tool cards are inverted.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter); this file swaps them, so a tool call that is still running gets the lighter background and a finished one the darker. Nothing in the file explains the choice — it is a value inversion, not a renamed variable.
+3. **Pending and finished tool cards are exchanged, and the pending value was re-tuned.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter); this file uses `#1b1c1d` for pending and `#10151F` for success, so a tool call that is still running gets the lighter background and a finished one the darker. After the exchange the pending value moved three more times (`#171F24` → `#191919` → `#1d1c1d` → `#1b1c1d`) and now equals `userMessageBg`, so a running tool card shares the background of a user message. Nothing in the file explains the choice — it is a value inversion, not a renamed variable.
+4. **User message text has a fixed color.** `userMessageText` points at `textColor` (`#dbdbdd`, a var added for it) rather than `fg`, the terminal's default foreground, so user messages read the same on any terminal.
 
 ## Anatomy of a theme file
 

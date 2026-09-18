@@ -1,6 +1,6 @@
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **22 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **23 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -22,7 +22,7 @@ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash
 [Extensions]
   ask-user-question, auto-default-model, bash-command-collapse.ts, below-editor-after-statusline.ts,
 clear-command.ts, cwd-statusline.ts, exit-command.ts, fenceless-code-block, folder-history.ts,
-init-command.ts, prompt-editor.ts, read-path-collapse.ts, recap, rewind, simple-task, startup-logo,
+init-command.ts, mcp, prompt-editor.ts, read-path-collapse.ts, recap, rewind, simple-task, startup-logo,
 statusline, subagent-log-guard, theme-command.ts, thinking-collapse.ts, tool-diff.ts, working-indicator
 ```
 
@@ -37,6 +37,14 @@ statusline, subagent-log-guard, theme-command.ts, thinking-collapse.ts, tool-dif
 The startup list also loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`cwd-statusline`, `simple-task`, `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
 
 Colors come from the active theme rather than from hardcoded values, so `/theme` repaints everything on the next frame.
+
+### The `ayu` theme
+
+Two captures in `ayu`:
+
+![ayu theme, first capture](https://raw.githubusercontent.com/jayli/pi-coder/main/assets/ayu1.png)
+
+![ayu theme, second capture](https://raw.githubusercontent.com/jayli/pi-coder/main/assets/ayu2.png)
 
 ## Install
 
@@ -76,6 +84,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`recap/`](extensions/recap/) | `/recap`, plus an automatic summary above the editor after 30s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
 | [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. |
+| [`mcp/`](extensions/mcp/) | MCP servers become pi tools (`mcp__<server>__<tool>`) over stdio, streamable HTTP or legacy SSE, with `/mcp` status commands. |
 | [`auto-default-model/`](extensions/auto-default-model/) | Writes every model switch to `settings.json` — the Ctrl+S step, automated. |
 | [`subagent-log-guard/`](extensions/subagent-log-guard/) | Stops `[pi-subagents]` stderr diagnostics from corrupting the TUI. |
 | [`cwd-statusline.ts`](extensions/cwd-statusline.ts) | Prints the full working directory as a second statusline line. |
@@ -92,7 +101,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 
 ### Commands
 
-`/ask` `/bash-collapse` `/bash-preview` `/bash-stream` `/bash-timeout` `/bash-tree` `/clear` `/exit` `/init` `/read-collapse` `/recap` `/rewind` `/tasks` `/theme`
+`/ask` `/bash-collapse` `/bash-preview` `/bash-stream` `/bash-timeout` `/bash-tree` `/clear` `/exit` `/init` `/mcp` `/read-collapse` `/recap` `/rewind` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -130,7 +139,7 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 - `npmCommand` pins `pnpm --config.node-linker=hoisted`. Remove it if you do not have pnpm, or `pi install` will fail.
 - `doubleEscapeAction: "none"` hands Esc-Esc to the `rewind` extension instead of pi's built-in tree navigator.
 
-`config/models.json` is **not** shipped: provider and model registrations point at a local gateway and belong to the machine that runs it. See [docs/configuration.md](docs/configuration.md).
+`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.mcp.json` — the `mcp/` extension reads both. See [docs/configuration.md](docs/configuration.md).
 
 ## Requirements
 
@@ -144,15 +153,15 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 22 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 23 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
-| [docs/development.md](docs/development.md) | Running the 454 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 596 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 454 tests
+npm test        # node --test, 596 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

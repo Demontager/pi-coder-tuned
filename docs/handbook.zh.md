@@ -17,6 +17,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | `AGENTS.md` | `~/.pi/agent/AGENTS.md`（机器全局行为规则） |
 | `config/settings.json` | `~/.pi/agent/settings.json` |
 | `config/models.json` | `~/.pi/agent/models.json` |
+| `config/mcp.json` | `~/.pi/agent/mcp.json`（MCP 服务器；不装就没有 MCP 工具，`/mcp` 会给出提示） |
 | `config/web-search.json` | `~/.pi/agent/web-search.json`（`pi-web-access` 自己的配置） |
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json`（**已失效的遗留配置**：旧 npm statusline 包专用，留着只为随时换回那个包） |
 | `extensions/*.ts` | `~/.pi/agent/extensions/` |
@@ -30,6 +31,7 @@ cp clients/pi/AGENTS.md                 ~/.pi/agent/AGENTS.md
 cp clients/pi/config/settings.json      ~/.pi/agent/settings.json
 cp clients/pi/config/models.json        ~/.pi/agent/models.json
 cp clients/pi/config/pi-statusline.json ~/.pi/agent/pi-statusline.json   # 可选：只有要回退到 npm statusline 包时才需要
+cp clients/pi/config/mcp.json           ~/.pi/agent/mcp.json               # 可选：不装就没有 MCP 工具（见下文）
 cp clients/pi/config/web-search.json    ~/.pi/agent/web-search.json
 cp clients/pi/extensions/*.ts           ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/tool-diff          ~/.pi/agent/extensions/   # tool-diff.ts 的纯排版模块（无 index.ts，不会被当成扩展）
@@ -44,6 +46,7 @@ cp -R clients/pi/extensions/ask-user-question  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/subagent-log-guard ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/fenceless-code-block ~/.pi/agent/extensions/   # 子目录形式：纯逻辑在 render.ts（不 import pi，可单测）
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
+cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
@@ -266,6 +269,68 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 一并给出去，破坏只读契约；`evidence-auditor` 的白名单是同一个坏形状，但给它 `inherit` 等于白送写权限，
 所以留原样。交互类工具不用手动排除：`ask_user_question` 自己按 `ctx.hasUI` 判断，子会话里自动摘掉。
 
+## MCP 服务器（`mcp/`）
+
+让 pi 用上 Claude Code 那套 MCP 服务器：**每个 MCP 工具直接注册成一个 pi 工具**，名字
+`mcp__<server>__<tool>`（Claude Code 同款，skill 与权限规则里的写法可以直接搬过来）。
+
+配置按 Claude Code 的 `.mcp.json` 形状：全局 `~/.pi/agent/mcp.json`，再加上从 cwd 往上找到的
+**第一个**项目根 `.mcp.json`（同名 server 项目覆盖全局）。所以 `~/jayli/homework/.mcp.json` 里已有的
+`wechat-local` 在 pi 里开箱即用，全局那份则是「在哪个目录都能用」。字段：`command` / `args` / `env` /
+`cwd` / `timeout`（毫秒，工具调用用；握手另有 20s 上限）走 stdio；`url` / `headers`（`type: "sse"` 走旧版
+HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 `${VAR:-默认值}`；`enabled: false` 保留条目但不连。
+
+**动态请求头（`headersCommand`）**是 OAuth 的“便宜档”：很多 SaaS MCP 既支持 OAuth、也支持静态 token（GitHub PAT、
+`CONTEXT7_API_KEY`、Sentry/Figma 的 token），所以与其为一个 header 实现整套 OAuth 2.1，不如让命令自己去取：
+```json
+{ "mcpServers": { "remote": {
+  "url": "https://mcp.example.com/mcp",
+  "headersCommand": "security find-generic-password -s example-mcp -w"
+} } }
+```
+命令输出三种形状都认：扁 JSON 对象、`{"headers":{...}}` 包装、或 `Name: Value` 行（值里的冒号不会被切开）。
+别名 `headersHelper`（Claude Code）与 `http_headers_helper`（Codex）同样可用，从那边拷配置不用改字段名；
+`headersCommandTimeout` 默认 10s。语义上有四条要记住：
+
+- **每次连接只跑一次**，结果与静态 `headers` 合并（**动态的赢**，它是更新鲜的凭据）；HTTP 协议头（`content-type`/
+  `accept`/`mcp-protocol-version`/`mcp-session-id`）优先级最高，配置改不动它们。
+- **401/403 会重跑一次，但只有头真的变了才重试请求**（命令每次都返回同一个 token 就不会白重试一遍）。旧版 SSE
+  只重建 POST，不重建 GET 长连接。
+- **失败不致命**：命令超时/非零退出/输出不可解析时退回静态 headers 继续连，原因记进诊断；真被拒时错误信息里
+  会带上这条原因（否则你只看到 401，以为是 token 过期）。
+- **绝不记录头的值**：诊断只输出头的**名字**（`头命令取到 1 个头（Authorization）`），解析失败也不回显命令输出
+  —— 输出可能整段都是密钥。`/mcp <server>` 里显示的是命令本身（你自己的配置），不是取回来的值。
+
+没有浏览器弹窗、不写任何凭据存储：token 的生命周期完全归那条命令管（钥匙串、vault、`opencode auth` 都行）。
+只支持 OAuth（不接受静态 token）的 server 目前用不了，要支持得上第二档（OAuth 2.1 + PRM + DCR + 回调服务器），
+那基本就是 pi-mcp-adapter 的领域。
+
+三个命令入口：`/mcp` 看状态（server / 工具数 / 版本 / 配置来源），`/mcp reload` 改完配置不用重启 pi，
+`/mcp <server>` 看单个 server 的详情与最近诊断。不开 pi 想验证配置就 `npm run mcp:probe -- <server> [tool]`
+（用的是扩展里同一份客户端，通了 pi 里就通；**本机 Node 22 专用** —— 它直接 import `.ts`，靠 Node 的类型擦除，
+与 `npm run usage` 一样不在 Node 20 的路由器上跑）。
+
+改之前的约束：
+
+- **传输是自己实现的**（`protocol.ts` + `client.ts`），**不依赖 `@modelcontextprotocol/sdk`** —— 扩展目录
+  里没有 node_modules，引 SDK 就得给 `~/.pi/agent/extensions/mcp/` 铺依赖。协议面只做
+  initialize / notifications/initialized / tools/list / tools/call，其余（OAuth、sampling、elicitation、
+  progress、`tools/list_changed` 热更新）**刻意不做**；服务端反向请求一律回 `-32601`，不留傻等的对端。
+- **诊断输出只进内存环形缓冲**（每个 server 20 行，`/mcp <server>` 看），**不写 stdout/stderr** ——
+  interactive pi 里往 stderr 写会直接糊在输入框上（`subagent-log-guard/` 就是为这个存在的）。
+- **会话开始时连接、结束时断开**。工具表必须先 `tools/list` 才能注册，所以不能等首次调用才连；
+  多个 server 并行握手，单个失败只影响它自己（启动时给一条 warning，不阻塞会话）。
+- **工具输出必须截断**：沿用 pi 内建工具的 50KB / 2000 行上限（`tools.ts` 的头截断），图片块不计入、
+  也不被截掉。MCP 的 `resource` / `resource_link` / `audio` 会降级成一行文本说明 —— pi 的 tool content
+  只认 `text` 与 `image`，原样塞进去会被静默丢掉。
+- **工具名有 64 字符硬上限**（Anthropic / OpenAI 的 tool 名限制）：超长时截断工具名并接 FNV-1a 哈希后缀，
+  保证截断后仍可区分。改命名规则时 `tools.test.ts` 的哈希稳定性用例会拦住手滑。
+- **头命令的设计约束（`headers-command.ts`）**：① 子进程**刻意不 unref** —— 它是我们正在等的结果，unref
+  会让 `pi -p` / probe 这类短命进程先退出、promise 永远不 resolve（单测当场拦到过）；② 诊断只能用
+  `describeHeaderNames` 输出**头名**，头的值与解析失败的原文一律不打印（命令输出可能整段是 token）；
+  ③ 命令失败不当致命错误，退回静态 headers 并把原因带进最终错误信息，否则用户只看到 401 而不知道是命令挂了；
+  ④ 401/403 重跑命令后**只在头真的变化时**重试（headless 与交互两种模式行为要一致）。
+
 ## 自写扩展：改之前要知道的
 
 每个扩展的完整理由都写在**它自己的文件头注释**里，这里只列「不在文件里、但改错了会静默坏掉」的约束。
@@ -282,6 +347,7 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 | `exit-command.ts` | 整行 `exit` / `quit` 优雅退出（只在 TUI 模式；`--print` 里仍是普通 prompt） |
 | `init-command.ts` | Claude Code 式 `/init`：`CLAUDE.md` → 否则 `AGENTS.md` → 否则新建 `AGENTS.md` |
 | `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
+| `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
 
 ### 跨扩展 / 跨文件
 
@@ -294,10 +360,22 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
   探针 widget，遍历 `tui.children` 找到「子树里装着这个探针」的顶层 child，再把它移到末尾。
   探针本身必须**显式传 `placement: "belowEditor"`**：漏写（默认落到 `aboveEditor`）会把「上方」那个容器
   整块搬走，而且没有任何运行时报错（实测踩到过，代码里只有一行注释提醒）。找不到容器就什么都不做。
+- **「内置 statusline 露出来」有两个窗口，用了两套办法**：① **启动窗口**（进程刚起来 → `session_start` 轮到我们。
+  实测：内置 footer 在 ~470ms 出首帧，我们的 statusline 到 ~1.2s 才装上）没有上一帧可重放，由
+  `statusline/footer-suppress.ts` 在**扩展工厂**里（此时 TUI 还没 new 出来）接管 `FooterComponent.prototype.render`，
+  窗口内渲染 0 行 —— 底部留白，而不是先画一个马上要变的默认状态行；我们的 footer 挂上的一刻交还，
+  30s 兜底（`mcp` 握手 20s 上限也在这个窗口里，因为 `Runner.emit()` 串行 await，字母序在前的 `mcp` 先跑）。
+  ② **换会话窗口**由 `footer-guard.ts` 重放上一帧压住（有旧状态可留，比留白更好）。两个开关独立：
+  `PI_STATUSLINE_BOOT_SUPPRESS=off` / `PI_STATUSLINE_FREEZE=off`。
+  补丁打的是包根导出的 `FooterComponent` —— 实测（0.85.1 bundle 形态，A/B pty 捕获，两次只差这一处）
+  它**就是** pi 自己 `new` 出来那个类：临时改成返回 `["PROBE-FOOTER-MARKER"]` 时屏幕上真的出现这一行，
+  关掉开关后内置 footer 照旧。
 - **`statusline/footer-guard.ts` 与 `startup-logo/header-guard.ts` 是同一套机制的两份**（接管容器的
   `render`、重放上一帧的行），互不依赖、符号键不同。原因是 pi 换会话时 `resetExtensionUI()` 会
   **无条件**把内置 footer / header 装回去并清空所有 `setStatus`，而扩展侧没有比 `session_start`
   更早的钩子 —— 所以保证只能挪到「出帧那一刻」。`PI_STATUSLINE_FREEZE=off` 关掉冻结。
+  （启动窗口那个留白补丁**也可以**这样扩到 header 上，`startup-logo/` 目前没做：启动那一段顶部
+  仍会先闪一下内置 header 再换成 logo。）
 
 ### pi 平台的坑
 
@@ -323,7 +401,10 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
   一条 assistant 消息来断言）。反过来，patch `node_modules` 里那份**毫无效果且没有任何报错**（实测）。
   同一个原因的另一面：`@earendil-works/pi-coding-agent` 在 bundle 形态下被 alias 到 `dist/index.js`
   （未打包的那套模块图），所以包根的状态型 API（`keyHint` / `keyText`）拿到的是另一个副本 ——
-  即上面那条“绝不能 import”的由来。
+  即上面那条“绝不能 import”的由来。**这一条对「类」不成立（实测）**：`statusline/footer-suppress.ts`
+  从包根 import `FooterComponent` 打原型，A/B 捕获证明补丁落在 pi 自己 new 的那个实例上（见「跨扩展」一节），
+  而 `dist/bundle/index.js` 确实是从 `./chunks/chunk-*.js` re-export 的。`keyHint` / `keyText` 的现象仍是事实，
+  但按「别在模块顶层读 pi 的状态」理解即可：打类方法没事，**读状态**别放在模块顶层。
 - **`keyHint` / `keyText` 绝不能 import**（`bash-command-collapse.ts` 与 `read-path-collapse.ts`
   都踩过：扩展拿到的是 npm/dist 副本，前者抛 `Theme not initialized`、后者返回空串）。要从
   `~/.pi/agent/keybindings.json` 读键名。`startup-logo` 的提示行是唯一从包根 import 的，它整行包了 try/catch。
@@ -411,8 +492,10 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 没有安装脚本，所以同步是**双向手动**的：
 
 - **改了本机全局配置 / 扩展** → 手动把 `~/.pi/agent/` 下的 `AGENTS.md` / `settings.json` / `models.json` /
-  `pi-statusline.json` / `web-search.json` / `extensions/*` / `themes/*.json` 拷回本目录，
+  `mcp.json` / `pi-statusline.json` / `web-search.json` / `extensions/*` / `themes/*.json` 拷回本目录，
   保持模板与实际环境一致 —— 只有上文列的那三处是刻意差异，其余应当逐字节相同。
+  （`mcp.json` 里是**本机 MCP 可执行文件的绝对路径**，与 `models.json` 的 `baseUrl` 同类：入库作模板，
+  换机器照着改 `command`。）
 - **换机器 / 重装** → 按前面的 `cp` 装回去，再 `pi install npm:pi-web-access` 与 `pi install npm:pi-subagents`。
 - **改完扩展的最低验证**是真起一次 pi（见上文「pi 平台的坑」——`node --test` 不校验语法）。
 - **面向本机 pi 的写法约定**：纯逻辑模块刻意**不 import pi / pi-tui**（鸭子类型 + 结构化最小接口），
@@ -420,6 +503,8 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
   `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`
   都按这个约定拆出了可单测的伴生模块
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
+  `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，
+  只有 `index.ts` 接线 —— 所以整条 MCP 链路（含真实 spawn 子进程）都能 `node --test` 覆盖。
 - **`AGENTS.md` 自设 8000 字符预算**（当前 **7996 字符** ≈ 1999 tokens，落在盘上是 8028 字节，余量仅 4 字符）：
   pi 本身没有上限 —— 0.85.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
   9500 字符处仍被模型逐字读回；7400 那条是自设的每请求固定开销预算，已为 skill 优先级与 shell 卫生

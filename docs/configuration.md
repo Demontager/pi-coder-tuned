@@ -71,7 +71,7 @@ Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and 
 
 Provider and model registrations are machine-specific: this setup's `litellm-any` provider points at a LiteLLM gateway on `127.0.0.1:996` (LAN address on other machines), carries a compat configuration, and registers six model ids that must match the gateway's routes exactly. Shipping it would be wrong on every other machine, so it is excluded.
 
-`models.json` is the only file excluded, and the three settings keys that select a model were removed along with it:
+The three settings keys that select a model were removed along with it:
 
 | Removed key | Why |
 | --- | --- |
@@ -88,6 +88,14 @@ Everything else in `settings.json` is byte-for-byte the author's file. If you ru
 ```
 
 For how providers and thinking levels work, see pi's own `docs/models.md` and `docs/custom-provider.md`.
+
+### `mcp.json`
+
+The MCP server list is machine-specific in the same way: the snapshot's only entry points at the absolute path of a local server executable, which exists on one machine only.
+
+MCP servers are configured in `~/.pi/agent/mcp.json` and/or the nearest project `.mcp.json`, in Claude Code's shape. Neither file is shipped. With no config at all the `mcp/` extension loads, registers no tools and says so in `/mcp`. The format — including `headersCommand` for dynamic auth headers — is documented in [extensions.md](extensions.md) and, in more detail, in the [Chinese handbook](handbook.zh.md).
+
+So two snapshot config files are deliberately left out of this package: `models.json` (gateway registrations) and `mcp.json` (paths of local MCP server executables). `AGENTS.md` and `settings.json` are shipped, and `settings.json` is the only shipped config file that differs from the snapshot — the three removed model keys.
 
 ### `pi-statusline.json` is legacy
 

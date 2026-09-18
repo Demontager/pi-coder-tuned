@@ -9,6 +9,7 @@ These come from pi's extension discovery and they decide where a file may live:
 | `extensions/*.ts`, `extensions/*.js` | **Yes** — top-level files only. |
 | `extensions/<dir>/index.ts` or `index.js` | **Yes**. |
 | `extensions/<dir>/*.ts` without an `index` | No. Helper modules, imported by other extensions. |
+| `extensions/<dir>/<subdir>/*` | No — nested directories are never scanned, which is how `mcp/fixtures/` ships test servers. |
 | `extensions/<dir>/*.test.ts` | No — only the directory's `index.ts` is loaded. |
 | `extensions/*.test.ts` (top level) | **Yes** — pi would try to load it. Never put tests at the top level. |
 
@@ -22,10 +23,18 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 454 tests, ~72 s
+npm test        # node --test — 596 tests, ~73 s
 ```
 
-The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts` and the rest can run under plain `node --test`.
+Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
+
+```bash
+node --test --test-concurrency=4      # 596 tests, ~74 s
+```
+
+The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
+
+The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 
 One test file goes the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match). It locates pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and it **skips** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point it at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 
@@ -51,7 +60,7 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 22 loaded by reading the startup list:
+Then check that all 23 loaded by reading the startup list:
 
 ```
 [Extensions]
@@ -78,7 +87,8 @@ Everything below is documented because it cost real debugging time. The full rea
 - **A `ctx` captured before a session replacement goes stale**, and reading `ctx.ui` throws `This extension ctx is stale after session replacement or reload`. The throw happens when you read the property, before any widget `render()` runs, so a `try/catch` inside `render()` cannot catch it. A timer that outlives the session takes the host process down with it (`exit=1`). `simple-task/` and `working-indicator/` therefore all three: catch inside the callback and stop the timer, wrap every `ctx.ui` access, and stop timers in `session_shutdown`.
 - **A throwing `renderCall` is silently swallowed** and replaced by `createCallFallback()`: something disappears from the UI and nothing is logged.
 - **Tool registration is first-registration-wins per name.** A second extension registering `bash` is ignored without a warning — which is why everything that shapes `bash` rendering lives in one file.
-- **`keyHint` and `keyText` must not be imported from the package root.** In the bundled CLI, `@earendil-works/pi-coding-agent` is aliased to a different module instance, so the extension gets another copy of the stateful APIs (`Theme not initialized`, or an empty string). Read key names from `~/.pi/agent/keybindings.json` instead. `startup-logo` is the one file that imports from the package root, wrapped in a `try/catch`.
+- **Reading pi state at module top level breaks; patching a class prototype does not.** In the bundled CLI, `@earendil-works/pi-coding-agent` resolves through the loader's `virtualModules` to the same chunk `interactive-mode.js` uses — but importing `keyHint`/`keyText` yields another module instance's state (`Theme not initialized`, or an empty string), so key names are read from `~/.pi/agent/keybindings.json` instead. The rule is about *state*, not classes: `statusline/footer-suppress.ts` imports `FooterComponent` from the package root and patches `prototype.render`, and an A/B capture shows the patch landing on the instance pi itself constructs. `startup-logo` still wraps its package-root import in a `try/catch`.
+- **Extensions are loaded before pi constructs the TUI.** That ordering is what makes the footer patch above possible at factory time, and it sets the price: anything installed that early must be reversible. `/reload` re-evaluates the module (the patch key is a `Symbol.for` in the global registry so a new instance releases the old one), and the 30 s cap covers the case where the handoff never happens.
 - **Patching a pi-tui prototype works; patching the copy in `node_modules` does nothing** — silently. pi's bundled loader points extensions at its own inlined namespace, which is why `fenceless-code-block/` can patch `Markdown.prototype` and `index.test.ts` can assert it with pi's own renderer.
 - **`usage.output` is always `0` while streaming**, so token counts must be estimated from streamed characters.
 - **`renderResult` receives no `isError`**; read it from `context`. Reading `result.isError` silently paints failures as successes.
@@ -96,24 +106,29 @@ A new tool name and a new command name must not collide with any other extension
 
 ## Keeping this package in sync
 
-This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with two deliberate deltas:
+This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with three deliberate deltas:
 
-1. `config/models.json` is not shipped, and the three model-selection keys were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`). See [configuration.md](configuration.md#what-is-not-shipped).
+1. `config/models.json` and `config/mcp.json` are not shipped, and the three model-selection keys were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. See [configuration.md](configuration.md#what-is-not-shipped).
 2. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
+3. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
 
-So when the extensions change upstream:
+So when the snapshot changes upstream:
 
 ```bash
 SRC=/Users/bachi/jaylli/litellm-any/clients/pi   # the snapshot the extension lives in
 DST=/Users/bachi/jaylli/pi-coder                 # this package
 cp -R "$SRC/extensions/." "$DST/extensions/"
 cp "$SRC/themes/"*.json "$DST/themes/"
-diff -r "$SRC/extensions" "$DST/extensions"          # expect: no output
+cp "$SRC/AGENTS.md" "$DST/config/AGENTS.md"
+cp "$SRC/README.md" "$DST/docs/handbook.zh.md"   # the handbook is the snapshot README, verbatim
+diff -r "$SRC/extensions" "$DST/extensions"     # expect: no output
+diff -r "$SRC/themes" "$DST/themes"              # expect: no output
+diff "$SRC/AGENTS.md" "$DST/config/AGENTS.md"    # expect: no output
 npm test
-# bump "version" in package.json, add a CHANGELOG entry
+# bump "version" in package.json, add a CHANGELOG entry, update the counts in README.md and docs/
 ```
 
-Keep the copies byte-identical. The only files that should ever differ from the snapshot are `config/settings.json` (the removed model keys) and anything under `docs/`.
+Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot, and `diff` on it is expected to show exactly the three removed model keys.
 
 ## Publishing
 
@@ -164,7 +179,7 @@ Once the package exists on npm, two optional additions become safe (they render 
    ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)
    ```
 
-2. **A preview asset**, which is what makes a TUI package legible in the gallery. Upload a screenshot (PNG/JPEG/GIF/WebP) or a screencast (MP4 only) — a `github.com/user-attachments/...` URL from a README upload works — then declare it:
+2. **A preview asset** — done: `package.json` declares `pi.image` pointing at `assets/ayu1.png` through a raw GitHub URL, and the README shows both `ayu` captures. The PNGs live in `assets/`, which is not in the npm `files` list, so they stay out of the tarball; the URL only resolves once `assets/` has been pushed to `main`. To use a video instead, upload an MP4 (a `github.com/user-attachments/...` URL works) and declare `pi.video`:
 
    ```json
    "pi": {

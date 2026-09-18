@@ -1,6 +1,6 @@
 # Extensions reference
 
-22 extensions load from this package. Twelve are single files in `extensions/`, ten are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
+23 extensions load from this package. Twelve are single files in `extensions/`, eleven are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -17,6 +17,9 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/clear` | `clear-command` | — Alias of `/new`. |
 | `/exit` | `exit-command` | — Alias of `/quit` (the argument-free form of the quit words). |
 | `/init` | `init-command` | `[file.md] [extra instructions]` |
+| `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
+| `/mcp reload` | `mcp` | — Re-read the config files, reconnect and re-register tools. |
+| `/mcp <server>` | `mcp` | — One server's details and its recent diagnostics. |
 | `/read-collapse` | `read-path-collapse` | `off` \| `on` |
 | `/recap` | `recap` | — Summarizes the conversation now. |
 | `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
@@ -83,6 +86,7 @@ Replaces pi's footer with one status line and one status row:
 The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The second row renders whatever other extensions pass to `ctx.ui.setStatus()` (this is where `cwd-statusline`, `simple-task` and `rewind` write). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
 
 - `PI_STATUSLINE_FREEZE=off` — disable the footer freeze. On every session switch pi unconditionally restores its builtin footer and clears all `setStatus` values, and no extension hook runs before that frame. The guard replays the previous frame's lines instead, which removes a visible flash. Turning it off restores the flash.
+- `PI_STATUSLINE_BOOT_SUPPRESS=off` — disable boot-window suppression. pi's built-in footer exists before the first extension runs (measured on this setup: its first frame lands at ~480 ms, this statusline at ~1.2 s), so without it you see the default state line and then watch the statusline replace it. [`statusline/footer-suppress.ts`](../extensions/statusline/footer-suppress.ts) patches `FooterComponent.prototype.render` at **extension-factory time** — before pi's TUI is constructed — to return zero lines, and releases it the moment our footer is installed. A 30 s cap releases it anyway when the handoff never happens (an extension error, or a non-TUI mode), so the bottom is never left permanently empty. The two windows have independent switches because they need different remedies: this one has no previous frame to replay, the freeze above has one.
 - No config file. Colors come from `theme.fg(...)`, so `/theme` repaints on the next frame.
 
 ### `cwd-statusline.ts` — full working directory
@@ -222,6 +226,34 @@ The labels `Other` and `Type something.` are reserved — validation rejects the
 - `PI_ASK_USER_QUESTION=off` — do not register the tool.
 - `/ask` previews the dialog with a demo questionnaire.
 
+### `mcp/` — MCP servers as tools
+
+Every MCP tool is registered as a pi tool directly, named `mcp__<server>__<tool>` — Claude Code's convention, so prompts, skills and permission rules written for it keep working. There is deliberately no single "mcp" proxy tool: direct tools are friendlier to the model, and the only cost is a longer system prompt.
+
+Configuration follows Claude Code's `.mcp.json` shape, read from two places: the global `~/.pi/agent/mcp.json`, plus the **first** `.mcp.json` found walking up from the working directory (at most 32 levels). Project entries override global ones by name, so an existing repo-local `.mcp.json` works as it is.
+
+| Field | Transport | Notes |
+| --- | --- | --- |
+| `command` / `args` / `env` / `cwd` / `timeout` | stdio | `timeout` is the per-call budget in milliseconds (default `120000`). |
+| `url` / `headers` | HTTP | Streamable HTTP, or legacy HTTP+SSE when `type: "sse"`. |
+| `headersCommand` | HTTP | Dynamic auth headers: the command's output becomes headers. |
+| `enabled: false`, `disabled: true` | either | Keep the entry for `/mcp`, do not connect. |
+
+String fields expand `${VAR}` and `${VAR:-default}`. Sessions connect every enabled server in parallel at `session_start` and close them at `session_shutdown`; handshakes have their own 20 s cap and a server that fails costs one warning, not the session.
+
+**`headersCommand`** is the cheap half of OAuth: most SaaS MCP servers also accept a static token (a GitHub PAT, `CONTEXT7_API_KEY`, a Sentry or Figma token), so fetching one with a command avoids implementing OAuth 2.1. Three output shapes are accepted — a flat JSON object, a `{"headers": {...}}` wrapper, or `Name: Value` lines — and `headersHelper` (Claude Code) and `http_headers_helper` (Codex) are aliases, so a copied config needs no field edits. `headersCommandTimeout` defaults to 10 s.
+
+Four semantics worth knowing:
+
+- It runs **once per connection**, merged over the static `headers` — the dynamic value is the fresher credential and wins. HTTP protocol headers (`content-type`, `accept`, `mcp-protocol-version`, `mcp-session-id`) cannot be set from config.
+- A **401/403 re-runs the command once, but the request is retried only if the headers actually changed**, so a command that returns the same token does not pay for a second round trip. On the legacy SSE transport only the POST is rebuilt, not the GET stream.
+- **Failure is not fatal.** A timeout, a non-zero exit or unparseable output falls back to the static headers and is recorded in the diagnostics; a later genuine rejection carries that reason in its error message, so a dead command is not mistaken for an expired token.
+- **Header values are never logged or displayed.** Diagnostics name headers only, and a parse failure does not echo the command output, which may be a secret in full. `/mcp <server>` shows the command from your config, not what it returned.
+
+The wire layer is implemented here (`protocol.ts`, `client.ts`) and does not use `@modelcontextprotocol/sdk` — the extension directory has no `node_modules`. Only `initialize`, `notifications/initialized`, `tools/list` and `tools/call` are implemented; OAuth, sampling, elicitation, progress and `tools/list_changed` are deliberately absent, and server-to-client requests are answered `-32601` instead of being left to hang. Tool output is truncated at pi's built-in 50 KB / 2000-line limit, and MCP `resource`, `resource_link` and `audio` blocks degrade to a text note, because pi's tool content accepts only text and images.
+
+Diagnostics go to a per-server in-memory ring buffer (20 lines kept, the most recent 8 printed by `/mcp <server>`) and never to stdout or stderr, which in an interactive session would land on top of the editor — the reason `subagent-log-guard/` exists. There is no environment switch: with no config file the extension loads, registers nothing and says so in `/mcp`.
+
 ### `subagent-log-guard/` — stderr guard
 
 `pi-subagents` prints launch diagnostics such as `[pi-subagents] Agent 'researcher': host runtime tool availability omitted [...]` with `console.warn`. In interactive mode pi does not take over stdout/stderr, so that text is written straight into the alternate screen at the hardware cursor — right on top of the editor row — and the differential renderer will not repaint it. The result is permanent garbage across the input box.
@@ -258,6 +290,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_READ_COLLAPSE=off` | on | `read-path-collapse` | Keep pi's built-in `read` title row. |
 | `PI_SPINNER_COLOR_HOLD` | `19` | `working-indicator` | Frames per color in the spinner cycle. |
 | `PI_SPINNER_RAINBOW=off` | on | `working-indicator` | Disable the rainbow spinner. |
+| `PI_STATUSLINE_BOOT_SUPPRESS=off` | on | `statusline` | Do not silence pi's built-in footer during the boot window, before this statusline is installed. |
 | `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
 | `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
 | `PI_WORKING_SUMMARY=off` | on | `working-indicator` | Disable the prompt summary line. |
@@ -272,6 +305,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
+- **MCP tool names are namespaced.** `mcp__<server>__<tool>` collides with neither the builtins nor the extensions' own tools; names past 64 characters are truncated with a hash suffix, which stays inside the tool-name limit the model APIs enforce while keeping truncated names distinguishable.
 - **Three extensions read theme tokens that pi's schema does not define** (`toolDiffAddedBg`, `toolDiffRemovedBg`, `bashOutput`) and degrade quietly when a theme omits them.
 
 ## State on disk
@@ -283,6 +317,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `~/.pi/folder-history/<path-with-dashes>.jsonl` | `folder-history` | Command history per working directory. |
 | Session log (via `appendEntry`) | `simple-task` | Task list state; discarded with the session, never written to the repo. |
 | In memory only | `recap` | The current summary; lost on `/new` or `/resume` by design. |
+| In memory only | `mcp` | Per-server status, the registered tool table and a 20-line diagnostic ring buffer per server. Config files are read, never written. |
 | Nothing | everything else | The remaining extensions are pure display or event wiring. |
 
 ## Adding, disabling and removing extensions

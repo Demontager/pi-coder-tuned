@@ -51,7 +51,7 @@ Expected visible results of a successful load:
 - The header is replaced by a logo with the version and the shortened working directory (`startup-logo`).
 - The footer is a single statusline line (`statusline`), plus a second line with the working directory (`cwd-statusline`).
 - The editor shows a `❯ ` prompt (`prompt-editor`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/read-collapse` and the `/bash-*` family all exist. Type `/` and scroll the command list.
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/read-collapse`, `/mcp` and the `/bash-*` family all exist. Type `/` and scroll the command list.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 
@@ -79,6 +79,8 @@ cp "$PKG/config/web-search.json" ~/.pi/agent/web-search.json    # required by pi
 mkdir -p ~/.pi/agent/themes
 cp "$PKG/themes/"*.json          ~/.pi/agent/themes/            # optional: themes are already loaded from the package
 ```
+
+`config/mcp.json` is **not** shipped, for the same reason as `config/models.json`: its entries are absolute paths of local MCP server executables. To use MCP servers, create `~/.pi/agent/mcp.json` (global) or a project `.mcp.json` yourself — the `mcp/` extension reads both, and registers no tools until one exists. See [configuration.md](configuration.md#mcpjson).
 
 `config/settings.json` also overwrites your settings wholesale — read [configuration.md](configuration.md) first, because it pins `pnpm` in `npmCommand` and disables pi's built-in double-Escape action.
 
