@@ -7,46 +7,19 @@ This is a working setup, not a collection of demos. Every extension is used dail
 - Repository: <https://github.com/jayli/pi-coder>
 - Issues: <https://github.com/jayli/pi-coder/issues>
 
-<p align="center"><img src="https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif" alt="Pi working a four-item task list: task_set opens the list, server.js is switched from HTTPS to HTTP, with the thinking line, collapsed bash runs, inline diff and task progress in the statusline" width="600"></p>
+**Watch it work** — [demo-server-https.gif](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif): a four-item task list worked end to end, with the thinking line, collapsed bash runs, inline diff and statusline progress. GitHub will not embed it (7.3 MB, over the 5 MiB limit of the image proxy it routes every off-domain image through), so the link opens it in the browser.
 
 ## What it looks like
 
-A startup header, a one-line statusline, a `❯` prompt, and a diff renderer that paints whole lines. Captured from pi 0.85.1 at 108 columns, with the resource-list sections elided and the Nerd Font branch glyph dropped (it does not survive a terminal capture):
+A startup header, a one-line statusline, a `❯` prompt, and a diff renderer that paints whole lines.
 
-```
- █████████
- ███   ███     pi v0.85.1
- ██████   ███  ~/jaylli/pi-coder
- ███      ███
-
-escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash
-
-[Extensions]
-  ask-user-question, auto-default-model, bash-command-collapse.ts, below-editor-after-statusline.ts,
-clear-command.ts, cwd-statusline.ts, exit-command.ts, fenceless-code-block, folder-history.ts,
-init-command.ts, mcp, prompt-editor.ts, read-path-collapse.ts, recap, rewind, simple-task, startup-logo,
-statusline, subagent-log-guard, theme-command.ts, thinking-collapse.ts, tool-diff.ts, working-indicator
-```
-
-```text
-────────────────────────────────────────────────────────────────────────────────────
-❯
-────────────────────────────────────────────────────────────────────────────────────
- ⚡️ claude-opus-4-8/medium | Ctx 0.0% | main | (+0,-0)
- 📁 /Users/bachi/jaylli/pi-coder | ◆ 1 checkpoint
-```
-
-The startup list also loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`cwd-statusline`, `simple-task`, `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
+The startup list loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`cwd-statusline`, `simple-task`, `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
 
 Colors come from the active theme rather than from hardcoded values, so `/theme` repaints everything on the next frame.
 
 ### The `pi-coder-ayu` theme
 
-Two captures in `pi-coder-ayu`:
-
-![pi-coder-ayu theme, first capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png)
-
-![pi-coder-ayu theme, second capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu2.png)
+<img src="https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png" alt="pi-coder-ayu theme" width="700">
 
 ## Install
 
@@ -100,6 +73,8 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 ### Themes
 
 `pi-coder-summer-night` (the default here), `pi-coder-catppuccin` and `pi-coder-ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. Details in [docs/themes.md](docs/themes.md).
+
+All three are laid out side by side in the [palette reference](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/pi-coder-palettes.html): every variable and slot assignment, plus a terminal preview you can switch between the three themes.
 
 ### Commands
 
@@ -157,6 +132,7 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
 | [docs/extensions.md](docs/extensions.md) | Reference for all 23 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
+| [Palette reference](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
 | [docs/development.md](docs/development.md) | Running the 596 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
