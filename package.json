@@ -45,7 +45,7 @@
     "themes": [
       "./themes"
     ],
-    "image": "https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png"
+    "image": "https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

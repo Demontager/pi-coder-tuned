@@ -7,6 +7,8 @@ This is a working setup, not a collection of demos. Every extension is used dail
 - Repository: <https://github.com/jayli/pi-coder>
 - Issues: <https://github.com/jayli/pi-coder/issues>
 
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif" alt="Pi session switching server.js to HTTPS: thinking line, read and edit tool calls, inline diff renderer and statusline" width="600"></p>
+
 ## What it looks like
 
 A startup header, a one-line statusline, a `❯` prompt, and a diff renderer that paints whole lines. Captured from pi 0.85.1 at 108 columns, with the resource-list sections elided and the Nerd Font branch glyph dropped (it does not survive a terminal capture):

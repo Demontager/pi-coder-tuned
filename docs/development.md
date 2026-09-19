@@ -179,7 +179,7 @@ Once the package exists on npm, two optional additions become safe (they render 
    ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)
    ```
 
-2. **A preview asset** — done: `package.json` declares `pi.image` pointing at `assets/ayu1.png`, and the README shows both `ayu` captures. The PNGs live in `assets/`, which is not in the npm `files` list, so they stay out of the tarball. They are served through jsDelivr (`https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/...`) rather than `raw.githubusercontent.com`, which timed out intermittently from this machine; either form needs `assets/` to be on `main`. To use a video instead, upload an MP4 (a `github.com/user-attachments/...` URL works) and declare `pi.video`:
+2. **A preview asset** — done: `package.json` declares `pi.image` pointing at `assets/demo-server-https.gif`, the README's hero capture, and the README also shows both `ayu` captures. The assets live in `assets/`, which is not in the npm `files` list, so they stay out of the tarball. They are served through jsDelivr (`https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/...`) rather than `raw.githubusercontent.com`, which timed out intermittently from this machine; either form needs `assets/` to be on `main`. jsDelivr does not serve GitHub files over 20 MB, so anything near that size has to be compressed first — `gifsicle -O3 --lossy=20` took the hero GIF from 20.2 MB to 11.2 MB at 0.99 SSIM measured at the README's 600 px display width. To use a video instead, upload an MP4 (a `github.com/user-attachments/...` URL works) and declare `pi.video`:
 
    ```json
    "pi": {
