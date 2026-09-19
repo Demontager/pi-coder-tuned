@@ -1,6 +1,6 @@
 {
   "name": "@bachi/pi-coder",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "A complete Pi coding-agent environment: 23 TUI extensions, 3 themes and the global config files that make them work together.",
   "type": "module",
   "license": "MIT",
