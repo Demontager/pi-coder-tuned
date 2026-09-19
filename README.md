@@ -1,3 +1,5 @@
+**Live demo** — the three palettes with a switchable terminal preview: <https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html>
+
 # @bachi/pi-coder
 
 A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **23 extensions**, **3 themes**, and the global config files that make them work together.
