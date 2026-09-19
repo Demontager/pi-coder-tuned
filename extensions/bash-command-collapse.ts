@@ -148,8 +148,8 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
 `bashOutput` 是本仓库自造的 token（pi 官方 schema 里没有，与 `toolDiffAddedBg` 那两个
 同一条路：TypeBox 校验对未知 key 放行、`createTheme()` 把它们收进前景表）。**主题没定义它
 就什么都不做**（探测方式是真调一次 `getFgAnsi()`，pi 对未知 token 抛
-`Unknown theme color: …`），所以内置主题与 summer-night / catppuccin 照旧走 `toolOutput`，
-目前只有 `ayu.json` 定义了这个 token。展开态（ctrl+o）同样是输出正文，一并生效。
+`Unknown theme color: …`），所以内置主题与 pi-coder-summer-night / pi-coder-catppuccin 照旧走 `toolOutput`，
+目前只有 `pi-coder-ayu.json` 定义了这个 token。展开态（ctrl+o）同样是输出正文，一并生效。
 
 ## 染色块的上下边界空行
  *
@@ -1005,7 +1005,7 @@ function stateBgFn(theme: any, isPartial: boolean, isError: boolean) {
  *      这次调用里 `theme.fg("toolOutput", …)` 烘焙成字符串，所以 try/finally 里换进换出
  *      不会有第二个渲染插进来；换颜色也**不会**泄漏给其他工具（read / grep 的输出是它们
  *      自己的渲染器画的，不在这个窗口里）。
- *   ② **主题里没有 `bashOutput` 就什么都不做**（内置主题与 summer-night / catppuccin 都没
+ *   ② **主题里没有 `bashOutput` 就什么都不做**（内置主题与 pi-coder-summer-night / pi-coder-catppuccin 都没
  *      这个 token）—— 探测方式是真调一次 `theme.getFgAnsi()`，pi 对未知 token 抛
  *      `Unknown theme color: …`。
  *   ③ `fgColors` 是 pi `Theme` 类的公开字段（`Map<string, string>`，存的是**已解析的

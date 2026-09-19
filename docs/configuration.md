@@ -40,7 +40,7 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 | Key | Value here | Notes |
 | --- | --- | --- |
 | `lastChangelogVersion` | `"0.85.1"` | Internal marker for "last changelog the user saw". It only suppresses a changelog notice; harmless to keep or delete. |
-| `theme` | `"summer-night"` | Must equal the `name` field inside `themes/summer-night.json`, not just the file name. |
+| `theme` | `"pi-coder-summer-night"` | Must equal the `name` field inside `themes/pi-coder-summer-night.json`, not just the file name. |
 | `defaultThinkingLevel` | `"xhigh"` | Startup thinking level. Not available on every model; see `thinkingLevelMap` in your `models.json`. |
 | `compaction.enabled` / `reserveTokens` / `keepRecentTokens` | `true` / `52429` / `20000` | `keepRecentTokens` is pi's default; `reserveTokens` is raised well above pi's `16384` default because this setup's models stream long thinking blocks. |
 | `npmCommand` | `["pnpm", "--config.node-linker=hoisted"]` | See above. Machine-specific. |

@@ -1,12 +1,12 @@
 # Themes
 
-Three themes ship with this package: `summer-night` (the one `config/settings.json` selects), `catppuccin` and `ayu`.
+Three themes ship with this package: `pi-coder-summer-night` (the one `config/settings.json` selects), `pi-coder-catppuccin` and `pi-coder-ayu`. All three carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`.
 
 ## Switching themes
 
 Two ways, both with the same result:
 
-- `/theme` — the picker from `theme-command.ts`. Arrow keys preview live, Enter persists to `settings.json`, Esc leaves settings untouched. `/theme summer-night` switches directly.
+- `/theme` — the picker from `theme-command.ts`. Arrow keys preview live, Enter persists to `settings.json`, Esc leaves settings untouched. `/theme pi-coder-summer-night` switches directly.
 - `/settings` → Theme — pi's built-in path, which also mixes in the light/dark auto modes.
 
 pi loads themes from three places:
@@ -21,19 +21,19 @@ The copy commands in [installation.md](installation.md#apply-the-global-config-f
 
 ## The three themes
 
-### `summer-night`
+### `pi-coder-summer-night`
 
-The author's own palette and the current default: a near-black blue base with high-contrast accents. Body text sits at roughly 8.4–9.2:1 on panels. Its greys are deliberately dimmer than catppuccin's — `muted` around 3.3–3.8:1 and `dim` around 2.2–2.6:1 — so comments, `Think:` rows and settings hints read faintly. If that is too faint, raise `vars.muted` and `vars.dimmed`.
+The author's own palette and the current default: a near-black blue base with high-contrast accents. Body text sits at roughly 8.4–9.2:1 on panels. Its greys are deliberately dimmer than pi-coder-catppuccin's — `muted` around 3.3–3.8:1 and `dim` around 2.2–2.6:1 — so comments, `Think:` rows and settings hints read faintly. If that is too faint, raise `vars.muted` and `vars.dimmed`.
 
 `text` is `""`, the terminal's own default foreground. Three values are literals rather than `vars` references: `syntaxComment` (`#95a1b0`), `thinkingXhigh` and `thinkingMax` (both `#4b7cc2`). The Chinese handbook still describes this file as having no literal colors — the file has since changed; trust the file.
 
-### `catppuccin`
+### `pi-coder-catppuccin`
 
 A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions). The palette lives in `vars` (36 of them) and `colors` only references it. Two entries are empty strings meaning "terminal default": `text` and `syntaxVariable`. The upstream file's single 256-color index (`toolPendingBg: 233`) was converted to hex `#140e1e`, so all three themes in this package are free of integer color values — `bgAnsi()` emits `48;5;N` for an integer, which mixes poorly with a truecolor palette.
 
-### `ayu`
+### `pi-coder-ayu`
 
-A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput`.
+A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput`.
 
 Four deliberate deviations from upstream:
 
@@ -47,7 +47,7 @@ Four deliberate deviations from upstream:
 ```jsonc
 {
   "$schema": "...",
-  "name": "summer-night",     // must equal the file name (minus .json)
+  "name": "pi-coder-summer-night",     // must equal the file name (minus .json)
   "vars": { "panelBg": "#0e1622", ... },
   "colors": { "bg": "panelBg", ... },
   "export": { "pageBg": "panelBg", "cardBg": "bg", "infoBg": "infoBg" }
@@ -55,8 +55,8 @@ Four deliberate deviations from upstream:
 ```
 
 - Every non-`#` value in `colors` is looked up in `vars`. A missing reference throws `Variable reference not found`, **the whole theme fails to load**, and pi falls back to the built-in `dark` theme without an error message. This is the single most common way to break a theme.
-- An empty string means "terminal default foreground" — used by `text` and, in catppuccin, `syntaxVariable`.
-- `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly (and `summer-night` uses literal hex there).
+- An empty string means "terminal default foreground" — used by `text` and, in pi-coder-catppuccin, `syntaxVariable`.
+- `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly (and `pi-coder-summer-night` uses literal hex there).
 
 ## Custom tokens
 
@@ -68,7 +68,7 @@ Three tokens in these files are **not** part of pi's official theme schema:
 | `toolDiffRemovedBg` | `tool-diff.ts` | Full-line background of removed diff lines. |
 | `bashOutput` | `bash-command-collapse.ts` | Foreground of bash output text only. |
 
-All three themes define the two diff backgrounds. Only `ayu` defines `bashOutput`.
+All three themes define the two diff backgrounds. Only `pi-coder-ayu` defines `bashOutput`.
 
 ### Why they work at all
 
@@ -86,8 +86,8 @@ pi's built-in bash renderer hardcodes output text to `toolOutput`, a slot shared
 
 The extension probes for the token by calling `getFgAnsi("bashOutput")` and does nothing if it throws `Unknown theme color: ...`. So:
 
-- Themes without `bashOutput` (including pi's built-ins, `summer-night` and `catppuccin`) are unaffected — bash output simply uses `toolOutput`.
-- To split the color out for any theme, add one `vars` entry and one `colors` line, exactly as `ayu` does.
+- Themes without `bashOutput` (including pi's built-ins, `pi-coder-summer-night` and `pi-coder-catppuccin`) are unaffected — bash output simply uses `toolOutput`.
+- To split the color out for any theme, add one `vars` entry and one `colors` line, exactly as `pi-coder-ayu` does.
 - `bashOutput` does not appear in the `/theme` preview swatches, which only draw pi's standard token list.
 
 ## Editing or porting a theme

@@ -159,7 +159,7 @@ describe("buildSpinnerPalette 的帧表排布", () => {
 
 describe("buildSpinnerPalette 的颜色去重与降级", () => {
 	it("当前主题里同色的两个槽位只留一个（不留连续两段同色）", () => {
-		// summer-night 实测撞车：success == toolDiffAdded、warning == toolTitle。
+		// pi-coder-summer-night 实测撞车：success == toolDiffAdded、warning == toolTitle。
 		const theme = fakeTheme({
 			...DISTINCT,
 			toolDiffAdded: DISTINCT["success"] as string,

@@ -44,7 +44,7 @@
  * 七个色槽按需求取：accent / success / warning / syntaxKeyword / toolDiffAdded /
  * toolDiffRemoved / toolTitle（需求里的「keyword / added / removed / tool」在主题
  * token 目录里的正式名字）。顺序就照需求这一串排列。换主题后**实际颜色可能撞车**
- * （实测 summer-night：success 与 toolDiffAdded 同为 #8cd6a7、warning 与 toolTitle
+ * （实测 pi-coder-summer-night：success 与 toolDiffAdded 同为 #8cd6a7、warning 与 toolTitle
  * 同为 #e9c16f），撞车的槽位按 `fg` 的渲染结果去重丢掉 —— 留着会连续两段同一个颜色，
  * 看着像动画卡住了。去重后只剩一种颜色（单色主题 / NO_COLOR）时 `frames = null`：
  * 调用方保持 pi 默认 spinner，不要装一张每帧长得都一样的「动画」表。

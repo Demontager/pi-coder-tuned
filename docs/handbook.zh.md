@@ -134,21 +134,21 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 `name` 字段**（`loadThemeJson()` 拼 `${name}.json` 找文件）—— 改主题名要**同时**改文件名、`name`
 和 `settings.json` 的 `theme` 三处，只改一处的话要么选择器显示旧名、要么 `theme` 值落空。
 
-- `summer-night.json` —— 本机自写皮肤，**当前在用**。`colors` 里没有一个字面量色值（全引用 `vars`，
+- `pi-coder-summer-night.json` —— 本机自写皮肤，**当前在用**。`colors` 里没有一个字面量色值（全引用 `vars`，
   另有 `"text": ""` 表示用终端默认前景）。
-- `catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
-  的 Catppuccin Mocha 皮肤。与 `summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
+- `pi-coder-catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
+  的 Catppuccin Mocha 皮肤。与 `pi-coder-summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
   `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已改成 hex
   `#140e1e`，现在三份皮肤都没有整数字面量）。
-- `ayu.json` —— 移植 [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes) 的
-  `ayu-dark`（官方 Ayu 调色板），**格式照 `catppuccin.json` 抄**：同样的
-  `$schema` / `vars` / `colors` / `export` 四段，`colors` 的 key 与键序照 catppuccin 抄（ayu 多一个
+- `pi-coder-ayu.json` —— 移植 [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes) 的
+  `ayu-dark`（官方 Ayu 调色板），**格式照 `pi-coder-catppuccin.json` 抄**：同样的
+  `$schema` / `vars` / `colors` / `export` 四段，`colors` 的 key 与键序照 pi-coder-catppuccin 抄（pi-coder-ayu 多一个
   自定义的 `bashOutput`，所以是 55 个 key），色值全部走 `vars`。上游皮肤已经定义的 51 个 token 里 **49 个逐字节同值** —— 这条可以用代码验：
   用 `loadThemeFromPath()` 同时解析两份文件，对同名 token 比 `getFgAnsi()` / `getBgAnsi()`；
   本仓只补了它没定义的四个：`toolDiffAddedBg` / `toolDiffRemovedBg`（`tool-diff.ts` 要读的行
   底色，上游没有）、`thinkingMax` 与 `bashOutput`（bash 输出正文的独立颜色槽，见下）。自定的
   色值一共五处：两个 diff 行底色、代码字符串的绿、最高两个思考档的边框灰、bash 输出灰。两个 diff 行底色是 `#1d241c`（bg 朝 `green` 混 10%）与 `#321d23`（朝 `red` 混 18%）——
-  比例是反推出来的：让两侧行底色相对工具盒底色的亮度比都落在 ≈1.15（catppuccin 是 1.15 / 1.14），
+  比例是反推出来的：让两侧行底色相对工具盒底色的亮度比都落在 ≈1.15（pi-coder-catppuccin 是 1.15 / 1.14），
   同时 `tool-diff.ts` 那个 30% 行内混色之后正文还有 4.0:1 / 5.6:1。绿侧只能给到 10% 是因为
   Ayu 的绿 `#AAD94C` 很亮，行内混色天然吃掉更多对比度。
 
@@ -167,13 +167,13 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
      `#515868`（2.67:1）亮一档，与 minimal 相差 1.28:1（看得出但偏淡），要再拉开就继续调深/调浅。
 
   整体观感是「近黑蓝底 + 高对比亮色」，
-  正文在面板上 8.4-9.2:1（catppuccin 12.7）；代价是 Ayu 自己的灰阶偏暗：`muted` `#6B7385`
-  在面板上 3.3-3.8:1、`dim` `#515868` 2.2-2.6:1（catppuccin 分别 ≈4.9 / 4.7），注释、
+  正文在面板上 8.4-9.2:1（pi-coder-catppuccin 12.7）；代价是 Ayu 自己的灰阶偏暗：`muted` `#6B7385`
+  在面板上 3.3-3.8:1、`dim` `#515868` 2.2-2.6:1（pi-coder-catppuccin 分别 ≈4.9 / 4.7），注释、
   `Think:` 行、设置页提示因此明显更淡 —— 这是上游皮肤自己的取值（与 `ayu-dark` 逐字节一致），
   嫌淡只需调 `vars.muted` / `vars.dimmed` 两个变量。上游那个包（`iodic/pi-ayu-themes`，自带
   `ayu-dark` / `ayu-mirage` / `ayu-light` 三套变体）**已按你要求卸载**（`pi remove npm:pi-ayu-themes`，
   三份变体文件随之从 `~/.pi/agent/npm/` 消失，`/theme` 里不再有这三个名字），所以本机的 Ayu 皮肤
-  只剩本仓这份 `ayu.json` —— 它是同一套 dark 调色板的「可按文件改」版本；要回到上游三套变体只需
+  只剩本仓这份 `pi-coder-ayu.json` —— 它是同一套 dark 调色板的「可按文件改」版本；要回到上游三套变体只需
   重新 `pi install npm:pi-ayu-themes`。
 
 三份皮肤共同的两条硬约束：
@@ -185,15 +185,15 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 
 三份皮肤里都有 pi 官方 schema 没有的自定义 token：`toolDiffAddedBg` / `toolDiffRemovedBg`
 （diff **整行底色**；`toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` 三个前景色是标准 token），
-ayu 另有第三个 `bashOutput`（见下节）。
+pi-coder-ayu 另有第三个 `bashOutput`（见下节）。
 它们能生效靠三件事凑齐：主题校验实际用的是 TypeBox 的 `Compile().Check()`，**对未知 key 放行**
 （`theme-schema.json` 里那句 `additionalProperties: false` 不是执行路径）；`createTheme()` 把不在那 7 个
 ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按 key 查表、不校验 key 是否在联合类型里
 —— 拿到前景色 SGR 后把 `38` 换成 `48` 就是合法底色。**pi 一旦改成严格校验，这两个 token 就读不到**，
 扩展会静默退回 `toolSuccessBg` / `toolErrorBg`，底色变淡但不报错。
 
-主题文件里的色值选择（catppuccin 的 diff 底色按 OKLab 感知亮度标定、`accent` 取 Macchiato lavender、
-`muted` / `toolOutput` / `thinkingText` 指向同一个 `secondaryText`；ayu 的 diff 底色按上面那条
+主题文件里的色值选择（pi-coder-catppuccin 的 diff 底色按 OKLab 感知亮度标定、`accent` 取 Macchiato lavender、
+`muted` / `toolOutput` / `thinkingText` 指向同一个 `secondaryText`；pi-coder-ayu 的 diff 底色按上面那条
 「行内混色 + 两侧行底色亮度比」反推等）都写在 JSON 自己的变量命名与 `tool-diff.ts` 的注释里，
 改色时以文件为准。皮肤不会自证对错 —— `toolDiffAddedBg` 之类的自定义 token 写错名字只会静默走兜底，
 所以新皮肤落盘后至少用 pi 自己的校验与解析跑一遍：`validateThemeJson()`（`pi-coding-agent/dist/modes/interactive/theme/theme-json.js`）
@@ -202,9 +202,9 @@ ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按
 把上游那份皮肤文件一起解析，同名 token 逐个比 ANSI 值 —— 同值才叫「搬运」，不同值要么是漏改，
 要么是有意 deviation，得在注释或文档里交代清楚。
 
-### `bashOutput`：bash 输出正文的独立颜色（目前只有 ayu 定义）
+### `bashOutput`：bash 输出正文的独立颜色（目前只有 pi-coder-ayu 定义）
 
-`ayu.json` 多一个 pi 官方 schema 没有的 token `bashOutput`（值 `#6B7385`，与那条
+`pi-coder-ayu.json` 多一个 pi 官方 schema 没有的 token `bashOutput`（值 `#6B7385`，与那条
 `… (N tokens hidden)` 折叠提示同为 `muted` 灰，但**自己一个 `vars.bashOutput`** —— 改 `muted`
 不会连带动它）。它买的是「只改 bash 输出正文的颜色，不跟其他颜色混掉」：pi 内置的 bash 渲染器把
 输出正文写死成 `toolOutput`，而那是**所有工具输出共用**的槽（read / grep / ls 的正文都吃它），
@@ -212,8 +212,8 @@ ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按
 临时改主题单例的 `fgColors`）写在该扩展文件头「输出正文的独立颜色」一节。两条行为要知道：
 
 - **别的皮肤不定义它 = 零影响**：扩展先真调一次 `getFgAnsi("bashOutput")` 探测，抛
-  `Unknown theme color: …` 就什么都不做，照旧走 `toolOutput`（内置主题与 summer-night /
-  catppuccin 现在都是这条路）。反过来，想给某套皮肤也拆出来，就是照 ayu 加一行 `vars` +
+  `Unknown theme color: …` 就什么都不做，照旧走 `toolOutput`（内置主题与 pi-coder-summer-night /
+  pi-coder-catppuccin 现在都是这条路）。反过来，想给某套皮肤也拆出来，就是照 pi-coder-ayu 加一行 `vars` +
   一行 `colors`；删掉那两行等于回到 `toolOutput`，不报错。
 - **它不在官方 schema 里，所以不会出现在 `theme-command.ts` 的色卡预览上**：那只预览画的是
   pi 的标准 token 列表。

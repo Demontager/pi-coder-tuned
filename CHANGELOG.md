@@ -2,6 +2,21 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.0.0 — 2026-09-19
+
+Snapshot sync: the three themes were renamed with a `pi-coder-` prefix, so their names cannot collide with themes from another installed package.
+
+### Changed
+
+- **`themes/`** — `summer-night.json`, `catppuccin.json` and `ayu.json` became `pi-coder-summer-night.json`, `pi-coder-catppuccin.json` and `pi-coder-ayu.json`; each file's `name` field followed, and `config/settings.json` now selects `pi-coder-summer-night`.
+- Theme names resolve through the `name` field, not the file name, so **an installed `settings.json` that still says `"theme": "summer-night"` silently falls back to pi's built-in `dark`** until it is updated — `/theme` writes the new value. That is why this is a major release.
+- References updated: the comments in `bash-command-collapse.ts`, `read-path-collapse.ts`, `tool-diff.ts`, `working-indicator/index.ts`, `working-indicator/spinner-frames.ts` and `spinner-frames.test.ts`, plus [README](README.md), [docs/themes.md](docs/themes.md), [docs/configuration.md](docs/configuration.md), [docs/development.md](docs/development.md) and [docs/handbook.zh.md](docs/handbook.zh.md). Palette names (`ayu-dark`, Catppuccin Mocha, Ayu) are untouched.
+
+### Unchanged
+
+- No color value moved: the three theme files are byte-identical to 1.1.1 apart from the `name` field, and the extension sources differ only in those comment lines.
+- The test suite stays at 596 tests.
+
 ## 1.1.1 — 2026-09-19
 
 Snapshot sync: the bash and read display toggles were cut back to a fixed default plus environment variables.

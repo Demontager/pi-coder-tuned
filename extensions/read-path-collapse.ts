@@ -22,7 +22,7 @@
  * - `Read ` 前缀（`toolTitle` 色 + 粗体）与 `:62-116` 行号区间（`warning` 色）原样保留；
  * - 路径用 `text` 色（与 `tool-diff.ts` 的 `Edit <path>` 同一约定），**不是 pi 内置的
  *   `accent`**：pi 的 `renderToolPath()` 给路径上的是 `accent`，而标题行是「动词 + 路径」
- *   并排 —— 只要皮肤的 `accent` 与 `toolTitle` 取同一个调色板色（catppuccin 的 mauve），
+ *   并排 —— 只要皮肤的 `accent` 与 `toolTitle` 取同一个调色板色（pi-coder-catppuccin 的 mauve），
  *   两段就完全同色、看不出层次。所以**装得下的短路径也换色**（见 `recolorToolPath`）；
  * - 路径从**尾部**往前装：一级一级目录往左加，装到恰好放不下为止，前面补一个 `…`；
  * - 装得下时（短路径）**结构完全不动 pi 的原始渲染**（只把路径颜色从 `accent` 换成 `text`），包括

@@ -1,6 +1,6 @@
 {
   "lastChangelogVersion": "0.85.1",
-  "theme": "summer-night",
+  "theme": "pi-coder-summer-night",
   "defaultThinkingLevel": "xhigh",
   "compaction": {
     "enabled": true,

@@ -40,13 +40,13 @@ The startup list also loses its `[Context]`, `[Prompts]` and `[Themes]` sections
 
 Colors come from the active theme rather than from hardcoded values, so `/theme` repaints everything on the next frame.
 
-### The `ayu` theme
+### The `pi-coder-ayu` theme
 
-Two captures in `ayu`:
+Two captures in `pi-coder-ayu`:
 
-![ayu theme, first capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png)
+![pi-coder-ayu theme, first capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu1.png)
 
-![ayu theme, second capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu2.png)
+![pi-coder-ayu theme, second capture](https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/ayu2.png)
 
 ## Install
 
@@ -99,7 +99,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 
 ### Themes
 
-`summer-night` (the default here), `catppuccin` and `ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. Details in [docs/themes.md](docs/themes.md).
+`pi-coder-summer-night` (the default here), `pi-coder-catppuccin` and `pi-coder-ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. Details in [docs/themes.md](docs/themes.md).
 
 ### Commands
 

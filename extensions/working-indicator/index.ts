@@ -129,7 +129,7 @@
  *     退出时无参 `setWorkingIndicator()` 恢复的是 **pi 的默认帧**（它不知道本扩展的彩帧），
  *     所以问卷一结束就补装，免得这一回合剩下的时间掉回单色。
  *
- * 七个色槽在当前主题里可能撞色（实测 summer-night 的 success == toolDiffAdded、warning ==
+ * 七个色槽在当前主题里可能撞色（实测 pi-coder-summer-night 的 success == toolDiffAdded、warning ==
  * toolTitle），撞车的只留一个；如果最后只剩一种颜色（单色主题 / `NO_COLOR` / 恒等 `fg`），
  * 干脆不下发帧表、保持 pi 默认 spinner —— 装一张每帧长得都一样的「动画」表没有意义。
  * 开关：`PI_SPINNER_RAINBOW=off` 回到单色 accent；`PI_SPINNER_COLOR_HOLD=<帧数>` 调每种
