@@ -1,4 +1,4 @@
-**Live demo** — the three palettes with a switchable terminal preview: <https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html>
+**[Themes Live Demo](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html)**
 
 # @bachi/pi-coder
 
