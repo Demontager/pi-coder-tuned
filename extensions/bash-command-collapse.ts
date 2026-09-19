@@ -27,7 +27,7 @@
  * 行数预算（`limit`，默认 3）按**视觉行**算而不是源行：一条超长单行命令占满整个预算
  * 而不是刷十几行，而短行的多行命令（heredoc 等）仍然显示前 3 条源行 —— 两种情况都不
  * 会失控。超出预算的内容（当前源行的尾巴 + 后面所有源行）计入 `… (N tokens hidden)`。
- * 展开态（ctrl+o）/ `/bash-collapse off` 用同一套硬折行规则，只是不限行数 —— 折行规则
+ * 展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则
  * 必须一致，否则展开态又会出现“提前折行”。
  *
  * ## 输出预览行数（pi 写死 5 行，这里改成 3 行）
@@ -74,7 +74,7 @@
  *     上方的 `… (N tokens hidden)` 提示一样留在树外（那条提示属于 renderCall 的
  *     块，本来就不在结果组件里）。
  * gutter 占 2 列，所以输出子组件必须按 `width - 2` 渲染（详见 `withPreviewLimit`）。
- * `/bash-tree off` 可关；关掉后渲染路径与加 gutter 之前逐行一致。
+ * `PI_BASH_TREE=off` 可关；关掉后渲染路径与加 gutter 之前逐行一致。
  *
  * ## 耗时页脚门槛（短命令不画 `Took`）
  *
@@ -98,7 +98,7 @@
  * 其实只跑了 1.96s」这类边界偏差。门槛 >= 耗时即隐藏，所以能看见的数字必然 >= 2.0s，
  * 不会出现自相矛盾的 `Took 1.9s`。
  *
- * 流式模式（`/bash-stream on`）下执行期中那个 `Elapsed X.Xs` 走同一条判定（同一个页脚，
+ * 流式模式（`PI_BASH_STREAM=on`）下执行期中那个 `Elapsed X.Xs` 走同一条判定（同一个页脚，
  * 只是文案跟着 `isPartial` 变）：短命令执行期间不会闪出那一行，跑过 2s 才出现 ——
  * 正好是「值得看一眼」的时刻。非流式（默认）下只在执行结束时判一次，正是用户要的语义。
  *
@@ -166,20 +166,13 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  * 「上留白、下触底」的歪样子。
  *
  * 用法：
- *   /bash-collapse            查看当前状态
- *   /bash-collapse off        关闭折叠（完整显示）
- *   /bash-collapse on         打开折叠（默认 3 行 + token 提示）
- *   /bash-collapse 5          打开折叠并保留前 5 个视觉行（1-50）
  *   /bash-preview             查看输出预览行数
  *   /bash-preview 5           输出预览改成 5 行（1-50）
  *   /bash-preview off         恢复 pi 内置的 5 行预览
- *   /bash-tree                查看输出树形缩进状态
- *   /bash-tree off            输出顶格显示（不挂 │ / └）
- *   /bash-tree on             输出挂树形缩进（默认）
- *   /bash-stream              查看当前输出方式
-  *   /bash-stream off          非流式（默认：命令与输出都一次性显示）
- *   /bash-stream on           流式（pi 原生行为：命令逐字刷、输出边跑边刷）
  *   /bash-timeout             查看 bash 执行期限（默认 / 上限 / env 覆盖）
+ *
+ * 折叠固定开启、保留 3 个视觉行（原先的 `/bash-collapse` 指令已删除）；树形缩进与流式
+ * 两项只剩启动时的 env 入口：`PI_BASH_TREE=off` / `PI_BASH_STREAM=on`。
  *
  * 附带第五个职责：**短命令不画耗时页脚** —— 默认执行时长 < 2s 就把 `Took 0.1s` 那一行
  *（连它的前导分隔空行）整个去掉，详见上面「耗时页脚门槛」一节。`PI_BASH_MIN_TIME_MS`
@@ -249,7 +242,7 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  *     `renderResult` 里的每秒计时器只在 `options.isPartial` 时才起
  *     （`if (state.startedAt !== undefined && options.isPartial && !state.interval)`），
  *     没有 partial 就永远不起，也没有 "Elapsed" 跳动，直到结束才补上
- *     「输出 + Took 12.3s」。命令通常很短所以可接受；真要盯长任务就 `/bash-stream on`。
+ *     「输出 + Took 12.3s」。命令通常很短所以可接受；真要盯长任务就 `PI_BASH_STREAM=on`。
  *   - 发给模型的内容**完全不变**：onUpdate 只喂显示层（tool_execution_update →
  *     tool-execution.js 的 isPartial），既不进 session 落盘也不进 tool result，
  *     execute 的返回值一字不差；renderCall 也只改显示，tool call 参数与 session 原文不动。
@@ -1041,33 +1034,26 @@ function withBashOutputColor<T>(theme: any, render: () => T): T {
 }
 
 export default function (pi: ExtensionAPI) {
-	let enabled = true;
-	let maxLines = DEFAULT_LINES;
+	// 折叠固定开启、保留 DEFAULT_LINES 个视觉行（原先的 `/bash-collapse` 指令已删除）。
 	// 输出预览行数：pi 内置写死 5（`BASH_PREVIEW_LINES`，模块私有常量 + 无设置项），
 	// 所以只能在扩展里后处理。/bash-preview 可改；PI_BASH_PREVIEW 启动时覆盖。
 	let previewLines = clampPreviewLines(Number(process.env.PI_BASH_PREVIEW));
 	// 输出树形 gutter（`│ ` / `└ `）：默认开（对齐 codex）。PI_BASH_TREE=off 启动时关闭。
 	// 与 previewLines 相互独立：`/bash-preview off` 恢复 pi 的 5 行预览后 gutter 照旧生效。
-	let treeEnabled = process.env.PI_BASH_TREE?.trim().toLowerCase() !== "off";
+	const treeEnabled = process.env.PI_BASH_TREE?.trim().toLowerCase() !== "off";
 	// 流式输出开关：默认关（非流式，对齐 opencode / codex）。PI_BASH_STREAM=on 恢复 pi 原生流式。
-	let streaming = process.env.PI_BASH_STREAM?.trim().toLowerCase() === "on";
+	const streaming = process.env.PI_BASH_STREAM?.trim().toLowerCase() === "on";
 	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
 	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines / treeEnabled 一样在注册时读一次。
 	const minTimeFooterMs = resolveMinTimeFooterMs(process.env.PI_BASH_MIN_TIME_MS);
 	// 命令语法高亮开关：默认开。PI_BASH_HIGHLIGHT=off 启动时关闭（回到整行 toolTitle 粗体）。
 	// 刻意**不注册 /bash-highlight 指令** —— 这是个纯观感开关，env 一个入口就够，
-	// 没必要再占一条斜杠指令（与 /bash-collapse / /bash-tree 那种需要随时切换的不同）。
+	// 没必要再占一条斜杠指令（与 /bash-preview / /bash-timeout 那种要随时查看的不同）。
 	// 展开态（ctrl+o）与折叠态走同一套分词，所以开关对两边同时生效。
 	const highlightEnabled = process.env.PI_BASH_HIGHLIGHT?.trim().toLowerCase() !== "off";
 
 	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd）。
 	const base: ToolDefinition<any, any, any> = createBashToolDefinition(process.cwd(), readShellOptions());
-
-	const statusText = () => `保留前 ${maxLines} 个视觉行（break-all 硬折行），超出部分显示 token 估算`;
-	const streamStatusText = () =>
-		streaming
-			? "流式（命令逐字刷、输出边跑边刷，含 Elapsed 计时）"
-			: "非流式（命令收完一次性出，结果执行完补刷到下面）";
 
 	pi.registerTool({
 		name: base.name,
@@ -1218,23 +1204,19 @@ export default function (pi: ExtensionAPI) {
 			// 而 state 是整行共享的，按 width 缓存会返回旧命令的行。
 			let cachedWidth: number | undefined;
 			let cachedExpanded: boolean | undefined;
-			let cachedEnabled: boolean | undefined;
-			let cachedLimit: number | undefined;
 			let cachedResultSeen: boolean | undefined;
 			let cachedLines: string[] | undefined;
 
 			const component = {
 				render(width: number): string[] {
 					const wrapWidth = Math.max(20, width || 80);
-					const limit = Math.max(1, Math.round(maxLines));
-					// 缓存键要带上 enabled / limit，否则 /bash-collapse 切换后已渲染的行不会刷新
+					const limit = DEFAULT_LINES;
+					// 缓存键要带上 expanded / resultSeen，否则 ctrl+o 切换或结果到达后已渲染的行不会刷新
 					const resultSeen = state.resultSeen === true;
 					if (
 						cachedLines &&
 						cachedWidth === wrapWidth &&
 						cachedExpanded === context.expanded &&
-						cachedEnabled === enabled &&
-						cachedLimit === limit &&
 						cachedResultSeen === resultSeen
 					)
 						return cachedLines;
@@ -1243,7 +1225,7 @@ export default function (pi: ExtensionAPI) {
 					// invalid（args.command 不是字符串）/ 空命令走 pi-tui 折行分支：这两种文本固定是
 					// `$ [invalid arg]` / `$ ...`，短到根本不会折行，而那个分支能原样保留
 					// 嵌套样式（error 色 / toolOutput 色），不用在硬折分支里重建
-					if (enabled && !context.expanded && !invalid) {
+					if (!context.expanded && !invalid) {
 						// 折叠态：**break-all 硬折行** + 视觉行数预算（`limit`，默认 3 行）。
 						// 详见文件头「折叠视图：break-all 硬折行」一节。
 						// 先折**纯文本**再逐行上样式：反过来会把 SGR 序列从中间切断。
@@ -1319,8 +1301,6 @@ export default function (pi: ExtensionAPI) {
 
 					cachedWidth = wrapWidth;
 					cachedExpanded = context.expanded;
-					cachedEnabled = enabled;
-					cachedLimit = limit;
 					cachedResultSeen = resultSeen;
 					cachedLines = result;
 					return result;
@@ -1328,8 +1308,6 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {
 					cachedWidth = undefined;
 					cachedExpanded = undefined;
-					cachedEnabled = undefined;
-					cachedLimit = undefined;
 					cachedResultSeen = undefined;
 					cachedLines = undefined;
 				},
@@ -1341,35 +1319,6 @@ export default function (pi: ExtensionAPI) {
 			const box = new Box(1, 0, stateBgFn(theme, context.isPartial === true, context.isError === true));
 			box.addChild(component);
 			return box;
-		},
-	});
-
-	pi.registerCommand("bash-collapse", {
-		description: "折叠 bash 命令显示：off | on | <视觉行数 1-50>",
-		handler: async (args, ctx) => {
-			const arg = args.trim();
-
-			if (arg === "off") {
-				enabled = false;
-				ctx.ui.notify("bash 命令折叠已关闭（完整显示）", "info");
-				return;
-			}
-
-			if (arg === "" || arg === "on") {
-				enabled = true;
-				ctx.ui.notify(`bash 命令折叠已开启，${statusText()}`, "info");
-				return;
-			}
-
-			const parsed = Number.parseInt(arg, 10);
-			if (!Number.isFinite(parsed) || parsed < 1 || parsed > 50) {
-				ctx.ui.notify("用法：/bash-collapse off | on | <视觉行数 1-50>", "warning");
-				return;
-			}
-
-			enabled = true;
-			maxLines = parsed;
-			ctx.ui.notify(`bash 命令折叠已开启，${statusText()}`, "info");
 		},
 	});
 
@@ -1400,61 +1349,6 @@ export default function (pi: ExtensionAPI) {
 
 			previewLines = next;
 			ctx.ui.notify(`bash 输出预览已改为前 ${previewLines} 行`, "info");
-		},
-	});
-
-	// 输出树形 gutter 开关。默认开；展开态（ctrl+o）不受这个开关影响 —— 鸭子判定
-	// 已经跳过了 `Text` 分支（见文件头「输出树形 gutter」一节）。
-	// 空参数只报状态、不改状态，与 /bash-collapse / /bash-preview / /bash-stream 的约定一致。
-	pi.registerCommand("bash-tree", {
-		description: "bash 输出的树形缩进（│ / └）：off | on",
-		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-
-			if (arg === "") {
-				ctx.ui.notify(`当前输出树形缩进：${treeEnabled ? "开（每行 │、末行 └）" : "关（输出顶格显示）"}`, "info");
-				return;
-			}
-
-			if (arg === "off") {
-				treeEnabled = false;
-				ctx.ui.notify("bash 输出的树形缩进已关闭（输出顶格显示）", "info");
-				return;
-			}
-
-			if (arg === "on") {
-				treeEnabled = true;
-				ctx.ui.notify("bash 输出的树形缩进已开启（展开态不受影响）", "info");
-				return;
-			}
-
-			ctx.ui.notify("用法：/bash-tree off | on", "warning");
-		},
-	});
-
-	pi.registerCommand("bash-stream", {
-		description: "bash 屏幕显示：off（默认，命令收完一次性出、结果补刷）| on（pi 原生流式）",
-		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-
-			if (arg === "off") {
-				streaming = false;
-				ctx.ui.notify(streamStatusText(), "info");
-				return;
-			}
-
-			if (arg === "on") {
-				streaming = true;
-				ctx.ui.notify(streamStatusText(), "info");
-				return;
-			}
-
-			if (arg === "") {
-				ctx.ui.notify(`当前：${streamStatusText()}`, "info");
-				return;
-			}
-
-			ctx.ui.notify("用法：/bash-stream off | on", "warning");
 		},
 	});
 

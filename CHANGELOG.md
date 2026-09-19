@@ -2,6 +2,22 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 1.1.1 — 2026-09-19
+
+Snapshot sync: the bash and read display toggles were cut back to a fixed default plus environment variables.
+
+### Changed
+
+- **`bash-command-collapse.ts`** — folding is always on and always keeps 3 visual lines. The `/bash-collapse` command is gone (it switched folding off and also set the line budget), and with it the `enabled` / `maxLines` variables and the cache-key fields they fed. `ctrl+o` still expands the command in full.
+- **`bash-command-collapse.ts`** — tree indentation and streaming lost their commands as well (`/bash-tree`, `/bash-stream`); both are now read-only startup switches (`PI_BASH_TREE=off`, `PI_BASH_STREAM=on`), so their mutable state became `const`. `/bash-preview` and `/bash-timeout` are the only commands this extension still registers.
+- **`read-path-collapse.ts`** — `/read-collapse` removed; `PI_READ_COLLAPSE=off` is now the only way to keep pi's built-in title row. The startup default is unchanged.
+- Documentation resynced to match: the command list in [README](README.md), the command table and both tool sections in [docs/extensions.md](docs/extensions.md), the post-install checklist in [docs/installation.md](docs/installation.md), and the one stale `/bash-stream on` sentence in [docs/handbook.zh.md](docs/handbook.zh.md).
+
+### Unchanged
+
+- Defaults before and after this sync are identical: folding on at 3 lines, tree indentation on, streaming off, `read` path collapse on.
+- The test suite stays at 596 tests; the removed command handlers were not covered.
+
 ## 1.1.0 — 2026-09-18
 
 Snapshot sync: the environment gained an MCP client and a startup fix for pi's built-in footer, and the `ayu` theme was resynced.

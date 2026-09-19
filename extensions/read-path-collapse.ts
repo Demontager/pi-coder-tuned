@@ -38,7 +38,7 @@
  * `read docs <标签>` / `read resource <标签>`）与压缩后自绘的标题都覆盖；`[skill] <目录名>`
  * 形态里没有这个词，原样保留。替换只发生在**动词段**内、且只动**第一行**
  * （`capitalizeReadVerb` / `capitalizeReadTitle`），读一个名字里带 `read` 的文件、或折到行首的
- * `read ` 片段都不会被误改。`/read-collapse off` 只关长路径压缩，工具名照样大写。
+ * `read ` 片段都不会被误改。`PI_READ_COLLAPSE=off` 只关长路径压缩，工具名照样大写。
  *
  * ## 只在需要压缩时才接管渲染（不重写整个 renderCall）
  *
@@ -91,10 +91,7 @@
  * `constrainedSampling` 全部由 `{ ...base }` 从 `createReadToolDefinition()` 原样继承）。
  *
  * 用法：
- *   /read-collapse          查看当前状态
- *   /read-collapse off      关闭压缩（回到 pi 的贪心折行，长路径占两行）
- *   /read-collapse on       打开压缩（默认）
- *   PI_READ_COLLAPSE=off    启动时就关闭
+ *   PI_READ_COLLAPSE=off    启动时就关闭长路径压缩（回到 pi 的贪心折行，长路径占两行）
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -395,7 +392,7 @@ function createCollapsedCallComponent(
 	return {
 		render(width: number): string[] {
 			const lines: string[] = inner.render(width);
-			// 关闭开关 → 回到 pi 的原生渲染（含路径颜色，见 `/read-collapse off`）；工具名照旧大写
+			// 关闭开关 → 回到 pi 的原生渲染（含路径颜色，见 `PI_READ_COLLAPSE=off`）；工具名照旧大写
 			if (!options.isEnabled()) return capitalizeReadTitle(lines);
 			// 没超宽（短路径，绝大多数 read）→ 只把路径的颜色换成 `text`，其余原样交给 pi
 			if (lines.length <= 1) return capitalizeReadTitle(lines.map((line) => recolorToolPath(line, options.theme)));
@@ -423,13 +420,11 @@ function createCollapsedCallComponent(
 }
 
 export default function (pi: ExtensionAPI) {
-	let enabled = process.env.PI_READ_COLLAPSE?.trim().toLowerCase() !== "off";
+	const enabled = process.env.PI_READ_COLLAPSE?.trim().toLowerCase() !== "off";
 
 	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd），
 	// renderCall 也用 context.cwd，不读这里这个值。
 	const base = createReadToolDefinition(process.cwd());
-
-	const statusText = () => (enabled ? "长路径压缩到一行（`Read …<尾部>:<行号>`），装得下时原样用 pi 的渲染" : "已关闭（回到 pi 的贪心折行，长路径会占两行）");
 
 	pi.registerTool({
 		// 用展开而不是逐字段抄：`description` / `parameters` / `promptSnippet` /
@@ -449,26 +444,6 @@ export default function (pi: ExtensionAPI) {
 				expanded: context.expanded,
 				isEnabled: () => enabled,
 			});
-		},
-	});
-
-	pi.registerCommand("read-collapse", {
-		description: "read 标题行的长路径压缩：off | on",
-		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-
-			if (arg === "") {
-				ctx.ui.notify(`read 路径压缩：${statusText()}`, "info");
-				return;
-			}
-
-			if (arg !== "off" && arg !== "on") {
-				ctx.ui.notify("用法：/read-collapse off | on", "warning");
-				return;
-			}
-
-			enabled = arg === "on";
-			ctx.ui.notify(`read 路径压缩${enabled ? "已开启" : "已关闭"}，${statusText()}`, "info");
 		},
 	});
 }

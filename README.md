@@ -71,7 +71,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 
 | Extension | What it does |
 | --- | --- |
-| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: long commands collapse to N visual lines with a `… (N tokens hidden)` hint, hard-wrap at the column budget, shell syntax highlighting, and its own background box. |
+| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: long commands collapse to 3 visual lines with a `… (N tokens hidden)` hint, hard-wrap at the column budget, shell syntax highlighting, and its own background box. Tree indentation and streaming are startup-only env switches (`PI_BASH_TREE`, `PI_BASH_STREAM`). |
 | [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: long paths stay on one line, ellipsis at the front, file name kept whole. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Overrides `edit`/`write`: Claude Code style full-line diff backgrounds, line-number gutter, inline and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Thinking blocks render as one continuous horizontally scrolling line labelled `Think: `. |
@@ -101,7 +101,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 
 ### Commands
 
-`/ask` `/bash-collapse` `/bash-preview` `/bash-stream` `/bash-timeout` `/bash-tree` `/clear` `/exit` `/init` `/mcp` `/read-collapse` `/recap` `/rewind` `/tasks` `/theme`
+`/ask` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/init` `/mcp` `/recap` `/rewind` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 

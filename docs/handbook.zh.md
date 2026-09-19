@@ -417,7 +417,7 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 ### 几个「看起来可以简化、其实不行」
 
 - **`bash-command-collapse.ts` 判定「参数还在流」是 `!streaming && !argsComplete && isPartial === true`**
-  （`streaming` = 用户开了 `PI_BASH_STREAM=on` / `/bash-stream on` 走 pi 原生流式，此时整条压命令的路径直接跳过）。
+  （`streaming` = 用户开了 `PI_BASH_STREAM=on` 走 pi 原生流式，此时整条压命令的路径直接跳过）。
   后两个阈值**缺一不可**：只用 `isPartial` 会把命令压到结果之后（退化成「全等结果才一次性出」）；
   只用 `argsComplete` 则 `/resume` 重建历史时它永远是 `false`（`renderSessionItems` 从不调
   `setArgsComplete`），恢复出来的 bash 块**只剩输出、命令行整行消失**。

@@ -9,18 +9,14 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | Command | Extension | Arguments |
 | --- | --- | --- |
 | `/ask` | `ask-user-question` | — Previews the questionnaire with a demo question. |
-| `/bash-collapse` | `bash-command-collapse` | `off` \| `on` \| `<1-50>` — Collapsed visual lines for the command. |
 | `/bash-preview` | `bash-command-collapse` | `off` \| `<1-50>` — Output preview lines; `off` restores pi's built-in preview. |
-| `/bash-stream` | `bash-command-collapse` | `off` \| `on` — `on` uses pi's native streaming instead of the collapse path. |
 | `/bash-timeout` | `bash-command-collapse` | — Prints the default, maximum and env-overridden bash timeout. |
-| `/bash-tree` | `bash-command-collapse` | `off` \| `on` — Tree indentation (`│`/`└`) for bash output. |
 | `/clear` | `clear-command` | — Alias of `/new`. |
 | `/exit` | `exit-command` | — Alias of `/quit` (the argument-free form of the quit words). |
 | `/init` | `init-command` | `[file.md] [extra instructions]` |
 | `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
 | `/mcp reload` | `mcp` | — Re-read the config files, reconnect and re-register tools. |
 | `/mcp <server>` | `mcp` | — One server's details and its recent diagnostics. |
-| `/read-collapse` | `read-path-collapse` | `off` \| `on` |
 | `/recap` | `recap` | — Summarizes the conversation now. |
 | `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
 | `/tasks` | `simple-task` | `status` (default) \| `clear` \| `on` \| `off` |
@@ -32,7 +28,7 @@ pi registers one handler per tool name (first registration wins), so each of the
 
 ### `bash-command-collapse.ts` — the `bash` tool
 
-Collapses long commands to N visual lines (default 3) followed by `… (123 tokens hidden)`, hard-wrapping at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. `ctrl+o` expansion shows the command in full. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
+Collapses long commands to 3 visual lines followed by `… (123 tokens hidden)` — folding is always on, and the `/bash-collapse` command that used to switch it off or change the line budget is gone. Tree indentation and streaming keep only their startup env entry points (`PI_BASH_TREE`, `PI_BASH_STREAM`) — the `/bash-tree` and `/bash-stream` commands are gone too. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. `ctrl+o` expansion shows the command in full. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
 
 - `PI_BASH_MIN_TIME_MS` (default `2000`) — only show the elapsed-time footer above this duration.
 - `PI_BASH_HIGHLIGHT=off` — disable shell syntax highlighting.
@@ -45,7 +41,7 @@ Two details that look simplified but cannot be: it decides "arguments are still 
 
 Keeps the `read` title row on exactly one line. Long paths lose their front and keep the informative tail — the file name and last directories — as `Read …@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:62-116`. No folding, no second row.
 
-- `/read-collapse off | on`, `PI_READ_COLLAPSE=off` — restore pi's builtin title row.
+- `PI_READ_COLLAPSE=off` — restore pi's builtin title row at startup. There is no `/read-collapse` command.
 
 ### `tool-diff.ts` — the `edit` and `write` tools
 
