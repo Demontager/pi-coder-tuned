@@ -7,7 +7,7 @@ This is a working setup, not a collection of demos. Every extension is used dail
 - Repository: <https://github.com/jayli/pi-coder>
 - Issues: <https://github.com/jayli/pi-coder/issues>
 
-<p align="center"><img src="https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif" alt="Pi session switching server.js to HTTPS: thinking line, read and edit tool calls, inline diff renderer and statusline" width="600"></p>
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/jayli/pi-coder@main/assets/demo-server-https.gif" alt="Pi working a four-item task list: task_set opens the list, server.js is switched from HTTPS to HTTP, with the thinking line, collapsed bash runs, inline diff and task progress in the statusline" width="600"></p>
 
 ## What it looks like
 
