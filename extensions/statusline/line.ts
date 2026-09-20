@@ -49,24 +49,26 @@ export const ELLIPSIS = "…";
  */
 export const MODEL_ICON = "⚡️";
 /**
- * 分支段前缀图标：`⑂`（U+2442，OCR FORK —— 一个分叉的样子）。它取代了私有区的 Powerline /
- * Nerd Font 字形 U+E0A0 —— 那个码位在字体缺字形时只是一个看不见的方块，而 ⑂ 是普通符号
- * （更早还用过 `⎇`(U+2387)）。源码里仍写转义、测试仍按码位钉死，防止以后被换成近形字符
- * （同区块的 `⑃`(U+2443, OCR INVERTED FORK) 长得几乎一样）。
+ * 分支段前缀图标：`ᗌ`（U+15CC，CANADIAN SYLLABICS CARRIER RE —— 字形恰好是一个分叉的样子）。
+ * 它取代了私有区的 Powerline / Nerd Font 字形 U+E0A0 —— 那个码位在字体缺字形时只是一个看不见的
+ * 方块（更早还依次用过 `⎇`(U+2387) 与 `⑂`(U+2442, OCR FORK)）。源码里仍写转义、测试仍按码位
+ * 钉死，防止以后被换成近形字符（同区块的 `ᗋ`(U+15CB) / `ᗍ`(U+15CD) / `ᗎ`(U+15CE) 长得几乎一样）。
  * 宽度按 pi-tui `visibleWidth` 是 1 列、East Asian Width = Neutral（不是 Ambiguous），
  * 所以 `truncateToWidth` 的截断预算不用动，也不存在 CJK 宽度下按 2 列渲染的错位。
- * 字形可得性（2026-09-20 用 fontTools 核过本机字体栈）：U+2442 只在 Ghostty 字体栈的第一位
- * `Lyth Mono Term` 里有 —— `JetBrainsMonoNL Nerd Font Mono` 与 `Maple Mono SC NF` 都没有，
- * 它靠字体回退渲染；哪天换字体栈掉成缺字方块，优先考虑回到 U+E0A0。
+ * 字形可得性（2026-09-20 用 fontTools 扫过本机全部字体）：U+15CC 在 Ghostty 字体栈的三个字体里
+ * **都没有**（`Lyth Mono Term` / `JetBrainsMonoNL Nerd Font Mono` / `Maple Mono SC NF`），靠系统
+ * 回退渲染 —— macOS 侧有 `Euphemia UCAS`（advance ≈ 0.98 格）与 `Noto Sans CanAborig` 覆盖它，
+ * 所以不会掉成缺字方块；终端按固定格宽摆字，0.98 的字面宽度不影响对齐。哪天在没有这类回退字体的
+ * 环境里显示成方块，回到 U+2442（Lyth Mono Term 有）或 U+E0A0（Nerd Font 有）。
  */
-export const BRANCH_ICON = "\u2442";
+export const BRANCH_ICON = "\u15cc";
 /** 行首缩进：整行不顶格。 */
 export const LEADING_INDENT = " ";
 /** 本扩展自己的 setStatus key（清残留用，渲染时也跳过）。 */
 export const STATUSLINE_KEY = "statusline";
 const MAX_STATUS_ITEMS = 5;
 
-/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u2442 branch | (+a,-b)[ | 状态]`，各段已着色。 */
+/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
 export function formatMainLine(
 	theme: StatuslineTheme,
 	source: StatuslineSource,

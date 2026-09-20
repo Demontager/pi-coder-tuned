@@ -2,6 +2,22 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.0.4 — 2026-09-20
+
+Snapshot sync: the statusline branch icon moved to a code point no font on this machine covers, all three themes dropped their pending-card background, and `pi-coder-catppuccin` joined the other two on the neutral grey thinking border. The `tool-pending-bar` extension that briefly marked pending cards landed upstream and was reverted before this sync, so it is not part of the snapshot.
+
+### Changed
+
+- **`statusline/`** — the git-branch icon is now `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE), replacing `⑂` (U+2442, OCR FORK) and, before that, the Powerline / Nerd Font glyph U+E0A0 and `⎇` (U+2387). U+15CC is present in **none** of the three fonts in the author's Ghostty stack (`Lyth Mono Term`, `JetBrainsMonoNL Nerd Font Mono`, `Maple Mono SC NF`) and is drawn through system fallback — macOS covers it with `Euphemia UCAS` (advance ≈ 0.98 of a cell) and `Noto Sans CanAborig`, so it does not degrade to a missing-glyph box; the fractional advance does not affect alignment because the terminal places glyphs on fixed cells. On an environment without such a fallback, the previous `⑂` (present in `Lyth Mono Term`) is the one to go back to. Width is unchanged: one column, East Asian Width Neutral, so the truncation budget does not move.
+- **`themes/pi-coder-summer-night.json`** — `toolPendingBg` is now the empty string, so a tool card that is still running keeps the terminal's default background. A pending card carries no badge or tint either, so nothing changes at the moment it finishes; the card's colors switch only on success or failure. `vars.pendingCard` (`#101017`) is left in the file unreferenced.
+- **`themes/pi-coder-catppuccin.json`** — same `toolPendingBg` change (it moved `pendingPanel` → `""` on top of the earlier hex conversion of upstream's 256-color index), and `thinkingXhigh` / `thinkingMax` leave the palette's `blue` for a neutral grey added as `vars.thinkingGrey` (`#626262`) — the value `pi-coder-ayu` and `pi-coder-summer-night` already use, so all three themes now paint the two highest thinking levels the same grey. `vars.pendingPanel` (`#0b151f`) is left in the file unreferenced.
+- **`themes/pi-coder-ayu.json`** — same `toolPendingBg` change; `vars.toolPendingBg` (`#171717`) is left in the file unreferenced. The file is otherwise byte-identical to 2.0.2.
+- Documentation resynced: [docs/themes.md](docs/themes.md) (the blank `toolPendingBg` in all three themes, catppuccin's `thinkingGrey` deviation, the `vars` counts), [docs/extensions.md](docs/extensions.md) (the branch icon and its font coverage) and [docs/handbook.zh.md](docs/handbook.zh.md) (the same three theme passages, now on the upstream no-background reading).
+
+### Unchanged
+
+The test suite stays at **624 tests**, and no color value moved apart from the three `toolPendingBg` entries and catppuccin's new `thinkingGrey`: the `statusline` change is comments plus one exported constant, and `line.test.ts` pins the new code point.
+
 ## 2.0.2 — 2026-09-20
 
 Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-summer-night` palette whose added-line color is now green, a re-tuned pending-card background in `pi-coder-ayu`, a shorter `recap` idle delay, a session-replacement crash fix in `user-message-bar` and a `statusline/` branch icon that no longer needs a Nerd Font.

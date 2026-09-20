@@ -55,9 +55,9 @@ function stateOf(overrides: Partial<StatuslineState> = {}): StatuslineState {
 
 describe("BRANCH_ICON", () => {
 	it("pins the exact code point of the branch glyph", () => {
-		// 近形字符很容易贴错（同区块的 ⑂ / ⑃ / ⑁ 长得几乎一样），所以用转义把码位钉死，不依赖裸字形。
-		assert.equal(BRANCH_ICON, "\u2442");
-		assert.equal(BRANCH_ICON.codePointAt(0), 0x2442);
+		// 近形字符很容易贴错（同区块的 ᗋ / ᗌ / ᗍ / ᗎ 长得几乎一样），所以用转义把码位钉死，不依赖裸字形。
+		assert.equal(BRANCH_ICON, "\u15cc");
+		assert.equal(BRANCH_ICON.codePointAt(0), 0x15cc);
 		assert.equal([...BRANCH_ICON].length, 1);
 	});
 });
@@ -66,36 +66,36 @@ describe("formatMainLine", () => {
 	it("renders the documented line inside a repo", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(0), gitOf("main"), stateOf({ diffStat: { added: 0, deleted: 0 } })),
-			`${DOC} | \u2442 main | (+0,-0)`,
+			`${DOC} | \u15cc main | (+0,-0)`,
 		);
 	});
 
 	it("shows real diff counts", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(), gitOf("main"), stateOf({ diffStat: { added: 12, deleted: 3 } })),
-			`${DOC} | \u2442 main | (+12,-3)`,
+			`${DOC} | \u15cc main | (+12,-3)`,
 		);
 	});
 
 	it("shows zeros before the first git read lands", () => {
-		assert.equal(formatMainLine(plain, sourceOf(), gitOf("main"), stateOf()), `${DOC} | \u2442 main | (+0,-0)`);
+		assert.equal(formatMainLine(plain, sourceOf(), gitOf("main"), stateOf()), `${DOC} | \u15cc main | (+0,-0)`);
 	});
 
 	it("replaces both git segments outside a repo", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(), gitOf(null), stateOf({ diffStat: { added: 9, deleted: 9 } })),
-			`${DOC} | \u2442 no git | (no git)`,
+			`${DOC} | \u15cc no git | (no git)`,
 		);
 	});
 
 	it("renders a detached head", () => {
-		assert.ok(formatMainLine(plain, sourceOf(), gitOf("detached"), stateOf()).includes("\u2442 detached"));
+		assert.ok(formatMainLine(plain, sourceOf(), gitOf("detached"), stateOf()).includes("\u15cc detached"));
 	});
 
 	it("appends thinking while streaming and the tool name instead once a tool runs", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(), gitOf("main"), stateOf({ streaming: true })),
-			`${DOC} | \u2442 main | (+0,-0) | thinking`,
+			`${DOC} | \u15cc main | (+0,-0) | thinking`,
 		);
 		assert.equal(
 			formatMainLine(
@@ -104,7 +104,7 @@ describe("formatMainLine", () => {
 				gitOf("main"),
 				stateOf({ streaming: true, activeTools: new Map([["bash", 1]]) }),
 			),
-			`${DOC} | \u2442 main | (+0,-0) | bash`,
+			`${DOC} | \u15cc main | (+0,-0) | bash`,
 		);
 	});
 
@@ -123,14 +123,14 @@ describe("formatMainLine", () => {
 	it("questions the context when usage is unknown", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(null, { id: "mystery" }), gitOf("main"), stateOf()),
-			"⚡️ mystery/xhigh | Ctx ? | \u2442 main | (+0,-0)",
+			"⚡️ mystery/xhigh | Ctx ? | \u15cc main | (+0,-0)",
 		);
 	});
 
 	it("survives a missing model", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(null, null), gitOf(null), stateOf()),
-			"⚡️ no-model/xhigh | Ctx ? | \u2442 no git | (no git)",
+			"⚡️ no-model/xhigh | Ctx ? | \u15cc no git | (no git)",
 		);
 	});
 
@@ -175,14 +175,14 @@ describe("formatMainLine", () => {
 				throw new Error("stale context");
 			},
 		};
-		assert.equal(formatMainLine(plain, stale, gitOf("main"), stateOf()), "⚡️ no-model | Ctx ? | \u2442 main | (+0,-0)");
+		assert.equal(formatMainLine(plain, stale, gitOf("main"), stateOf()), "⚡️ no-model | Ctx ? | \u15cc main | (+0,-0)");
 	});
 
 	it("paints labels and separators dim, model / branch / percent by role", () => {
 		assert.equal(
 			formatMainLine(painted, sourceOf(0), gitOf("main"), stateOf({ diffStat: { added: 1, deleted: 2 } })),
 			"⚡️ accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
-				"dim(\u2442) accent(main)dim( | )dim(()success(+1)dim(,)error(-2)dim())",
+				"dim(\u15cc) accent(main)dim( | )dim(()success(+1)dim(,)error(-2)dim())",
 		);
 	});
 
@@ -281,7 +281,7 @@ describe("composeFooterLines", () => {
 			assert.ok(!line.startsWith("  "), JSON.stringify(line));
 			assert.equal(line.includes("\n"), false);
 		}
-		assert.ok(lines[0]?.includes(`${DOC} | \u2442 main | (+0,-0)`), lines[0]);
+		assert.ok(lines[0]?.includes(`${DOC} | \u15cc main | (+0,-0)`), lines[0]);
 		assert.equal(lines[1], " 📁 /tmp/repo");
 	});
 

@@ -146,7 +146,10 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   `addedLine` `#1c241b` / `removedLine` `#2e1c21` **取自 `pi-coder-catppuccin.json`**（就是 catppuccin 里同名 token 指向的
   `diffAddedBg` / `diffRemovedBg`，本仓只喂 `toolDiffAddedBg` / `toolDiffRemovedBg` 这两项）；
   `pendingCard` / `successCard` / `errorCard` 是**暗化卡片底色**（上一版按 `#1a1b26` / `#1d2631` / `#291f29` 统一乘 0.6，
-  感知亮度 L\* 降约 50%），也就是所有工具调用色块（Read / bash / task_set / Edit / Write … 的 pending、ok、error 三态）的背景；
+  感知亮度 L\* 降约 50%），原本是工具调用色块（Read / bash / task_set / Edit / Write …）pending、ok、error 三态的背景；
+  **现在只有 ok / error 两态还在用** —— `toolPendingBg` 已按要求清空成 `""`（终端默认底色，`bgAnsi()` 发 `\x1b[49m`），
+  pending 期间卡片不再有任何底色或额外标记，卡片上的颜色只随「完成 / 报错」切换，
+  `pendingCard` 因此变成一个无人引用的死变量（变量本身可以留着，删了也不会报错，因为已经没人查它）；
   `ayuUserBg` `#1b1c1d` 是**从 `pi-coder-ayu.json` 搬回来的**（ayu 的 `userMessageBg`，给 `userMessageBg` —— 比它之前的藏蓝 `#1e202e` 略暗、去蓝）；
   再加上 `thinkingGrey` `#626262`（只给 `thinkingXhigh` / `thinkingMax`，两档同色）；**1 个是后加的 diff 新增行前景**（`addedGreen` `#8bc391`，`toolDiffAdded` 原指 `teal`，见本节末尾）。**这一轮改的只是前景与线条**，
   变量名仍沿用 Tokyo Night 的旧名（`teal` 里装的是青、`moonLilac` 里装的是另一个青、`ayuThinking` 里装的是 iceberg 的灰），
@@ -177,15 +180,18 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   对比度（相对 `night` `#1a1b26`，括号里是上一版同项）：正文 10.24（8.10）、muted 4.66（4.18）、dim 3.50（3.59）、
   代码注释 4.36（4.24）、关键字 6.10（4.80）、函数 6.37（6.79）、类型 9.01（8.11）、字符串 8.65（9.35）、数字 9.05（8.40）、
   标点 11.28（8.93）、错误 5.85（6.46）—— 整体比上一版亮一档、艳度降一档（iceberg 的色偏灰）。
-  `colors` 里没有一个字面量色值（全引用 `vars`；`text` 指向 `fg` `#c6c8d1`，不是 `""` 的终端默认前景）。
+  `colors` 里没有一个 `#` 字面量色值（全引用 `vars`；`text` 指向 `fg` `#c6c8d1`，不是 `""` 的终端默认前景），
+  唯一的非 `vars` 值是被清空的 `toolPendingBg: ""`（见下）。
   注意 **`toolDiffAdded` 用自定的 `addedGreen` `#8bc391`，不是 `green` `#b4be82`**（后者在这套皮肤里是字符串色）——
   按你要求从 `teal` `#89b8c2`（iceberg 的 6 号青）换成传统「绿 add」。它同时是 diff 新增行的行号与 `+` 号色：
   `addedLine` 行底色上 7.83:1（原 `teal` 7.36:1）；`tool-diff.ts` 那 30% 行内混色后片段底色是 `#3d543e`，其上正文仍有 4.96:1。
   副作用是它与 `success`（仍是 `teal` `#89b8c2`）不再同色，幻彩 spinner 去重后因此由 5 色变 6 色。
 - `pi-coder-catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
   的 Catppuccin Mocha 皮肤。与 `pi-coder-summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
-  `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已改成 hex
-  `#140e1e`，现在三份皮肤都没有整数字面量）。
+  `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已先改成 hex 字面量、
+  后来按要求整个清空成 `""`，现在三份皮肤都没有整数字面量）。本仓对它的存心 deviation 一处：
+  `thinkingXhigh` / `thinkingMax` 不再走调色板的 `blue`，与另两套皮肤统一成中性灰 `#626262`
+  （新增 `vars.thinkingGrey`）—— 理由同下面 ayu 的第 2 条，三套皮肤的最高两档从此同色。
 - `pi-coder-ayu.json` —— 移植 [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes) 的
   `ayu-dark`（官方 Ayu 调色板），**格式照 `pi-coder-catppuccin.json` 抄**：同样的
   `$schema` / `vars` / `colors` / `export` 四段，`colors` 的 key 与键序照 pi-coder-catppuccin 抄（pi-coder-ayu 多一个
@@ -193,8 +199,8 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   用 `loadThemeFromPath()` 同时解析两份文件，对同名 token 比 `getFgAnsi()` / `getBgAnsi()`；
   本仓只补了它没定义的四个：`toolDiffAddedBg` / `toolDiffRemovedBg`（`tool-diff.ts` 要读的行
   底色，上游没有）、`thinkingMax` 与 `bashOutput`（bash 输出正文的独立颜色槽，见下）。自定的
-  色值一共六处：两个 diff 行底色、代码字符串的绿、最高两个思考档的边框灰、bash 输出灰，以及按你要求
-  单独调过的 pending 态卡片底色 `toolPendingBg` `#1f1f1f`（上游是 `#1b1c1d`）。两个 diff 行底色是 `#1d241c`（bg 朝 `green` 混 10%）与 `#321d23`（朝 `red` 混 18%）——
+  色值一共五处：两个 diff 行底色、代码字符串的绿、最高两个思考档的边框灰、bash 输出灰（第六处
+  原本是按你要求单独调过的 pending 态卡片底色 `toolPendingBg`，现已清空，见下面第 3 条）。两个 diff 行底色是 `#1d241c`（bg 朝 `green` 混 10%）与 `#321d23`（朝 `red` 混 18%）——
   比例是反推出来的：让两侧行底色相对工具盒底色的亮度比都落在 ≈1.15（pi-coder-catppuccin 是 1.15 / 1.14），
   同时 `tool-diff.ts` 那个 30% 行内混色之后正文还有 4.0:1 / 5.6:1。绿侧只能给到 10% 是因为
   Ayu 的绿 `#AAD94C` 很亮，行内混色天然吃掉更多对比度。
@@ -212,11 +218,10 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
      正是 xhigh，红边框读着像报错。代价：最高两档不再靠更热的颜色表达，只靠明暗差 —— 这个灰对
      底色 3.12:1，比 `thinkingMinimal` 的 `#6B7385`（4.00:1）暗一档、比 `thinkingOff` 的
      `#515868`（2.67:1）亮一档，与 minimal 相差 1.28:1（看得出但偏淡），要再拉开就继续调深/调浅。
-  3. `toolPendingBg`：上游是 `#1b1c1d`（与它的 `userMessageBg` 同一个值），本仓按你要求改成中性
-     `#1f1f1f` —— 只影响 pending 态的工具卡片底色（`toolPendingBg` 这个 token 独占一个 `vars`，
-     `userMessageBg` / `customMessageBg` 走它们自己那个仍为 `#1b1c1d` 的变量，不受影响）。
-     底色变亮一点点的代价是卡内文字对比度都掉 0.1-0.3：正文 8.77:1（原 9.08）、`muted` 3.47:1
-     （原 3.59）、`dim` 2.31:1（原 2.39）。
+  3. `toolPendingBg`：上游是 `#1b1c1d`（与它的 `userMessageBg` 同一个值），本仓先按你要求改成中性
+     `#1f1f1f`、后又调成 `#171717`，**现在三套皮肤统一清空成 `""`**（终端默认底色）—— 只影响 pending 态
+     的工具卡片底色，`userMessageBg` / `customMessageBg` 走它们自己那个仍为 `#1b1c1d` 的变量，不受影响；
+     `vars.toolPendingBg` 那个 `#171717` 保留在文件里但已无人引用（删不删都不影响加载）。
 
   整体观感是「近黑蓝底 + 高对比亮色」，
   正文在面板上 8.4-9.2:1（pi-coder-catppuccin 12.7）；代价是 Ayu 自己的灰阶偏暗：`muted` `#6B7385`
@@ -230,8 +235,11 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 
 三份皮肤共同的两条硬约束：
 
-- **`vars` 里的变量不能删**：`colors` 的值只要不是 `#` 开头就会被当变量引用去 `vars` 里查，查不到
-  直接抛 `Variable reference not found`，**整个主题加载失败**并回退内置 `dark`。
+- **`colors` 正在引用的 `vars` 变量不能删**：`colors` 的值只要不是 `#` 开头（也不是空串）就会被当变量引用去 `vars` 里查，
+  查不到直接抛 `Variable reference not found`，**整个主题加载失败**并回退内置 `dark`。反过来，把某个颜色值清空成
+  `""` 之后（三套皮肤的 `toolPendingBg` 就是这个状态），它原来指向的变量变成无人引用，可以留着也可以删，两者都不影响加载。
+  另注意 **空串是合法值**，不是「未定义」：`bgAnsi("")` 发 `\x1b[49m`（终端默认底色）、`fgAnsi("")` 发 `\x1b[39m`，
+  token 仍在表里，`theme.bg(token, ...)` 不会报错。
 - **缺了主题文件会静默降级**：`initTheme()` 加载失败时是 `catch` 后静默回退内置 `dark`，不报错、
   不启 watcher —— 重装时最容易漏的就是这一行（它不在 `cp config/*.json` 那几行的覆盖范围内）。
 

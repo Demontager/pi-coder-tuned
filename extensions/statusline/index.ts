@@ -7,9 +7,9 @@
  *
  * 主行形态：
  *
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ⑂ main | (+0,-0)
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ⑂ main | (+0,-0) | thinking   ← 生成中
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ⑂ no git | (no git)          ← 不在 git 仓库
+ *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0)
+ *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0) | thinking   ← 生成中
+ *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ no git | (no git)          ← 不在 git 仓库
  *
  * 行首的 `⚡️` 是模型段图标（`line.ts` 的 `MODEL_ICON`，取代早期的 `Model:` 文字标签，
  * 省 4 列；emoji 自带颜色不上色）。模型段本体是 `ctx.model.id` + `ctx.thinkingLevel`

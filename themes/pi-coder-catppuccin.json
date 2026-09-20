@@ -32,6 +32,7 @@
     "exportInfoTint": "#242031",
     "dimText": "#7e8398",
     "secondaryText": "#82889e",
+    "thinkingGrey": "#626262",
     "selected": "#1e1e29",
     "successPanel": "#151515",
     "errorPanel": "#171010",
@@ -57,7 +58,7 @@
     "customMessageBg": "mantle",
     "customMessageText": "text",
     "customMessageLabel": "mauve",
-    "toolPendingBg": "pendingPanel",
+    "toolPendingBg": "",
     "toolSuccessBg": "successPanel",
     "toolErrorBg": "errorPanel",
     "toolTitle": "mauve",
@@ -91,8 +92,8 @@
     "thinkingLow": "blue",
     "thinkingMedium": "mauve",
     "thinkingHigh": "peach",
-    "thinkingXhigh": "blue",
-    "thinkingMax": "blue",
+    "thinkingXhigh": "thinkingGrey",
+    "thinkingMax": "thinkingGrey",
     "bashMode": "peach"
   },
   "export": {

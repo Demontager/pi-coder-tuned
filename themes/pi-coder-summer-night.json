@@ -65,7 +65,7 @@
     "customMessageBg": "ayuUserBg",
     "customMessageText": "fg",
     "customMessageLabel": "magenta",
-    "toolPendingBg": "pendingCard",
+    "toolPendingBg": "",
     "toolSuccessBg": "successCard",
     "toolErrorBg": "errorCard",
     "toolTitle": "cyan",
