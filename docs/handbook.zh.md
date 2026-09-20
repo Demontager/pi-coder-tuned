@@ -45,6 +45,7 @@ cp -R clients/pi/extensions/startup-logo       ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/ask-user-question  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/subagent-log-guard ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/fenceless-code-block ~/.pi/agent/extensions/   # 子目录形式：纯逻辑在 render.ts（不 import pi，可单测）
+cp -R clients/pi/extensions/user-message-bar   ~/.pi/agent/extensions/   # 同上：纯逻辑在 bar.ts
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
@@ -134,8 +135,51 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 `name` 字段**（`loadThemeJson()` 拼 `${name}.json` 找文件）—— 改主题名要**同时**改文件名、`name`
 和 `settings.json` 的 `theme` 三处，只改一处的话要么选择器显示旧名、要么 `theme` 值落空。
 
-- `pi-coder-summer-night.json` —— 本机自写皮肤，**当前在用**。`colors` 里没有一个字面量色值（全引用 `vars`，
-  另有 `"text": ""` 表示用终端默认前景）。
+- `pi-coder-summer-night.json` —— 本机自写皮肤，**当前在用**。调色板以 [iceberg.vim](https://github.com/cocopon/iceberg.vim)
+  （cocopon，`colors/iceberg.vim` 里 `&background == 'dark'` 那一段 + 它末尾 `terminal_ansi_colors` 的 16 个色值）为底，
+  39 个 `vars` 分三类：**26 个是那里的字面值**（折 21 个不同色值，5 组同值：`magenta` / `moonLilac` = `#a093c7`、
+  `cyan` / `sky` = `#95c4ce`、`ayuThinking` / `dimText` = `#6b7089`、`bashOutput` / `ui` = `#818596`、
+  `comment` / `frame` = `#515e97`）；**1 个是按前者算出来的** —— `commentBright`（`comment` 的 HSL 饱和度与亮度各 ×1.3 =
+  `#6e7dc0`；这条规则能逐字复现上一版的 `#565f89` → `#707cb2`，所以照用了），只给 `syntaxComment` 用；
+  **12 个是上一版留下的底色、按要求一个没动** —— `night` / `panel` / `select` 三个主底色、`find`（上一版从 VS Code
+  `editor.findMatchBackground` `#3d59a166` 压出来的实色等价物），以及下面这几类：
+  `addedLine` `#1c241b` / `removedLine` `#2e1c21` **取自 `pi-coder-catppuccin.json`**（就是 catppuccin 里同名 token 指向的
+  `diffAddedBg` / `diffRemovedBg`，本仓只喂 `toolDiffAddedBg` / `toolDiffRemovedBg` 这两项）；
+  `pendingCard` / `successCard` / `errorCard` 是**暗化卡片底色**（上一版按 `#1a1b26` / `#1d2631` / `#291f29` 统一乘 0.6，
+  感知亮度 L\* 降约 50%），也就是所有工具调用色块（Read / bash / task_set / Edit / Write … 的 pending、ok、error 三态）的背景；
+  `ayuUserBg` `#1b1c1d` 是**从 `pi-coder-ayu.json` 搬回来的**（ayu 的 `userMessageBg`，给 `userMessageBg` —— 比它之前的藏蓝 `#1e202e` 略暗、去蓝）；
+  再加上 `thinkingGrey` `#626262`（只给 `thinkingXhigh` / `thinkingMax`，两档同色）。**这一轮改的只是前景与线条**，
+  变量名仍沿用 Tokyo Night 的旧名（`teal` 里装的是青、`moonLilac` 里装的是另一个青、`ayuThinking` 里装的是 iceberg 的灰），
+  改色时以文件为准。灰阶对位：正文 `fg` `#c6c8d1` = `Normal`；`ui`（muted）`#818596` = `StatusLine` 前景、
+  `ghost`（thinkingLow）`#686f9a` = `Folded` 前景、`comment`（thinkingMinimal 与滚动条拇指）`#515e97` = `SpecialKey`、
+  `ayuThinking` / `dimText` `#6b7089` = `Comment`（按你要求 dim 与 Think 同色；两个变量同值但**各立一个 `vars`** ——
+  这仓的习惯是「改一个不连带改另一个」）、`markdown`（工具输出正文）`#a3adcb` = `TSFunction`、`brace`（标点与列表点）`#cdd1e6` = `CursorLineNr` 前景、
+  `white` `#d2d4de` = 它的亮白 15。线条按「越实越亮」排：`hairline`（borderMuted）`#2a3158` < `slate`（代码块边框 / thinkingOff）`#3e445e`
+  < `quote`（引用条）`#444b71` < `frame`（border）与 `comment` `#515e97` < `separator`（mdHr）`#5b6389`
+  —— 这五个的来源依次是 `CursorLineNr` 底色、`MatchParen` / `StatusLineNC` 底色、`LineNr` / `SignColumn` / `FoldColumn` 前景、
+  `SpecialKey`、`PmenuSel` 底色（`comment` 与 `frame` 同值，因为滚动条拇指/最低档思考边框与编辑器外框本来就是一个亮度）。彩色一律取 iceberg 的终端色：
+  `red` `#e27878` / `green` `#b4be82` / `yellow` `#e2a478` / `magenta` `#a093c7` 是它第 1 / 2 / 3 / 5 号，
+  `orange` `#e9b189`、`cyan` `#95c4ce`、`sky`（accent、borderAccent、syntaxType）、`operator`（mdHeading、syntaxOperator）`#91acd1`
+  是亮色号，`blue` `#84a0c6` 是它的 `Function` / `Statement` / `Type` / `Operator`，`teal` `#89b8c2` 是它的 `String` / `Identifier`，
+  `moonLilac` / `magenta` `#a093c7` 是它的 `Constant`（第 5 号紫）。
+  **四条存心 deviation**，加一条范围说明：
+
+  1. **`syntaxKeyword` 与 `mdCode` 走 `moonLilac` 紫 `#a093c7`**（= iceberg 的 `Constant`，上一版是旧 summer-night 传下来的深青 `#0d92c1`），不是 iceberg 的 `Statement` 蓝 ——
+     保住「关键字与行内代码同色」的形状；之所以拿紫不拿青：iceberg 的青只有一档 `#89b8c2`，已经给了 `teal`（成功 / 链接 / diff 新增），
+     关键字再占它的话 markdown 里**行内代码会与链接同色**、代码里关键字与 `syntaxType` 只差一档亮度（1.14:1）；
+     紫与函数蓝（`#84a0c6`，|ΔL| 1.04:1）、类型青（`#95c4ce`，1.48:1）亮度也接近，但色相分得很开。
+  2. **`syntaxString` 走绿 `#b4be82`**，而 iceberg 的 `String` 其实是青 `#89b8c2` —— 沿用「字符串=绿」的分工。
+  3. **最高两档思考档仍是中性灰 `#626262`**（不是 iceberg 的蓝灰）—— 同 pi-coder-ayu 那节第 2 条：彩色边框读着像报错。
+  4. **`commentBright` 是算出来的**（见上），不是字面值。
+  5. **12 个底色没变**（见上），这一轮只换前景与线条。
+  当前层级（相对终端底色 `#040404`）：工具卡片 1.08-1.14:1 < 用户消息 1.201:1 < diff 行 1.273-1.286:1 —— 因为卡片被暗化过、
+  而 catppuccin 的 diff 底色本身很含蓄，diff 行现在只比它所在的卡片亮 1.9-2.1×（catppuccin 自己的卡片是 2.6-3.5×）。
+  对比度（相对 `night` `#1a1b26`，括号里是上一版同项）：正文 10.24（8.10）、muted 4.66（4.18）、dim 3.50（3.59）、
+  代码注释 4.36（4.24）、关键字 6.10（4.80）、函数 6.37（6.79）、类型 9.01（8.11）、字符串 8.65（9.35）、数字 9.05（8.40）、
+  标点 11.28（8.93）、错误 5.85（6.46）—— 整体比上一版亮一档、艳度降一档（iceberg 的色偏灰）。
+  `colors` 里没有一个字面量色值（全引用 `vars`；`text` 指向 `fg` `#c6c8d1`，不是 `""` 的终端默认前景）。
+  注意 **`toolDiffAdded` 用 `teal` `#89b8c2`（iceberg 的 6 号青），不用 `green` `#b4be82`** ——
+  后者在这套皮肤里是字符串色。想要传统“绿 add”只需把这一个 token 改指 `green`。
 - `pi-coder-catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
   的 Catppuccin Mocha 皮肤。与 `pi-coder-summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
   `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已改成 hex
@@ -143,16 +187,17 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 - `pi-coder-ayu.json` —— 移植 [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes) 的
   `ayu-dark`（官方 Ayu 调色板），**格式照 `pi-coder-catppuccin.json` 抄**：同样的
   `$schema` / `vars` / `colors` / `export` 四段，`colors` 的 key 与键序照 pi-coder-catppuccin 抄（pi-coder-ayu 多一个
-  自定义的 `bashOutput`，所以是 55 个 key），色值全部走 `vars`。上游皮肤已经定义的 51 个 token 里 **49 个逐字节同值** —— 这条可以用代码验：
+  自定义的 `bashOutput`，所以是 55 个 key），色值全部走 `vars`。上游皮肤已经定义的 51 个 token 里 **48 个逐字节同值** —— 这条可以用代码验：
   用 `loadThemeFromPath()` 同时解析两份文件，对同名 token 比 `getFgAnsi()` / `getBgAnsi()`；
   本仓只补了它没定义的四个：`toolDiffAddedBg` / `toolDiffRemovedBg`（`tool-diff.ts` 要读的行
   底色，上游没有）、`thinkingMax` 与 `bashOutput`（bash 输出正文的独立颜色槽，见下）。自定的
-  色值一共五处：两个 diff 行底色、代码字符串的绿、最高两个思考档的边框灰、bash 输出灰。两个 diff 行底色是 `#1d241c`（bg 朝 `green` 混 10%）与 `#321d23`（朝 `red` 混 18%）——
+  色值一共六处：两个 diff 行底色、代码字符串的绿、最高两个思考档的边框灰、bash 输出灰，以及按你要求
+  单独调过的 pending 态卡片底色 `toolPendingBg` `#1f1f1f`（上游是 `#1b1c1d`）。两个 diff 行底色是 `#1d241c`（bg 朝 `green` 混 10%）与 `#321d23`（朝 `red` 混 18%）——
   比例是反推出来的：让两侧行底色相对工具盒底色的亮度比都落在 ≈1.15（pi-coder-catppuccin 是 1.15 / 1.14），
   同时 `tool-diff.ts` 那个 30% 行内混色之后正文还有 4.0:1 / 5.6:1。绿侧只能给到 10% 是因为
   Ayu 的绿 `#AAD94C` 很亮，行内混色天然吃掉更多对比度。
 
-  对上游**仅有的两条存心 deviation**：
+  对上游**三条存心 deviation**：
 
   1. 上游把 `toolDiffAdded`（diff 增加行的前景，行号与 `+` 号跟它同色）与 `syntaxString`
      （代码文本里的字符串）**指向同一个绿 `#AAD94C`**，两边亮得发同一种光；本仓把 `syntaxString`
@@ -165,6 +210,11 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
      正是 xhigh，红边框读着像报错。代价：最高两档不再靠更热的颜色表达，只靠明暗差 —— 这个灰对
      底色 3.12:1，比 `thinkingMinimal` 的 `#6B7385`（4.00:1）暗一档、比 `thinkingOff` 的
      `#515868`（2.67:1）亮一档，与 minimal 相差 1.28:1（看得出但偏淡），要再拉开就继续调深/调浅。
+  3. `toolPendingBg`：上游是 `#1b1c1d`（与它的 `userMessageBg` 同一个值），本仓按你要求改成中性
+     `#1f1f1f` —— 只影响 pending 态的工具卡片底色（`toolPendingBg` 这个 token 独占一个 `vars`，
+     `userMessageBg` / `customMessageBg` 走它们自己那个仍为 `#1b1c1d` 的变量，不受影响）。
+     底色变亮一点点的代价是卡内文字对比度都掉 0.1-0.3：正文 8.77:1（原 9.08）、`muted` 3.47:1
+     （原 3.59）、`dim` 2.31:1（原 2.39）。
 
   整体观感是「近黑蓝底 + 高对比亮色」，
   正文在面板上 8.4-9.2:1（pi-coder-catppuccin 12.7）；代价是 Ayu 自己的灰阶偏暗：`muted` `#6B7385`
@@ -202,18 +252,19 @@ ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按
 把上游那份皮肤文件一起解析，同名 token 逐个比 ANSI 值 —— 同值才叫「搬运」，不同值要么是漏改，
 要么是有意 deviation，得在注释或文档里交代清楚。
 
-### `bashOutput`：bash 输出正文的独立颜色（目前只有 pi-coder-ayu 定义）
+### `bashOutput`：bash 输出正文的独立颜色（pi-coder-ayu 与 pi-coder-summer-night 都定义了）
 
 `pi-coder-ayu.json` 多一个 pi 官方 schema 没有的 token `bashOutput`（值 `#6B7385`，与那条
 `… (N tokens hidden)` 折叠提示同为 `muted` 灰，但**自己一个 `vars.bashOutput`** —— 改 `muted`
-不会连带动它）。它买的是「只改 bash 输出正文的颜色，不跟其他颜色混掉」：pi 内置的 bash 渲染器把
+不会连带动它）；`pi-coder-summer-night.json` 后来照同样形状加了一个（`#818596`，等于它自己的
+`muted`/`ui`，同样是独立 `vars`）。它买的是「只改 bash 输出正文的颜色，不跟其他颜色混掉」：pi 内置的 bash 渲染器把
 输出正文写死成 `toolOutput`，而那是**所有工具输出共用**的槽（read / grep / ls 的正文都吃它），
 所以这个 token 只能由 `bash-command-collapse.ts` 生效 —— 机制（在委托给内置渲染器的同步窗口里
 临时改主题单例的 `fgColors`）写在该扩展文件头「输出正文的独立颜色」一节。两条行为要知道：
 
 - **别的皮肤不定义它 = 零影响**：扩展先真调一次 `getFgAnsi("bashOutput")` 探测，抛
-  `Unknown theme color: …` 就什么都不做，照旧走 `toolOutput`（内置主题与 pi-coder-summer-night /
-  pi-coder-catppuccin 现在都是这条路）。反过来，想给某套皮肤也拆出来，就是照 pi-coder-ayu 加一行 `vars` +
+  `Unknown theme color: …` 就什么都不做，照旧走 `toolOutput`（内置主题与 pi-coder-catppuccin
+  现在都是这条路）。反过来，想给某套皮肤也拆出来，就是照 pi-coder-ayu 加一行 `vars` +
   一行 `colors`；删掉那两行等于回到 `toolOutput`，不报错。
 - **它不在官方 schema 里，所以不会出现在 `theme-command.ts` 的色卡预览上**：那只预览画的是
   pi 的标准 token 列表。
@@ -340,6 +391,7 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | --- | --- |
 | `thinking-collapse.ts` | thinking 块渲染成**一条连续横向滚动的行**（固定 1 行，不注册命令）：所有换行（模型自己折的行、空行分段、列表项、代码围栏内）全部拼进同一条行 —— 上一段结束后下一段直接接续在上一段的结尾，**不另起一行**，Think 区域从头到尾只有一行不间断的 token 流；**段落接缝（空行处）中文 ↔ 中文补一个逗号**（上段末尾已有标点不重复补，英文/混排仍按空格规则，段内折行不补），行首 `Think: ` 标签（顶格，无竖线 gutter），整行超宽时从头部丢掉溢出字符、行首补 `…`，行尾永远是最新 token，不折行；**没有短段回填补满逻辑**（曾有，会打断流动观感，已移除），短 thinking 行尾留白不补 |
 | `fenceless-code-block/` | Markdown 代码块去掉开合围栏（连 `lang` 标签一起），代码正文按 pi 的缩进铺开、语法着色保留，**不加底色**（观感来自 npm `@itc-steve/pi-theme`，但只取去围栏这一半）；`render.ts` 是纯逻辑（量度 / 折行 / Markdown 类都注入），入口只接线。`PI_FENCELESS_CODE=off` 关闭 |
+| `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▏`，颜色取 **diff 新增行行号色** `toolDiffAdded`（pi 内置 diff 与 `tool-diff.ts` 给 add 行行号用的同一个槽位）；`UserMessageComponent.prototype.render` 补丁，**吃掉原本那一格左内边距**换竖线，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行）；`bar.ts` 是纯逻辑，入口只接线。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
 | `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |
@@ -500,7 +552,7 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 - **改完扩展的最低验证**是真起一次 pi（见上文「pi 平台的坑」——`node --test` 不校验语法）。
 - **面向本机 pi 的写法约定**：纯逻辑模块刻意**不 import pi / pi-tui**（鸭子类型 + 结构化最小接口），
   这样 `node --test` 能直接跑；`tool-diff/`、`statusline/`、`recap/`、`rewind/`、`simple-task/`、
-  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`
+  `working-indicator/`、`startup-logo/`、`thinking-collapse/`、`fenceless-code-block/`、`prompt-editor/`、`user-message-bar/`
   都按这个约定拆出了可单测的伴生模块
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
   `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，

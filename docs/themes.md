@@ -23,9 +23,9 @@ The copy commands in [installation.md](installation.md#apply-the-global-config-f
 
 ### `pi-coder-summer-night`
 
-The author's own palette and the current default: a near-black blue base with high-contrast accents. Body text sits at roughly 8.4–9.2:1 on panels. Its greys are deliberately dimmer than pi-coder-catppuccin's — `muted` around 3.3–3.8:1 and `dim` around 2.2–2.6:1 — so comments, `Think:` rows and settings hints read faintly. If that is too faint, raise `vars.muted` and `vars.dimmed`.
+The author's own palette and the current default: a Tokyo Night blue base (`night` `#1a1b26`, `panel` `#16161e`, `select` `#2d2c5d`, `find` `#283457`) carrying foregrounds and line colors taken from [iceberg.vim](https://github.com/cocopon/iceberg.vim) — body text `#c6c8d1` (iceberg's `Normal`), `muted` `#818596` (`StatusLine`), `dim` and `Think:` rows `#6b7089` (`Comment`), plus `red` `#e27878`, `green` `#b4be82`, `yellow` `#e2a478`, `magenta` `#a093c7`, `teal` `#89b8c2` and `blue` `#84a0c6`. Against `night` that is roughly 10.2:1 for body text, 4.7:1 for `muted` and 3.5:1 for `dim` — dimmer than pi-coder-catppuccin, so comments and settings hints read faintly. If that is too faint, raise `vars.ui`, `vars.dimText` and `vars.ayuThinking` (the last two are separate variables holding the same grey).
 
-`text` is `""`, the terminal's own default foreground. Three values are literals rather than `vars` references: `syntaxComment` (`#95a1b0`), `thinkingXhigh` and `thinkingMax` (both `#4b7cc2`). The Chinese handbook still describes this file as having no literal colors — the file has since changed; trust the file.
+The file has 39 `vars` and no literal color values: every entry in `colors` is a variable reference, `export` included (`panel` / `night` / `select`), and `text` points at `fg` rather than the terminal default. Variable names are not a reliable guide to what they hold — several still carry Tokyo Night's names while containing iceberg colors (`teal` holds a cyan, `moonLilac` another cyan, `ayuThinking` the same grey as `dim`). `bashOutput` is defined here too (`#818596`, its own variable), and `toolDiffAdded` is `teal`, not `green`, since `green` is the string color — that slot is also what [`user-message-bar`](extensions.md#user-message-bar--the-user-message-box) paints its bar with.
 
 ### `pi-coder-catppuccin`
 
@@ -33,13 +33,13 @@ A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh
 
 ### `pi-coder-ayu`
 
-A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. It is the only theme here that defines `bashOutput`.
+A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. Like `pi-coder-summer-night` — and unlike `pi-coder-catppuccin` — it defines `bashOutput`.
 
 Four deliberate deviations from upstream:
 
 1. **Strings vs. added diff lines.** Upstream points `syntaxString` (strings in code) and `toolDiffAdded` (the foreground of added diff lines, including line numbers and `+`) at the same green `#AAD94C`. Here `syntaxString` points at a darker `stringGreen` (`#67a567`) so code strings and diff additions do not glow identically; diff additions keep the upstream green. Side effect: the new green is close in luminance to `muted`, so strings and comments are told apart mostly by hue.
 2. **Thinking borders.** Upstream paints `thinkingXhigh` red (`#D95757`). Here `thinkingXhigh` and `thinkingMax` are both a neutral grey (`#626262`), because the editor border takes the color of the current level and this setup defaults to `xhigh` — a red border reads as an error. The top two levels are now distinguished from each other only by luminance.
-3. **Pending and finished tool cards are exchanged, and the pending value was re-tuned.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter); this file uses `#1b1c1d` for pending and `#10151F` for success, so a tool call that is still running gets the lighter background and a finished one the darker. After the exchange the pending value moved three more times (`#171F24` → `#191919` → `#1d1c1d` → `#1b1c1d`) and now equals `userMessageBg`, so a running tool card shares the background of a user message. Nothing in the file explains the choice — it is a value inversion, not a renamed variable.
+3. **Pending and finished tool cards are exchanged, and the pending value was re-tuned.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter); this file uses `#1f1f1f` for pending and `#10151F` for success, so a tool call that is still running gets the lighter background and a finished one the darker. The pending value then moved repeatedly (`#171F24` → `#191919` → `#1d1c1d` → `#1b1c1d` → `#1f1f1f`), and it is set by a variable of its own: only `toolPendingBg` changed, while `userMessageBg` / `customMessageBg` keep `#1b1c1d`. Nothing in the file explains the choice — it is a value inversion, not a renamed variable. Against its earlier value `#1b1c1d`, the slightly lighter card costs a tenth of text contrast: body 8.77:1 (was 9.08:1), `muted` 3.47:1 (3.59), `dim` 2.31:1 (2.39).
 4. **User message text has a fixed color.** `userMessageText` points at `textColor` (`#dbdbdd`, a var added for it) rather than `fg`, the terminal's default foreground, so user messages read the same on any terminal.
 
 ## Anatomy of a theme file
@@ -56,7 +56,7 @@ Four deliberate deviations from upstream:
 
 - Every non-`#` value in `colors` is looked up in `vars`. A missing reference throws `Variable reference not found`, **the whole theme fails to load**, and pi falls back to the built-in `dark` theme without an error message. This is the single most common way to break a theme.
 - An empty string means "terminal default foreground" — used by `text` and, in pi-coder-catppuccin, `syntaxVariable`.
-- `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly (and `pi-coder-summer-night` uses literal hex there).
+- `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly, and through `vars` references like every other color.
 
 ## Custom tokens
 
@@ -68,7 +68,7 @@ Three tokens in these files are **not** part of pi's official theme schema:
 | `toolDiffRemovedBg` | `tool-diff.ts` | Full-line background of removed diff lines. |
 | `bashOutput` | `bash-command-collapse.ts` | Foreground of bash output text only. |
 
-All three themes define the two diff backgrounds. Only `pi-coder-ayu` defines `bashOutput`.
+All three themes define the two diff backgrounds. `pi-coder-ayu` and `pi-coder-summer-night` also define `bashOutput`.
 
 ### Why they work at all
 
@@ -86,7 +86,7 @@ pi's built-in bash renderer hardcodes output text to `toolOutput`, a slot shared
 
 The extension probes for the token by calling `getFgAnsi("bashOutput")` and does nothing if it throws `Unknown theme color: ...`. So:
 
-- Themes without `bashOutput` (including pi's built-ins, `pi-coder-summer-night` and `pi-coder-catppuccin`) are unaffected — bash output simply uses `toolOutput`.
+- Themes without `bashOutput` (including pi's built-ins and `pi-coder-catppuccin`) are unaffected — bash output simply uses `toolOutput`.
 - To split the color out for any theme, add one `vars` entry and one `colors` line, exactly as `pi-coder-ayu` does.
 - `bashOutput` does not appear in the `/theme` preview swatches, which only draw pi's standard token list.
 

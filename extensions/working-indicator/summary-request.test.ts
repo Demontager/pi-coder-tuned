@@ -27,15 +27,15 @@ describe("planSummaryRequest: trigger", () => {
 		assert.equal(planSummaryRequest({ promptWidth: 40, budgetWidth: 40 }).needed, false);
 	});
 
-	it("does not request for a mild overflow (pure truncation is good enough)", () => {
+	it("with a raised ratio, a mild overflow still does not request", () => {
 		// 显式倍数 2：截断后仍能显示一半原文，不值得请求。
 		assert.equal(planSummaryRequest({ promptWidth: 41, budgetWidth: 40, triggerRatio: 2 }).needed, false);
 		assert.equal(planSummaryRequest({ promptWidth: 79, budgetWidth: 40, triggerRatio: 2 }).needed, false);
 	});
 
-	it("requests once the prompt exceeds the budget by the trigger ratio", () => {
-		// 默认倍数 1.2：40 列的格子放下 48 列以上就请求。
-		assert.equal(planSummaryRequest({ promptWidth: 49, budgetWidth: 40 }).needed, true);
+	it("requests as soon as the prompt exceeds the budget (default ratio 1)", () => {
+		// 默认倍数 1：40 列的格子，41 列（放不下的第一列）就请求。
+		assert.equal(planSummaryRequest({ promptWidth: 41, budgetWidth: 40 }).needed, true);
 		assert.equal(planSummaryRequest({ promptWidth: 4000, budgetWidth: 40 }).needed, true);
 	});
 
@@ -63,8 +63,8 @@ describe("planSummaryRequest: trigger", () => {
 		assert.equal(planSummaryRequest({ promptWidth: 10_000, budgetWidth: 20, minBudget: 30 }).needed, false);
 	});
 
-	it("defaults the trigger ratio to 1.2", () => {
-		assert.equal(DEFAULT_TRIGGER_RATIO, 1.2);
+	it("defaults the trigger ratio to 1 (request as soon as it does not fit)", () => {
+		assert.equal(DEFAULT_TRIGGER_RATIO, 1);
 	});
 });
 

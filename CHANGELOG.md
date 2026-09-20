@@ -2,6 +2,27 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.0.2 — 2026-09-20
+
+Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-summer-night` palette and a re-tuned pending-card background in `pi-coder-ayu`.
+
+### Added
+
+- **`user-message-bar/`** — a `▏` at the head of every line of a user message box, including the blank padding lines above and below the text. It replaces the single column of left padding `Box` already reserves, so the background, the line width and the wrap positions are unchanged — a bar drawn next to the padding would make pi-tui's renderer throw `Rendered line N exceeds terminal width` and take the TUI down. The color is the theme's `toolDiffAdded` (with `selectedBg` / `accent` / `text` as fallbacks); `PI_USER_MESSAGE_BAR=off` disables the bar and `PI_USER_MESSAGE_BAR_COLOR=<slot>` picks another slot, converting a background slot such as `selectedBg` to a foreground. The patch on `UserMessageComponent.prototype.render` goes in at module-evaluation time and receives the live theme on `session_start`, so it follows `/theme`; `bar.ts` holds the pi-free logic and `index.test.ts` loads the extension through pi's own loader to compare patched and unpatched frames — that test is what proves the patch landed on the class pi actually renders with.
+
+### Changed
+
+- **`themes/pi-coder-summer-night.json`** — resynced. The Tokyo Night base stays (`night` / `panel` / `select` / `find`), while foregrounds and lines now come from [iceberg.vim](https://github.com/cocopon/iceberg.vim): `fg` `#c6c8d1`, `muted` `#818596`, `dim` and `Think:` `#6b7089`, with red / green / yellow / magenta taken from its terminal palette. `text` points at `fg` instead of the terminal default, `bashOutput` is defined (`#818596`, a variable of its own, equal to `muted`), and no literal color value is left anywhere in the file — `export` included. The 39 variables are renamed to Tokyo Night's names, so a local edit to the previous file's `bg` / `verdigris` / `fernMist` will not apply here.
+- **`themes/pi-coder-ayu.json`** — `toolPendingBg` moved from `#1b1c1d` to `#1f1f1f`, so a running tool card no longer shares the background of a user message. Only that token moved: `userMessageBg` and `customMessageBg` keep `#1b1c1d`.
+- **`working-indicator/`** — the prompt summary is now requested for any prompt that does not fit (`PI_WORKING_SUMMARY_TRIGGER` default `1.2` → `1`; raise it to tolerate truncation, `2` means giving up half the prompt first), and a failed request — error, 45 s timeout, or a reply with no text — is retried once after `PI_WORKING_SUMMARY_RETRY_MS` (new switch, `3000` ms) instead of being dropped. Two attempts per prompt is the cap; a new prompt, the end of the turn or a session replacement cancels the pending retry.
+- **`assets/pi-coder-palettes.html`** — the palette reference resynced: it now reads the skin variables instead of hand-copied hex, the three main-color blocks and the thinking-level ladder are gone (123 lines fewer), and the summer-night description is half its former length.
+- Documentation resynced: [README](README.md), [docs/extensions.md](docs/extensions.md), [docs/themes.md](docs/themes.md), [docs/development.md](docs/development.md), [docs/installation.md](docs/installation.md) and [docs/handbook.zh.md](docs/handbook.zh.md).
+
+### Unchanged
+
+- `config/settings.json` and `config/models.json`. The snapshot's `defaultProvider`, `defaultModel` and `modelThinkingLevels` keys stay out for the same reason as the gateway's provider registrations: they are machine-specific.
+- The suite grows from **596 to 622 tests** (the new extension and the summary retry path).
+
 ## 2.0.0 — 2026-09-19
 
 Snapshot sync: the three themes were renamed with a `pi-coder-` prefix, so their names cannot collide with themes from another installed package.

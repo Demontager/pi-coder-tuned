@@ -9,8 +9,8 @@
  * promise，于是「旧请求回来时新提示词已经就位」这类时序能被精确摆出来。
  *
  * 终端宽度：`process.stdout.columns` 在测试进程里是 undefined，`terminalWidth()` 退回
- * 80；于是可用宽度 = min(40 - 2, 76 - 34 - 1 - 2) = 38 列，触发线是 45.6 列（默认倍数 1.2）。
- * 用例里的长提示词都远超它、短提示词都远低于它。
+ * 80；于是可用宽度 = min(40 - 2, 76 - 34 - 1 - 2) = 38 列，触发线就是 38 列（默认倍数 1，
+ * 放不下一列就请求）。用例里的长提示词都远超它、短提示词都远低于它。
  */
 
 import assert from "node:assert/strict";
@@ -26,6 +26,16 @@ import {
 	SPINNER_FRAMES,
 	SPINNER_INTERVAL_MS,
 } from "./spinner-frames.ts";
+
+/**
+ * 摘要失败重试的延时（与下面写进 `PI_WORKING_SUMMARY_RETRY_MS` 的值一致）。用例靠它
+ * 分两半断言：「延时内不该重试」/「延时后重试了一次」。300ms 比默认 3s 快一个数量级，
+ * 又足够宽裕，不会被慢机器上的调度抖动搔成假阴性。
+ */
+const RETRY_DELAY_MS = 300;
+// index.ts 的重试延时是**模块级常量**，必须在扩展第一次被加载之前设置（pi 的加载器
+// 只会读一次）；下面所有用例共用这个值。
+process.env.PI_WORKING_SUMMARY_RETRY_MS = String(RETRY_DELAY_MS);
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
@@ -351,6 +361,28 @@ test("短提示词不请求；同一条消息重复 input 也不重复请求", {
 	}
 });
 
+test("触发线就是可用宽度：39 列（放不下一列）请求，38 列（刚好放得下）不请求", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+		// 测试进程里终端宽度退回 80 → 摘要可用 38 列（推导见文件头注释）。
+		await input({ text: "a".repeat(38), source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await delay(50);
+		assert.equal(recorder.completes.length, 0, "刚好放得下不该请求");
+
+		await input({ text: "a".repeat(39), source: "interactive" }, ctx);
+		await waitFor(() => recorder.completes.length === 1, "放不下一列就该请求");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
 test("新提示词作废旧请求：旧摘要回来也不会顶掉新的", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
@@ -384,7 +416,7 @@ test("新提示词作废旧请求：旧摘要回来也不会顶掉新的", { ski
 	}
 });
 
-test("摘要超长只截断、不重试：每个提示词始终只请求一次", { skip, timeout: 30_000 }, async () => {
+test("摘要超长只截断、不追问：成功返回后不会二次请求", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -413,7 +445,7 @@ test("摘要超长只截断、不重试：每个提示词始终只请求一次",
 	}
 });
 
-test("模型报错 / 不支持的上下文里静默退回截断后的原文", { skip, timeout: 30_000 }, async () => {
+test("首次失败静默退回截断后的原文，延时后自动重试一次；重试成功就换上摘要", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -425,11 +457,120 @@ test("模型报错 / 不支持的上下文里静默退回截断后的原文", { 
 		await waitFor(() => recorder.completes.length === 1, "摘要请求");
 		recorder.completes[0]?.reject(new Error("boom"));
 
-		await delay(100);
-		const message = recorder.workingMessages.at(-1) ?? "";
-		assert.ok(message.includes("✦ "), "失败后仍显示摘要段（这里是截断后的原文）");
-		assert.ok(message.includes("帮我优化"), "原文前缀还在");
-		assert.equal(recorder.completes.length, 1, "失败不重试");
+		// 重试还在延时里：这一格先退回截断后的原文（不空着、也不急着重新发）。
+		await delay(Math.floor(RETRY_DELAY_MS / 3));
+		const fallback = recorder.workingMessages.at(-1) ?? "";
+		assert.ok(fallback.includes("✦ "), "失败后仍显示摘要段（这里是截断后的原文）");
+		assert.ok(fallback.includes("帮我优化"), "原文前缀还在");
+		assert.equal(recorder.completes.length, 1, "延时未到不该重试");
+
+		await waitFor(() => recorder.completes.length === 2, "失败后的自动重试");
+		assert.equal(recorder.completes[1]?.prompt, recorder.completes[0]?.prompt, "重试问的是同一个问题");
+		recorder.completes[1]?.resolve("把行尾长提示词交给模型压成一句话");
+		await waitFor(
+			() => (recorder.workingMessages.at(-1) ?? "").includes("把行尾长提示词交给模型压成一句话"),
+			"重试回来的摘要上屏",
+		);
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("空回复（只出了 thinking、没有正文）也算失败：同样重试一次", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		recorder.completes[0]?.resolve(""); // 清洗后空串（真实场景：只出了 thinking）
+
+		await waitFor(() => recorder.completes.length === 2, "空回复后的自动重试");
+		assert.ok(
+			(recorder.workingMessages.at(-1) ?? "").includes("帮我优化"),
+			"空回复什么都没换上，仍是截断后的原文",
+		);
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("重试也失败就彻底放弃：每个提示词最多两次请求", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		recorder.completes[0]?.reject(new Error("boom-1"));
+		await waitFor(() => recorder.completes.length === 2, "失败后的自动重试");
+		recorder.completes[1]?.reject(new Error("boom-2"));
+
+		await delay(RETRY_DELAY_MS * 2);
+		assert.equal(recorder.completes.length, 2, "第二次失败后不再重试");
+		assert.ok((recorder.workingMessages.at(-1) ?? "").includes("帮我优化"), "仍显示截断后的原文");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("新提示词作废待重试的那次：不会为旧提示词补发", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "第一条提示词的请求");
+		recorder.completes[0]?.reject(new Error("boom"));
+
+		// 先等失败落地、重试定时器真的排上，再换提示词 —— 否则被下面的 `seq` 护栏挡住了，
+		// 根本没机会验证「待重试的那次会被取消」。
+		await delay(Math.floor(RETRY_DELAY_MS / 6));
+		await input({ text: `${LONG_PROMPT}（第二版）`, source: "interactive" }, ctx);
+		await waitFor(() => recorder.completes.length === 2, "新提示词的请求");
+		assert.ok(recorder.completes[1]?.prompt.includes("（第二版）"));
+
+		await delay(RETRY_DELAY_MS * 2);
+		assert.equal(recorder.completes.length, 2, "旧提示词的待重试定时器应该被清掉");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("回合结束作废待重试的那次：不会在回合外补发请求", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentSettled, shutdown } = handlersOf(extension);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const ctx = createContext(recorder);
+		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		recorder.completes[0]?.reject(new Error("boom"));
+
+		// 同上：先让重试定时器排上，再结束回合（`agentSettled` → `stopActivity` → 清定时器）。
+		await delay(Math.floor(RETRY_DELAY_MS / 6));
+		await agentSettled({}, ctx); // 回合结束 → stopActivity → 清掉待重试的定时器
+		await delay(RETRY_DELAY_MS * 2);
+		assert.equal(recorder.completes.length, 1, "回合结束后不该再有重试");
 
 		await shutdown({}, ctx);
 	} finally {

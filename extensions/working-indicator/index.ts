@@ -70,12 +70,14 @@
  *   - 流式中 steer / followUp 也会触发 `input`，摘要跟着更新成最新一条指令。
  *   - **长提示词会异步请模型压成一句话**（`summary-request.ts` 决策 / 提示词 / 清洗，
  *     这里只负责发请求与回包护栏）：原文超过可用宽度 `PI_WORKING_SUMMARY_TRIGGER` 倍
- *     （默认 1.2，即稍微放不下就压）时，拿**同一个可用宽度**算出一个目标列数，让
+ *     （默认 1，即只要放不下就压）时，拿**同一个可用宽度**算出一个目标列数，让
  *     模型按「一句话说清这段提示词要干什么」返回；请求与主回合并行，不 `await`、不阻
  *     塞任何渲染路径；回来了就顶掉原文，没回来 / 超时 / 报错 / 返回空串就一直显示截断
- *     后的原文。**每个提示词只请求一次**，摘要回来超长也不重试 —— 按可见宽度正常截断
- *     就行（两次请求只会让这一格来回跳）。压平后的原文也参与判断（不像旧实现那样只
- *     看第一行）：只要整段超出阈值就请求，所以多行粘贴的长提示词同样能拿到摘要。
+ *     后的原文，并隔 `PI_WORKING_SUMMARY_RETRY_MS`（默认 3s）**再试一次** —— 每个提示词
+ *     最多请求两次，第二次仍失败就放弃（新提示词 / 回合结束会作废待重试的那次）。摘要
+ *     回来超长也不追问：按可见宽度正常截断就行（再要一次只会让这一格来回跳）。压平后的
+ *     原文也参与判断（不像旧实现那样只看第一行）：只要整段超出阈值就请求，所以多行
+ *     粘贴的长提示词同样能拿到摘要。
  *     代价：本机网关给这些模型路由在 `extra_body` 里**写死了 thinking**
  *     （`thinking: {type: enabled}` + `reasoning_effort: max`，客户端关不掉），所以这次
  *     请求一定带着思考：实测 3-20s、600-1400 个 thinking token。默认用当前会话模型，
@@ -100,7 +102,8 @@
  *     摘要正文用 muted（与统计段一致，不跟标签抢注意力）。
  *   - 开关：`PI_WORKING_SUMMARY=off` 整段关闭；`PI_WORKING_SUMMARY_LLM=off` 只关掉
  *     模型压缩（退回「压平 + 截断」）；`PI_WORKING_SUMMARY_TRIGGER=<n>` 调触发倍数
- *     （默认 1.2）；`PI_WORKING_SUMMARY_MODEL=provider/modelId` 指定摘要模型（缺省用
+ *     （默认 1 = 只要放不下就请求；调大则先容忍截断，见 `SUMMARY_TRIGGER_RATIO`）；
+ *     `PI_WORKING_SUMMARY_MODEL=provider/modelId` 指定摘要模型（缺省用
  *     当前会话模型，也可以用便宜快的模型，摘要只是个附带请求）；
  *     `PI_WORKING_SUMMARY_GAP=<n>` 调整左段与摘要之间的最小空隙（默认 1 列；
  *     右对齐时实际空隙通常远大于它，这个值只是窄终端下的下限）。
@@ -225,9 +228,9 @@ const SUMMARY_ENABLED = (process.env.PI_WORKING_SUMMARY ?? "").toLowerCase() !==
  */
 const SUMMARY_LLM_ENABLED = SUMMARY_ENABLED && (process.env.PI_WORKING_SUMMARY_LLM ?? "").toLowerCase() !== "off";
 /**
- * 超过可用宽度的多少倍才值得请求摘要（`PI_WORKING_SUMMARY_TRIGGER`，默认 1.2）。
- * 1 = 只要放不下就请求；1.2 = 截断会丢掉近两成原文就请求；2 = 丢掉一半以上才请求。
- * 小于 1 的值无意义（退回默认）。
+ * 超过可用宽度的多少倍才请求摘要（`PI_WORKING_SUMMARY_TRIGGER`，默认 1）。
+ * 1 = 只要放不下（哪怕只多一列）就请求；调大则先容忍截断：1.2 ≈ 截断丢掉近两成原文才压，
+ * 2 = 丢掉一半以上才压。小于 1 的值无意义（退回默认）。
  */
 const SUMMARY_TRIGGER_RATIO = (() => {
 	const parsed = Number.parseFloat(process.env.PI_WORKING_SUMMARY_TRIGGER ?? "");
@@ -242,6 +245,21 @@ const SUMMARY_MODEL_SPEC = (process.env.PI_WORKING_SUMMARY_MODEL ?? "").trim();
  * 要 3-20s（qwen3.8-flash 在 max 档上偏慢），所以比 recap 的 30s 再宽一点；回合结束时
  * 还会提前 abort（那时摘要已经没人看）。超时只是白花一次请求，不影响主任务。 */
 const SUMMARY_TIMEOUT_MS = 45_000;
+/** 摘要请求失败后的默认重试延时（`PI_WORKING_SUMMARY_RETRY_MS` 覆盖）。 */
+const DEFAULT_SUMMARY_RETRY_DELAY_MS = 3_000;
+/**
+ * 首次请求失败后延时多久再试一次（`PI_WORKING_SUMMARY_RETRY_MS`，默认 3s；0 = 立即重试）。
+ * 失败多半是一次抖动（上游 5xx / 连接被掐 / 只出了 thinking 没出正文），隔几秒再要一次
+ * 常常就有了；**只重试这一次**（见 `SUMMARY_MAX_ATTEMPTS`）。
+ */
+const SUMMARY_RETRY_DELAY_MS = (() => {
+	const raw = (process.env.PI_WORKING_SUMMARY_RETRY_MS ?? "").trim();
+	if (raw === "") return DEFAULT_SUMMARY_RETRY_DELAY_MS;
+	const value = Number(raw);
+	return Number.isFinite(value) && value >= 0 ? value : DEFAULT_SUMMARY_RETRY_DELAY_MS;
+})();
+/** 摘要请求最多尝试几次：首次 + 一次重试；第二次仍失败就彻底放弃。 */
+const SUMMARY_MAX_ATTEMPTS = 2;
 /**
  * 摘要请求的 maxTokens。**必须给 thinking 留足份额**：本机网关给这些路由强制
  * `thinking: {type: enabled}` + `reasoning_effort: max`（`gateway/config.yaml` 的
@@ -426,8 +444,8 @@ export default function (pi: ExtensionAPI) {
 	let promptText: string | null = null;
 	/**
 	 * 模型压出来的一句话（异步到达；null = 还没到 / 没请求 / 请求失败）。显示时优先于
-	 * `promptText`：到了就换上摘要，一直到回合结束都不会再变（**只请求一次**，回来的
-	 * 摘要再长也只截断、不重试）。
+	 * `promptText`：到了就换上摘要，一直到回合结束都不会再变（每个提示词最多请求两次，
+	 * 首次失败会隔几秒重试一次；回来的摘要再长也只截断、不再追问）。
 	 */
 	let promptSummaryText: string | null = null;
 	/**
@@ -439,6 +457,11 @@ export default function (pi: ExtensionAPI) {
 	let lastInputText: string | null = null;
 	/** 在飞的摘要请求；`abort()` 停掉它（新提示词 / 回合结束 / 会话关掉）。 */
 	let summaryAbort: AbortController | null = null;
+	/**
+	 * 待执行的摘要重试定时器（首次失败后延时重试一次）。`cancelSummaryRequest()` 会把它
+	 * 一并清掉 —— 新提示词 / 回合结束 / 会话替换之后，那次重试已经没人要了。
+	 */
+	let summaryRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 	/**
 	 * 按段类型分开的 token 估算计数器：宽字符（CJK，终端占 2 列）按 1 token 计，
@@ -744,8 +767,12 @@ export default function (pi: ExtensionAPI) {
 		return typeof block?.name === "string" ? block.name : null;
 	}
 
-	/** 停掉在飞的摘要请求（幂等）。它只是一个附带请求，停了也不会影响主任务。 */
+	/** 停掉在飞的摘要请求与待重试的那次（幂等）。它们只是附带请求，停了也不会影响主任务。 */
 	function cancelSummaryRequest(): void {
+		if (summaryRetryTimer !== null) {
+			clearTimeout(summaryRetryTimer);
+			summaryRetryTimer = null;
+		}
 		if (summaryAbort !== null) {
 			summaryAbort.abort();
 			summaryAbort = null;
@@ -757,8 +784,15 @@ export default function (pi: ExtensionAPI) {
 	 * 发出去就返回，不 `await`：主回合跟这个请求完全并行，请求慢 / 失败只意味着这一格继续
 	 * 显示截断后的原文。回包三重护栏：abort 过的、序号换了的、提示词已经清掉的（回合结束）
 	 * 一律丢弃。
+	 *
+	 * 首次失败（报错 / 45s 超时 / 只出了 thinking 没出正文）会隔 `SUMMARY_RETRY_DELAY_MS`
+	 * 自动重试**一次**（`attempt`），第二次仍失败就彻底放弃。重试前要再确认这次请求
+	 * 仍然有效：新提示词 / 回合结束 / 会话替换都会经过 `cancelSummaryRequest()`（清掉待
+	 * 重试的定时器、把 `summaryAbort` 置空），`retryLater` 靠 `summaryAbort === controller`
+	 * 认出「已被取消」并放弃 —— 45s 超时虽然也 abort，但不碰 `summaryAbort`，所以那算
+	 * 失败、照常重试。
 	 */
-	function requestPromptSummary(ctx: ExtensionContext, prompt: string, seq: number): void {
+	function requestPromptSummary(ctx: ExtensionContext, prompt: string, seq: number, attempt = 0): void {
 		if (ctx.mode !== "tui") return; // print / json / rpc 没有 working 行，白花请求。
 		const model = resolveSummaryModel(ctx);
 		if (model === undefined) return;
@@ -775,9 +809,22 @@ export default function (pi: ExtensionAPI) {
 		const timeout = setTimeout(() => controller.abort(), SUMMARY_TIMEOUT_MS);
 		timeout.unref?.();
 
+		/** 这次算失败：还有额度就排一次重试（已被取消 / 提示词换了 / 回合结束了就不排）。 */
+		const retryLater = (): void => {
+			if (attempt + 1 >= SUMMARY_MAX_ATTEMPTS) return;
+			if (summaryAbort !== controller) return;
+			if (seq !== promptSeq || promptText === null) return;
+			summaryRetryTimer = setTimeout(() => {
+				summaryRetryTimer = null;
+				requestPromptSummary(ctx, prompt, seq, attempt + 1);
+			}, SUMMARY_RETRY_DELAY_MS);
+			summaryRetryTimer.unref?.();
+		};
+
 		void (async () => {
 			try {
 				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+				// 取不到 key：3 秒后也不会变好，不重试；已取消（极端情况下是超时）同样直接退出。
 				if (!auth.ok || controller.signal.aborted) return;
 				const response = await ctx.modelRegistry.complete(
 					model,
@@ -802,11 +849,17 @@ export default function (pi: ExtensionAPI) {
 				);
 				if (controller.signal.aborted || seq !== promptSeq || promptText === null) return;
 				const text = cleanSummaryText(textFromAssistant(response));
-				if (text === "") return;
+				if (text === "") {
+					// 只出了 thinking / 只回了装饰（清洗后空）：当成失败，值得再要一次。
+					retryLater();
+					return;
+				}
 				promptSummaryText = text;
 				refresh();
 			} catch {
-				// 超时 / 中断 / 网络错误 / 模型不可用：静默放弃，行尾继续显示截断后的原文。
+				// 超时 / 中断 / 网络错误 / 模型不可用：延时重试一次；第二次仍失败就一直显示
+				// 截断后的原文（摘要只是增强，不打扰主回合）。
+				retryLater();
 			} finally {
 				clearTimeout(timeout);
 				if (summaryAbort === controller) summaryAbort = null;

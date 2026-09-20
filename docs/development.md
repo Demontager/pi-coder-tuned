@@ -23,20 +23,20 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 596 tests, ~73 s
+npm test        # node --test — 622 tests, ~73 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 596 tests, ~74 s
+node --test --test-concurrency=4      # 622 tests, ~74 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 
-One test file goes the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match). It locates pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and it **skips** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point it at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
+Two test files go the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match); [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) does the same for the message box, comparing patched and unpatched frames of the same text at the same width — which is what proves the prototype patch landed on the class pi actually renders with, the one failure this feature can have. Both locate pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and both **skip** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point them at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 
 **Tests passing is not enough.** pi loads `.ts` with its own loader, and a construct node accepts can still fail there:
 
@@ -60,7 +60,7 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 23 loaded by reading the startup list:
+Then check that all 24 loaded by reading the startup list:
 
 ```
 [Extensions]

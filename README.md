@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **23 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **24 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -52,6 +52,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: long paths stay on one line, ellipsis at the front, file name kept whole. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Overrides `edit`/`write`: Claude Code style full-line diff backgrounds, line-number gutter, inline and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Thinking blocks render as one continuous horizontally scrolling line labelled `Think: `. |
+| [`user-message-bar/`](extensions/user-message-bar/) | A `▏` at the head of every line of a user message box, including the blank padding lines, in the theme's `toolDiffAdded` color. It replaces the one column of left padding, so background, width and wrap positions stay as they were. |
 | [`prompt-editor.ts`](extensions/prompt-editor.ts) | A `❯ ` gutter in the editor, Claude Code style `!` bash mode, plus a blank line between the autocomplete list and the statusline. |
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Markdown code blocks lose their fences (syntax colors kept, no background added). |
 | [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses. |
@@ -132,16 +133,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 23 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 24 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 596 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 622 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 596 tests
+npm test        # node --test, 622 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

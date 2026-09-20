@@ -1,6 +1,6 @@
 # Extensions reference
 
-23 extensions load from this package. Twelve are single files in `extensions/`, eleven are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
+24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -121,6 +121,25 @@ Three changes to the editor.
 - `PI_EDITOR_PROMPT` (default `❯`), `PI_EDITOR_AUTOCOMPLETE_GAP=off`, `PI_EDITOR_AUTOCOMPLETE_SHIFT` (default 1 column).
 - Pure logic lives in [`prompt-editor/bash-prompt.ts`](../extensions/prompt-editor/bash-prompt.ts); the render contract is covered by [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts), which loads the real extension through pi's own loader.
 
+### `user-message-bar/` — the user message box
+
+Puts a `▏` at the start of **every** line of a user message box, including the blank padding lines above and below the text:
+
+```
+▏
+▏body text
+▏
+```
+
+The bar occupies the one column of left padding that `Box` already reserves — the leading space is replaced, so the background, the line width and the wrap positions stay exactly as they were. That is not a cosmetic preference: pi-tui's main-screen renderer throws `Rendered line N exceeds terminal width` as soon as one line is a column too wide, which takes the whole TUI down, so a bar drawn *next to* the padding is not an option.
+
+The color is the theme's `toolDiffAdded` — the slot pi's built-in diff gives added-line numbers, and that [`tool-diff.ts`](../extensions/tool-diff.ts) gives the `+` column — with `selectedBg`, `accent` and `text` as fallbacks for themes that leave it undefined.
+
+pi's extension API reaches user messages only through `registerMarkdownTransformer`, which is string-level and never sees the box a message is rendered into, so the bar is drawn by patching `UserMessageComponent.prototype.render`. The patch goes in while the module is evaluated (before any frame is rendered, so resumed sessions get bars too) and is handed the live theme proxy on `session_start`, which is what makes it follow `/theme`. The logic lives in [`user-message-bar/bar.ts`](../extensions/user-message-bar/bar.ts), which takes both the component and the theme as arguments; [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) renders through pi's own `UserMessageComponent`.
+
+- `PI_USER_MESSAGE_BAR=off` — leave user message boxes as they are.
+- `PI_USER_MESSAGE_BAR_COLOR` (default `toolDiffAdded`) — theme slot to take the color from; a background slot such as `selectedBg` is converted to a foreground.
+
 ### `working-indicator/` — the working message
 
 Replaces the fixed `Working` loader with a semantic label, a token count for the current segment and an elapsed time:
@@ -138,7 +157,8 @@ The same extension draws the `●` on a running bash row.
 - `PI_BASH_SPINNER=off`, `PI_SPINNER_RAINBOW=off`, `PI_SPINNER_COLOR_HOLD` (default `19` frames per color).
 - `PI_WORKING_SUMMARY=off` — disable the prompt summary line entirely.
 - `PI_WORKING_SUMMARY_LLM=off` — truncate long prompts instead of asking a model to compress them.
-- `PI_WORKING_SUMMARY_TRIGGER` (default `1.2`) — ask for a summary when the prompt exceeds the available width by this factor.
+- `PI_WORKING_SUMMARY_TRIGGER` (default `1`) — ask for a summary as soon as the prompt does not fit the available width. Raising it tolerates truncation up to that multiple (`1.2` ≈ give up the last fifth, `2` ≈ give up half), which is what you want if you do not care to spend a request on every prompt that overflows by a column.
+- `PI_WORKING_SUMMARY_RETRY_MS` (default `3000`) — a failed request (error, timeout, or a response with no text) is retried once after this delay; two attempts per prompt is the cap, and a new prompt or the end of the turn cancels the pending retry.
 - `PI_WORKING_SUMMARY_MODEL` — `provider/modelId` for that request; defaults to the session model so a typo can only cost the summary, never the request.
 - `PI_WORKING_SUMMARY_GAP` (default `1`).
 
@@ -289,11 +309,14 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_STATUSLINE_BOOT_SUPPRESS=off` | on | `statusline` | Do not silence pi's built-in footer during the boot window, before this statusline is installed. |
 | `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
 | `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
+| `PI_USER_MESSAGE_BAR=off` | on | `user-message-bar` | Do not draw the `▏` bar into user message boxes. |
+| `PI_USER_MESSAGE_BAR_COLOR` | `toolDiffAdded` | `user-message-bar` | Theme slot the bar takes its color from; a background slot such as `selectedBg` is converted to a foreground. |
 | `PI_WORKING_SUMMARY=off` | on | `working-indicator` | Disable the prompt summary line. |
 | `PI_WORKING_SUMMARY_GAP` | `1` | `working-indicator` | Minimum blank columns between the working label and the summary. |
 | `PI_WORKING_SUMMARY_LLM=off` | on | `working-indicator` | Truncate the summary instead of asking a model to compress it. |
 | `PI_WORKING_SUMMARY_MODEL` | session model | `working-indicator` | `provider/modelId` used for the summary request. |
-| `PI_WORKING_SUMMARY_TRIGGER` | `1.2` | `working-indicator` | Ask for a summary when the prompt exceeds this multiple of the available width. |
+| `PI_WORKING_SUMMARY_RETRY_MS` | `3000` | `working-indicator` | Delay before the single retry after a failed summary request. |
+| `PI_WORKING_SUMMARY_TRIGGER` | `1` | `working-indicator` | Request a summary once the prompt exceeds this multiple of the available width. |
 
 ## Extension interactions
 
