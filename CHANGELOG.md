@@ -4,7 +4,7 @@ All notable changes to this package. The extensions themselves are snapshot copi
 
 ## 2.0.2 — 2026-09-20
 
-Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-summer-night` palette and a re-tuned pending-card background in `pi-coder-ayu`.
+Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-summer-night` palette whose added-line color is now green, a re-tuned pending-card background in `pi-coder-ayu`, a shorter `recap` idle delay, a session-replacement crash fix in `user-message-bar` and a `statusline/` branch icon that no longer needs a Nerd Font.
 
 ### Added
 
@@ -12,16 +12,22 @@ Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-sum
 
 ### Changed
 
-- **`themes/pi-coder-summer-night.json`** — resynced. The Tokyo Night base stays (`night` / `panel` / `select` / `find`), while foregrounds and lines now come from [iceberg.vim](https://github.com/cocopon/iceberg.vim): `fg` `#c6c8d1`, `muted` `#818596`, `dim` and `Think:` `#6b7089`, with red / green / yellow / magenta taken from its terminal palette. `text` points at `fg` instead of the terminal default, `bashOutput` is defined (`#818596`, a variable of its own, equal to `muted`), and no literal color value is left anywhere in the file — `export` included. The 39 variables are renamed to Tokyo Night's names, so a local edit to the previous file's `bg` / `verdigris` / `fernMist` will not apply here.
+- **`themes/pi-coder-summer-night.json`** — resynced. The Tokyo Night base stays (`night` / `panel` / `select` / `find`), while foregrounds and lines now come from [iceberg.vim](https://github.com/cocopon/iceberg.vim): `fg` `#c6c8d1`, `muted` `#818596`, `dim` and `Think:` `#6b7089`, with red / green / yellow / magenta taken from its terminal palette. `text` points at `fg` instead of the terminal default, `bashOutput` is defined (`#818596`, a variable of its own, equal to `muted`), and no literal color value is left anywhere in the file — `export` included. The variables are renamed to Tokyo Night's names, so a local edit to the previous file's `bg` / `verdigris` / `fernMist` will not apply here. `toolDiffAdded` (added diff lines: their line numbers and `+`, and the default color of `user-message-bar`'s bar) also moved, from `teal` `#89b8c2` to a new variable `addedGreen` `#8bc391` — the conventional green: 7.83:1 on the `addedLine` background (was 7.36:1), and 4.96:1 for body text over the 30% inline tint `tool-diff.ts` lays down. It no longer matches `success`, which stays `teal`. The file is now 40 `vars`.
 - **`themes/pi-coder-ayu.json`** — `toolPendingBg` moved from `#1b1c1d` to `#1f1f1f`, so a running tool card no longer shares the background of a user message. Only that token moved: `userMessageBg` and `customMessageBg` keep `#1b1c1d`.
 - **`working-indicator/`** — the prompt summary is now requested for any prompt that does not fit (`PI_WORKING_SUMMARY_TRIGGER` default `1.2` → `1`; raise it to tolerate truncation, `2` means giving up half the prompt first), and a failed request — error, 45 s timeout, or a reply with no text — is retried once after `PI_WORKING_SUMMARY_RETRY_MS` (new switch, `3000` ms) instead of being dropped. Two attempts per prompt is the cap; a new prompt, the end of the turn or a session replacement cancels the pending retry.
-- **`assets/pi-coder-palettes.html`** — the palette reference resynced: it now reads the skin variables instead of hand-copied hex, the three main-color blocks and the thinking-level ladder are gone (123 lines fewer), and the summer-night description is half its former length.
+- **`recap/`** — the automatic summary now appears after **10 seconds** of idling instead of 30 (`IDLE_MS` `30_000` → `10_000`, still hardcoded and still without any switch). The three guards around it are unchanged: a subagent that is still running blocks generation, a finished one is not summarized immediately, and the generation timeout stays at 45 s. Its real-timer end-to-end test is the suite's long pole and now runs in ~30 s (30.5 s in isolation here), which is essentially the whole of the suite's wall-time drop below.
+- **`statusline/`** — the git-branch icon is now `⑂` (U+2442, OCR FORK) instead of the Powerline / Nerd Font private-use glyph U+E0A0, so the line no longer needs a patched font; the first version of it used `⎇` (U+2387). The replacement is one column wide with East Asian Width = Neutral, so the truncation budget does not move and a CJK-configured terminal cannot render it two columns wide. Font coverage was measured with fontTools on the author's stack: U+2442 is present in the first font of Ghostty's stack (`Lyth Mono Term`) and in neither Nerd Font fallback, so it is drawn through font fallback.
+- **`assets/pi-coder-palettes.html`** — the palette reference resynced: it now reads the skin variables instead of hand-copied hex, the three main-color blocks and the thinking-level ladder are gone (123 lines fewer), the summer-night description is half its former length, and the `addedGreen` swap is reflected in its variable table and counts.
 - Documentation resynced: [README](README.md), [docs/extensions.md](docs/extensions.md), [docs/themes.md](docs/themes.md), [docs/development.md](docs/development.md), [docs/installation.md](docs/installation.md) and [docs/handbook.zh.md](docs/handbook.zh.md).
+- The suite grows from **596 to 624 tests** (the new extension, the summary retry path and the two `user-message-bar` regressions), and its wall time falls from ~73 s to ~34 s with the `recap` change.
 
-### Unchanged
+### Fixed
+
+- **`user-message-bar/`** — replacing the session (`/clear`, `/new`, `/resume`, `/fork`, `/reload`) could kill pi with `exit=1`. pi invalidates the old `ctx` while the previous session's user messages are still mounted and rendering, and the style source this extension had captured on `session_start` was read from inside a render tick, where the `This extension ctx is stale …` throw reaches pi's `uncaughtException` with nothing to catch it. The source is now reset on `session_shutdown` — which pi emits before the invalidation — and reading the theme is wrapped in a `try/catch`, so the worst case is a few frames drawn without the bar until the next `session_start`. Two regression tests cover both: rendering under an invalidated `ctx` neither throws nor draws, and rendering after shutdown never touches the old `ctx`. Both, plus a loader assertion that the `session_shutdown` hook is registered at all, fail against the previous revision.
+
+### Not included
 
 - `config/settings.json` and `config/models.json`. The snapshot's `defaultProvider`, `defaultModel` and `modelThinkingLevels` keys stay out for the same reason as the gateway's provider registrations: they are machine-specific.
-- The suite grows from **596 to 622 tests** (the new extension and the summary retry path).
 
 ## 2.0.0 — 2026-09-19
 

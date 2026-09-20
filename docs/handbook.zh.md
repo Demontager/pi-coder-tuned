@@ -137,7 +137,7 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 
 - `pi-coder-summer-night.json` —— 本机自写皮肤，**当前在用**。调色板以 [iceberg.vim](https://github.com/cocopon/iceberg.vim)
   （cocopon，`colors/iceberg.vim` 里 `&background == 'dark'` 那一段 + 它末尾 `terminal_ansi_colors` 的 16 个色值）为底，
-  39 个 `vars` 分三类：**26 个是那里的字面值**（折 21 个不同色值，5 组同值：`magenta` / `moonLilac` = `#a093c7`、
+  40 个 `vars` 分四类：**26 个是那里的字面值**（折 21 个不同色值，5 组同值：`magenta` / `moonLilac` = `#a093c7`、
   `cyan` / `sky` = `#95c4ce`、`ayuThinking` / `dimText` = `#6b7089`、`bashOutput` / `ui` = `#818596`、
   `comment` / `frame` = `#515e97`）；**1 个是按前者算出来的** —— `commentBright`（`comment` 的 HSL 饱和度与亮度各 ×1.3 =
   `#6e7dc0`；这条规则能逐字复现上一版的 `#565f89` → `#707cb2`，所以照用了），只给 `syntaxComment` 用；
@@ -148,7 +148,7 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   `pendingCard` / `successCard` / `errorCard` 是**暗化卡片底色**（上一版按 `#1a1b26` / `#1d2631` / `#291f29` 统一乘 0.6，
   感知亮度 L\* 降约 50%），也就是所有工具调用色块（Read / bash / task_set / Edit / Write … 的 pending、ok、error 三态）的背景；
   `ayuUserBg` `#1b1c1d` 是**从 `pi-coder-ayu.json` 搬回来的**（ayu 的 `userMessageBg`，给 `userMessageBg` —— 比它之前的藏蓝 `#1e202e` 略暗、去蓝）；
-  再加上 `thinkingGrey` `#626262`（只给 `thinkingXhigh` / `thinkingMax`，两档同色）。**这一轮改的只是前景与线条**，
+  再加上 `thinkingGrey` `#626262`（只给 `thinkingXhigh` / `thinkingMax`，两档同色）；**1 个是后加的 diff 新增行前景**（`addedGreen` `#8bc391`，`toolDiffAdded` 原指 `teal`，见本节末尾）。**这一轮改的只是前景与线条**，
   变量名仍沿用 Tokyo Night 的旧名（`teal` 里装的是青、`moonLilac` 里装的是另一个青、`ayuThinking` 里装的是 iceberg 的灰），
   改色时以文件为准。灰阶对位：正文 `fg` `#c6c8d1` = `Normal`；`ui`（muted）`#818596` = `StatusLine` 前景、
   `ghost`（thinkingLow）`#686f9a` = `Folded` 前景、`comment`（thinkingMinimal 与滚动条拇指）`#515e97` = `SpecialKey`、
@@ -165,7 +165,7 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   **四条存心 deviation**，加一条范围说明：
 
   1. **`syntaxKeyword` 与 `mdCode` 走 `moonLilac` 紫 `#a093c7`**（= iceberg 的 `Constant`，上一版是旧 summer-night 传下来的深青 `#0d92c1`），不是 iceberg 的 `Statement` 蓝 ——
-     保住「关键字与行内代码同色」的形状；之所以拿紫不拿青：iceberg 的青只有一档 `#89b8c2`，已经给了 `teal`（成功 / 链接 / diff 新增），
+     保住「关键字与行内代码同色」的形状；之所以拿紫不拿青：iceberg 的青只有一档 `#89b8c2`，已经给了 `teal`（成功 / 链接），
      关键字再占它的话 markdown 里**行内代码会与链接同色**、代码里关键字与 `syntaxType` 只差一档亮度（1.14:1）；
      紫与函数蓝（`#84a0c6`，|ΔL| 1.04:1）、类型青（`#95c4ce`，1.48:1）亮度也接近，但色相分得很开。
   2. **`syntaxString` 走绿 `#b4be82`**，而 iceberg 的 `String` 其实是青 `#89b8c2` —— 沿用「字符串=绿」的分工。
@@ -178,8 +178,10 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   代码注释 4.36（4.24）、关键字 6.10（4.80）、函数 6.37（6.79）、类型 9.01（8.11）、字符串 8.65（9.35）、数字 9.05（8.40）、
   标点 11.28（8.93）、错误 5.85（6.46）—— 整体比上一版亮一档、艳度降一档（iceberg 的色偏灰）。
   `colors` 里没有一个字面量色值（全引用 `vars`；`text` 指向 `fg` `#c6c8d1`，不是 `""` 的终端默认前景）。
-  注意 **`toolDiffAdded` 用 `teal` `#89b8c2`（iceberg 的 6 号青），不用 `green` `#b4be82`** ——
-  后者在这套皮肤里是字符串色。想要传统“绿 add”只需把这一个 token 改指 `green`。
+  注意 **`toolDiffAdded` 用自定的 `addedGreen` `#8bc391`，不是 `green` `#b4be82`**（后者在这套皮肤里是字符串色）——
+  按你要求从 `teal` `#89b8c2`（iceberg 的 6 号青）换成传统「绿 add」。它同时是 diff 新增行的行号与 `+` 号色：
+  `addedLine` 行底色上 7.83:1（原 `teal` 7.36:1）；`tool-diff.ts` 那 30% 行内混色后片段底色是 `#3d543e`，其上正文仍有 4.96:1。
+  副作用是它与 `success`（仍是 `teal` `#89b8c2`）不再同色，幻彩 spinner 去重后因此由 5 色变 6 色。
 - `pi-coder-catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
   的 Catppuccin Mocha 皮肤。与 `pi-coder-summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
   `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已改成 hex
@@ -391,7 +393,7 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | --- | --- |
 | `thinking-collapse.ts` | thinking 块渲染成**一条连续横向滚动的行**（固定 1 行，不注册命令）：所有换行（模型自己折的行、空行分段、列表项、代码围栏内）全部拼进同一条行 —— 上一段结束后下一段直接接续在上一段的结尾，**不另起一行**，Think 区域从头到尾只有一行不间断的 token 流；**段落接缝（空行处）中文 ↔ 中文补一个逗号**（上段末尾已有标点不重复补，英文/混排仍按空格规则，段内折行不补），行首 `Think: ` 标签（顶格，无竖线 gutter），整行超宽时从头部丢掉溢出字符、行首补 `…`，行尾永远是最新 token，不折行；**没有短段回填补满逻辑**（曾有，会打断流动观感，已移除），短 thinking 行尾留白不补 |
 | `fenceless-code-block/` | Markdown 代码块去掉开合围栏（连 `lang` 标签一起），代码正文按 pi 的缩进铺开、语法着色保留，**不加底色**（观感来自 npm `@itc-steve/pi-theme`，但只取去围栏这一半）；`render.ts` 是纯逻辑（量度 / 折行 / Markdown 类都注入），入口只接线。`PI_FENCELESS_CODE=off` 关闭 |
-| `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▏`，颜色取 **diff 新增行行号色** `toolDiffAdded`（pi 内置 diff 与 `tool-diff.ts` 给 add 行行号用的同一个槽位）；`UserMessageComponent.prototype.render` 补丁，**吃掉原本那一格左内边距**换竖线，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行）；`bar.ts` 是纯逻辑，入口只接线。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
+| `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▏`，颜色取 **diff 新增行行号色** `toolDiffAdded`（pi 内置 diff 与 `tool-diff.ts` 给 add 行行号用的同一个槽位）；`UserMessageComponent.prototype.render` 补丁，**吃掉原本那一格左内边距**换竖线，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行）；`bar.ts` 是纯逻辑，入口只接线；取色源在 `session_shutdown` 时摘掉、读皮肤再兜一层 try/catch —— 会话替换（`/clear`、`/new`、`/resume`、`/fork`、`/reload`）时 pi 会作废旧 ctx，而旧消息这时还挂在聊天区里，渲染 tick 里抛出的 stale-ctx 异常没人接得住，会直达 pi 的 `uncaughtException` 把进程带走。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
 | `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |

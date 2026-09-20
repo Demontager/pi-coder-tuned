@@ -14,7 +14,8 @@
  *   - 每一行的可见宽度与补丁前**完全一致**（pi-tui 对超宽行直接抛错，多一格都不行）；
  *   - 去掉零宽序列后，正文与补丁前逐字相同，只有行首第一格从空格变成竖线；
  *   - 竖线颜色 = 皮肤 `toolDiffAdded`（diff 新增行行号色；这里注入的是一份自造皮肤，色值可控）；
- *   - OSC 133 zone 标记仍在首行最前面（不能被竖线挤到后面）。
+ *   - OSC 133 zone 标记仍在首行最前面（不能被竖线挤到后面）；
+ *   - 会话替换窗口内（旧 ctx 已作废、新 ctx 未到）渲染不抛异常、只是不画竖线（2026-09-20 回归）。
  * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
  */
 
@@ -184,9 +185,36 @@ async function loadExtension(workspace: { agentDir: string; projectDir: string }
 
 /** 触达 pi 真实事件链路的那一步：`session_start` 带 ctx，扩展在这里拿到皮肤。 */
 async function fireSessionStart(extension: LoadedExtension, theme: unknown): Promise<void> {
+	await fireSessionStartWithCtx(extension, { ui: { theme } });
+}
+
+/** 同上，但直接给整个 ctx —— 用来注入一个「任何属性读取都抛」的作废 ctx。 */
+async function fireSessionStartWithCtx(extension: LoadedExtension, ctx: unknown): Promise<void> {
 	const handlers = extension.handlers.get("session_start") ?? [];
 	assert.ok(handlers.length > 0, "本扩展必须注册 session_start（否则拿不到皮肤）");
-	for (const handler of handlers) await handler({ type: "session_start" }, { ui: { theme } });
+	for (const handler of handlers) await handler({ type: "session_start" }, ctx);
+}
+
+/** pi 的会话替换 / reload 先 emit 这个事件，再把旧 ctx 作废（`extensionRunner.invalidate()`）。 */
+async function fireSessionShutdown(extension: LoadedExtension): Promise<void> {
+	const handlers = extension.handlers.get("session_shutdown") ?? [];
+	assert.ok(handlers.length > 0, "本扩展必须注册 session_shutdown（旧 ctx 作废前摘掉取色源）");
+	for (const handler of handlers) await handler({ type: "session_shutdown", reason: "new" }, undefined);
+}
+
+/** pi 作废旧 ctx 时抛的那一句（`ExtensionRunner.assertActive()`）。 */
+const STALE_CTX = "This extension ctx is stale after session replacement or reload.";
+
+/** 一个与作废后的旧 ctx 行为一致的 ctx：读任何属性都抛。 */
+function staleCtx(): unknown {
+	return new Proxy(
+		{},
+		{
+			get() {
+				throw new Error(STALE_CTX);
+			},
+		},
+	);
 }
 
 /** 走 pi 自己的组件渲染一条用户消息（`outputPad = 1`，与真实渲染一致）。 */
@@ -228,7 +256,8 @@ test("扩展能被 pi 的加载器加载，并把补丁装在 pi 自己的 UserM
 	try {
 		const extension = await loadExtension(workspace);
 		assert.equal(extension.handlers.get("session_start")?.length, 1, "注册了一个 session_start");
-		assert.equal(extension.handlers.size, 1, "只注册这一个事件");
+		assert.equal(extension.handlers.get("session_shutdown")?.length, 1, "注册了一个 session_shutdown");
+		assert.equal(extension.handlers.size, 2, "只注册这两个事件");
 	} finally {
 		workspace.cleanup();
 	}
@@ -305,6 +334,59 @@ test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（3
 		}
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR_COLOR;
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 回归：会话被替换的那一瞬间（`/clear`、`/new`、`/resume`、`/fork`、`/reload`），pi 会让旧 ctx
+ * 作废、但旧消息还挂在 `chatContainer` 上、新 ctx 还没到手 —— 这段时间里的渲染 tick 一读旧 ctx
+ * 就会抛，而这个异常从渲染回调抛出没人接得住，直接把 pi `exit(1)`（2026-09-20 实测）。
+ * 所以「拿不到皮肤」必须是这一帧不画竖线，而不是把异常放出去。
+ */
+test("旧 ctx 已作废时渲染不抛、也不画竖线（渲染 tick 落进替换窗口不能掀翻 pi）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		await fireSessionStartWithCtx(extension, staleCtx());
+
+		const lines = renderUserMessage(MESSAGE, WIDTH); // 以前这里抛 → 直达 pi 的 uncaughtException
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "读不到皮肤就不画竖线");
+		assert.equal(lines.length >= 3, true, "消息本身照常渲染（上下留白 + 正文）");
+		assert.equal(plainText(lines.join("\n")).includes("第一行正文"), true, "正文一字不少");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * 回归：`session_shutdown` 一到就复位取色源。断言方式是「让旧 ctx 之后开始抛」—— 复位生效的话
+ * 渲染根本不会去读它；没复位则会像上一条那样抛。
+ */
+test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此后开始抛也不炸）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		let live = true;
+		const theme = createTheme();
+		await fireSessionStartWithCtx(extension, {
+			ui: {
+				get theme() {
+					if (!live) throw new Error(STALE_CTX);
+					return theme;
+				},
+			},
+		});
+		const before = renderUserMessage(MESSAGE, WIDTH);
+		assert.equal(before.some((line) => line.includes(barOf(BAR_FG))), true, "换之前有皮肤，画竖线");
+
+		await fireSessionShutdown(extension);
+		live = false; // 此刻起旧 ctx 已作废：只要有人读它就会抛
+		const after = renderUserMessage(MESSAGE, WIDTH);
+
+		assert.equal(after.some((line) => line.includes(BAR)), false, "shutdown 之后不画竖线");
+		for (const [i, line] of after.entries()) assert.equal(line, before[i]?.replace(barOf(BAR_FG), " "), `第 ${i} 行回到未打补丁的样子`);
+	} finally {
 		workspace.cleanup();
 	}
 });

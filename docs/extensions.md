@@ -75,11 +75,11 @@ Removes code fences, including the language label, and lays the code out with pi
 Replaces pi's footer with one status line and one status row:
 
 ```
-⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | main | (+0,-0)
+⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ⑂ main | (+0,-0)
 📁 /Users/you/project
 ```
 
-The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The second row renders whatever other extensions pass to `ctx.ui.setStatus()` (this is where `cwd-statusline`, `simple-task` and `rewind` write). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
+The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The branch icon is `⑂` (U+2442, OCR FORK) — one column wide and East Asian Width Neutral, so a CJK-configured terminal cannot render it double-width, and deliberately **not** a Nerd Font glyph, so no patched font is needed. The second row renders whatever other extensions pass to `ctx.ui.setStatus()` (this is where `cwd-statusline`, `simple-task` and `rewind` write). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
 
 - `PI_STATUSLINE_FREEZE=off` — disable the footer freeze. On every session switch pi unconditionally restores its builtin footer and clears all `setStatus` values, and no extension hook runs before that frame. The guard replays the previous frame's lines instead, which removes a visible flash. Turning it off restores the flash.
 - `PI_STATUSLINE_BOOT_SUPPRESS=off` — disable boot-window suppression. pi's built-in footer exists before the first extension runs (measured on this setup: its first frame lands at ~480 ms, this statusline at ~1.2 s), so without it you see the default state line and then watch the statusline replace it. [`statusline/footer-suppress.ts`](../extensions/statusline/footer-suppress.ts) patches `FooterComponent.prototype.render` at **extension-factory time** — before pi's TUI is constructed — to return zero lines, and releases it the moment our footer is installed. A 30 s cap releases it anyway when the handoff never happens (an extension error, or a non-TUI mode), so the bottom is never left permanently empty. The two windows have independent switches because they need different remedies: this one has no previous frame to replay, the freeze above has one.
@@ -135,7 +135,7 @@ The bar occupies the one column of left padding that `Box` already reserves — 
 
 The color is the theme's `toolDiffAdded` — the slot pi's built-in diff gives added-line numbers, and that [`tool-diff.ts`](../extensions/tool-diff.ts) gives the `+` column — with `selectedBg`, `accent` and `text` as fallbacks for themes that leave it undefined.
 
-pi's extension API reaches user messages only through `registerMarkdownTransformer`, which is string-level and never sees the box a message is rendered into, so the bar is drawn by patching `UserMessageComponent.prototype.render`. The patch goes in while the module is evaluated (before any frame is rendered, so resumed sessions get bars too) and is handed the live theme proxy on `session_start`, which is what makes it follow `/theme`. The logic lives in [`user-message-bar/bar.ts`](../extensions/user-message-bar/bar.ts), which takes both the component and the theme as arguments; [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) renders through pi's own `UserMessageComponent`.
+pi's extension API reaches user messages only through `registerMarkdownTransformer`, which is string-level and never sees the box a message is rendered into, so the bar is drawn by patching `UserMessageComponent.prototype.render`. The patch goes in while the module is evaluated (before any frame is rendered, so resumed sessions get bars too) and is handed the live theme proxy on `session_start`, which is what makes it follow `/theme`. That source has to be dropped again on `session_shutdown`: when the session is replaced (`/clear`, `/new`, `/resume`, `/fork`, `/reload`) pi invalidates the old `ctx` while the previous session's user messages are still mounted and being rendered, and a stale-context read from inside a render tick — where no `try/catch` of ours can catch it — reaches pi's `uncaughtException` and kills the process. The event fires before the invalidation, and reading the theme is wrapped in a `try/catch` on top of that, so the worst case is a few frames without the bar; the next `session_start` restores it. The logic lives in [`user-message-bar/bar.ts`](../extensions/user-message-bar/bar.ts), which takes both the component and the theme as arguments; [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) renders through pi's own `UserMessageComponent`, including the two regressions for the invalidated-`ctx` window.
 
 - `PI_USER_MESSAGE_BAR=off` — leave user message boxes as they are.
 - `PI_USER_MESSAGE_BAR_COLOR` (default `toolDiffAdded`) — theme slot to take the color from; a background slot such as `selectedBg` is converted to a foreground.
@@ -174,7 +174,7 @@ State is written with `pi.appendEntry()`, so it rides the session log and **noth
 
 ### `recap/` — conversation summary
 
-`/recap` summarizes the conversation on demand; the same summary appears automatically above the editor after **30 seconds of idling** with no new input, and disappears as soon as you type.
+`/recap` summarizes the conversation on demand; the same summary appears automatically above the editor after **10 seconds of idling** with no new input, and disappears as soon as you type.
 
 The delay is the point: the recap exists to tell you what a session was doing when you come back to the window, so it is idle-based rather than turn-based. The timer first asks whether any subagent is still running (an in-process RPC to `pi-subagents`, no file import — a missing package is treated as "no subagents") so a background delegation is never summarized as finished.
 

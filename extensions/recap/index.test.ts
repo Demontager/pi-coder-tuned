@@ -3,7 +3,7 @@
  *
  * Run with:  node --test clients/pi/extensions/recap/index.test.ts
  *
- * This one takes ~75s on purpose: the 30s idle threshold is hard-coded and the test uses
+ * This one takes ~35s on purpose: the 10s idle threshold is hard-coded and the test uses
  * real timers (the whole point is "does it *not* recap while work is still running"), so
  * nothing is shortened or faked as a shortcut. What is faked is everything outside the
  * extension: the ctx (a canned last exchange + a recording modelRegistry/ui) and the
@@ -11,11 +11,11 @@
  * `./subagents.ts` import and the handler/command registrations are covered too.
  *
  * Timeline asserted:
- *   agent_settled → 30s idle → probe #1 says "1 subagent running"  → no recap
+ *   agent_settled → 10s idle → probe #1 says "1 subagent running"  → no recap
  *                              (only a 10s poll is armed)
  *   flip the fake fleet to idle → probe #2 says "nothing running"  → still no recap
- *                              (the 30s idle timer restarts)
- *   → 30s later → recap generated and shown.
+ *                              (the 10s idle timer restarts)
+ *   → 10s later → recap generated and shown.
  *
  * The second test covers the widget's breathing line: the blank line above the recap is
  * decided at render time by walking the editor's widget container (`../simple-task/gap.ts`)
@@ -175,7 +175,7 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 	};
 }
 
-test("有子代理在跑时不生成摘要；等它结束后重新起 30s 定时再生成", { skip, timeout: 180_000 }, async () => {
+test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时再生成", { skip, timeout: 180_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = createTestBus();
@@ -224,25 +224,25 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 30s 定时
 		const recorder: Recorder = { completeCalls: 0, widgets: [] };
 		const ctx = createContext(recorder);
 
-		// 回合结束：起 30s 空闲表（此刻不会有任何输出）。
+		// 回合结束：起 10s 空闲表（此刻不会有任何输出）。
 		await settled({}, ctx);
 		assert.equal(recorder.completeCalls, 0);
 		assert.equal(recorder.widgets.length, 0);
 
-		// ~30s 后第一次探测：假舰队里有 1 个活跃子代理 → 只重查，不生成。
-		await waitFor(() => bridge.requests.length >= 1, 45_000, "空闲 30s 后的第一次子代理探测");
+		// ~10s 后第一次探测：假舰队里有 1 个活跃子代理 → 只重查，不生成。
+		await waitFor(() => bridge.requests.length >= 1, 45_000, "空闲 10s 后的第一次子代理探测");
 		assert.equal(bridge.requests[0]?.method, "status");
 		assert.equal(recorder.completeCalls, 0, "有子代理在跑时绝不能生成摘要");
 		assert.equal(recorder.widgets.length, 0, "有子代理在跑时不能出现 recap widget");
 
 		// 子代理结束：等下一次重查（10s 一轮）确认「没活了」——但这时也不生成，
-		// 而是重新起一轮 30s 定时（结果刚回来、被唤醒的回合正要跑，现在总结是半截的）。
+		// 而是重新起一轮 10s 定时（结果刚回来、被唤醒的回合正要跑，现在总结是半截的）。
 		bridge.active = false;
 		await waitFor(() => bridge.requests.length >= 2, 15_000, "waiting 模式下的 10s 重查");
-		assert.equal(recorder.completeCalls, 0, "刚查到没活时应重新起 30s 定时，而不是立刻生成");
+		assert.equal(recorder.completeCalls, 0, "刚查到没活时应重新起 10s 定时，而不是立刻生成");
 
-		// 重新起表后 30s：生成并显示摘要。
-		await waitFor(() => recorder.completeCalls >= 1, 45_000, "重新起表 30s 后的摘要生成");
+		// 重新起表后 10s：生成并显示摘要。
+		await waitFor(() => recorder.completeCalls >= 1, 45_000, "重新起表 10s 后的摘要生成");
 		assert.equal(recorder.widgets.length, 1, "摘要应该已经挂上 widget");
 
 		// widget 渲染的是清洗后的摘要文本（`✦ Recap:` 前缀 + 下方空行）。
@@ -280,7 +280,7 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		const command = loaded.extensions[0]?.commands.get("recap");
 		assert.ok(command, "应该注册了 /recap 命令");
 
-		// /recap 是 force=true 的那条路（不走 30s 闲置闸门），拿到的 widget 工厂就是渲染现场。
+		// /recap 是 force=true 的那条路（不走 10s 闲置闸门），拿到的 widget 工厂就是渲染现场。
 		const recorder: Recorder = { completeCalls: 0, widgets: [] };
 		await command.handler("", createContext(recorder));
 		assert.equal(recorder.widgets.length, 1, "/recap 应该挂上 widget");

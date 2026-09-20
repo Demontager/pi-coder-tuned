@@ -49,20 +49,24 @@ export const ELLIPSIS = "…";
  */
 export const MODEL_ICON = "⚡️";
 /**
- * 分支段前缀图标：U+E0A0（Powerline / Nerd Font 的 git branch 字形），取代早期的 `⎇`(U+2387)。
- * 这码位在私有区，源码里只写转义不写裸字形 —— 裸字形在字体缺字形时是看不见的方块，贴错成
- * 近形码位（U+E0A2 / U+E0B0）review 时也看不出来，所以测试用转义把码位钉死。
- * 宽度按 pi-tui `visibleWidth` 是 1 列，与旧图标相同，`truncateToWidth` 的截断预算不用动。
- * 前提是终端用 Nerd Font —— 本机 Ghostty 配的 JetBrainsMonoNL Nerd Font Mono 即是。
+ * 分支段前缀图标：`⑂`（U+2442，OCR FORK —— 一个分叉的样子）。它取代了私有区的 Powerline /
+ * Nerd Font 字形 U+E0A0 —— 那个码位在字体缺字形时只是一个看不见的方块，而 ⑂ 是普通符号
+ * （更早还用过 `⎇`(U+2387)）。源码里仍写转义、测试仍按码位钉死，防止以后被换成近形字符
+ * （同区块的 `⑃`(U+2443, OCR INVERTED FORK) 长得几乎一样）。
+ * 宽度按 pi-tui `visibleWidth` 是 1 列、East Asian Width = Neutral（不是 Ambiguous），
+ * 所以 `truncateToWidth` 的截断预算不用动，也不存在 CJK 宽度下按 2 列渲染的错位。
+ * 字形可得性（2026-09-20 用 fontTools 核过本机字体栈）：U+2442 只在 Ghostty 字体栈的第一位
+ * `Lyth Mono Term` 里有 —— `JetBrainsMonoNL Nerd Font Mono` 与 `Maple Mono SC NF` 都没有，
+ * 它靠字体回退渲染；哪天换字体栈掉成缺字方块，优先考虑回到 U+E0A0。
  */
-export const BRANCH_ICON = "\ue0a0";
+export const BRANCH_ICON = "\u2442";
 /** 行首缩进：整行不顶格。 */
 export const LEADING_INDENT = " ";
 /** 本扩展自己的 setStatus key（清残留用，渲染时也跳过）。 */
 export const STATUSLINE_KEY = "statusline";
 const MAX_STATUS_ITEMS = 5;
 
-/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \ue0a0 branch | (+a,-b)[ | 状态]`，各段已着色。 */
+/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u2442 branch | (+a,-b)[ | 状态]`，各段已着色。 */
 export function formatMainLine(
 	theme: StatuslineTheme,
 	source: StatuslineSource,

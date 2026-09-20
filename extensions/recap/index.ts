@@ -3,14 +3,14 @@
  *
  * 功能只有两条，刻意做到最小：
  *   1. `/recap` —— 手动总结当前对话；
- *   2. 对话结束后**静止 30 秒**（没有任何新输入）自动生成一条摘要，显示在输入框上方。
+ *   2. 对话结束后**静止 10 秒**（没有任何新输入）自动生成一条摘要，显示在输入框上方。
  *   发出新消息后摘要立即消失（它已经是上一轮的过期提醒了）。
  *
- * **有子代理在跑时不算「结束」**：静止 30s 只是「主回合结束了」的信号，而异步子代理
+ * **有子代理在跑时不算「结束」**：静止 10s 只是「主回合结束了」的信号，而异步子代理
  * （`subagent({ async: true })`）是脱离回合的 —— 主回合早早 settled，子代理还在后台跑，
- * 30s 到点就会把「刚把任务发出去、还在等」总结成「这轮干完了」。所以计时器到点先问一句
+ * 10s 到点就会把「刚把任务发出去、还在等」总结成「这轮干完了」。所以计时器到点先问一句
  * 「还有子代理在跑吗」（pi-subagents 的进程内 RPC，见 `subagents.ts`）：有就只重查、
- * 不生成，等它们都结束了再重新起一轮 30s 定时。同一个回合还在跑时（`ctx.isIdle()`
+ * 不生成，等它们都结束了再重新起一轮 10s 定时。同一个回合还在跑时（`ctx.isIdle()`
  * 为 false，例如被异步子代理的完成通知唤醒的新回合）同样不生成。
  *
  * 为什么要自己写而不是用 pi-recap：
@@ -29,7 +29,7 @@
  *     所以它既不会出现在会话日志里，也不会被后续请求带进上下文。生成走的是一次独立的
  *     `modelRegistry.complete()` 调用，与主对话的请求互不相干。
  *     代价：`/new` 或 `/resume` 后摘要不会恢复（这是刻意的，不是 bug）。
- *   - **不做任何配置**：闲置阈值写死 30s，语言写死中文，不提供环境变量、不提供开关命令。
+ *   - **不做任何配置**：闲置阈值写死 10s，语言写死中文，不提供环境变量、不提供开关命令。
  *   - 不 import `@fradser/pi-recap` 的任何文件（虽然它把 `generateRecap` / `buildRecapPrompt` /
  *     `getLastExchange` 都导出了，复用能少写约 100 行，但那会把本扩展绑死在第三方包的内部
  *     文件布局上 —— 它一升级或一卸载本扩展就崩）。提示词、清洗、取最后一轮对话全部自己实现。
@@ -44,10 +44,10 @@
  *
  * 生命周期：
  *   `agent_start`        → 取消计时器（新一轮开始，上一轮排的摘要已经过期）
- *   `agent_settled`      → 起 30s 计时器（每轮结束都重置）
+ *   `agent_settled`      → 起 10s 计时器（每轮结束都重置）
  *   计时器到点（空闲）   → 没有子代理在跑？→ 生成摘要 → 显示 widget
  *                        还有子代理在跑 → 不生成，改 10s 一次重查
- *   计时器到点（重查）   → 还在跑 → 继续重查；都没了 → 重新起 30s 定时
+ *   计时器到点（重查）   → 还在跑 → 继续重查；都没了 → 重新起 10s 定时
  *   `input`（交互输入）  → 取消计时器 + abort 生成 + 清 widget
  *   `session_start`      → 清内存状态与 widget（新会话/恢复会话都不该带着上一会话的摘要）
  *   `session_shutdown`   → 停表 + abort
@@ -58,7 +58,7 @@
  *
  * 必须防的坑（`simple-task/` 踩过的同一个）：
  *   **捕获的 `ctx` 在会话结束后会 stale**，访问 `ctx.ui` 会抛
- *   `"This extension ctx is stale after session replacement or reload"`。30s 计时器会比会话
+ *   `"This extension ctx is stale after session replacement or reload"`。10s 计时器会比会话
  *   活得久，抛出发生在读 `ctx.ui` 那一刻、比 widget 的 `render()` 更早，所以 render 内部的
  *   try/catch 拦不住 —— 一个活过会话的定时器会**直接把宿主进程带崩**。因此三层防护：
  *   所有 `ctx.ui` 访问都包 try/catch、`session_shutdown` 里立刻停表 + abort、计时器 `unref()`。
@@ -71,7 +71,7 @@ import { hasActiveSubagentWork } from "./subagents.ts";
 import { widgetGaps } from "../simple-task/gap.ts";
 
 /** 对话结束后静止多久才生成摘要。写死，不做配置。 */
-const IDLE_MS = 30_000;
+const IDLE_MS = 10_000;
 /** 还有子代理在跑时的重查间隔（只重查、不生成）。 */
 const SUBAGENT_WAIT_MS = 10_000;
 /** 生成的硬超时，到点 abort。 */
@@ -134,9 +134,9 @@ export default function (pi: ExtensionAPI) {
 	 * 计时器到点：先确认「真的没事干了」，再决定生成、继续等、还是重新起表。
 	 *
 	 *   - 还有活（回合在跑 / 有子代理在跑） → 转 `waiting` 重查（不生成）
-	 *   - `waiting` 重查到没活了         → 转 `idle` 重新起 30s 定时
+	 *   - `waiting` 重查到没活了         → 转 `idle` 重新起 10s 定时
 	 *     —— 子代理结束的那一刻不生成摘要：结果刚回来、被唤醒的回合正要跑，
-	 *        这时生成的摘要必然是半截的；让正常的回合结束 → 静止 30s 流程接管。
+	 *        这时生成的摘要必然是半截的；让正常的回合结束 → 静止 10s 流程接管。
 	 *   - `idle` 重查到没活了              → 生成摘要
 	 *
 	 * 探测是一次事件总线上的一问一答（最多 1s），期间用户可能发新消息、新一轮可能开始，
@@ -221,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 						// 上方挨着别的 widget（任务清单 / `async subagent` 块…）就补一行前导空行。
 						// 判据与 simple-task 共用（`gap.ts` 文件头：邻居面向自己那一侧有可见内容、
 						// 且不是空行 → 补）。pi 按 Map 插入顺序渲染编辑器上方的容器，recap 永远
-						// 最后注册（闲置 30s 后才注册），所以上方的邻居才是常态。
+						// 最后注册（闲置 10s 后才注册），所以上方的邻居才是常态。
 						let gapAbove = false;
 						if (!inspectingNeighbours) {
 							inspectingNeighbours = true;

@@ -23,13 +23,13 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 622 tests, ~73 s
+npm test        # node --test — 624 tests, ~34 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 622 tests, ~74 s
+node --test --test-concurrency=4      # 624 tests, ~34 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
@@ -84,7 +84,7 @@ tmux kill-session -t pi-check
 Everything below is documented because it cost real debugging time. The full reasoning is in the file headers named next to each item.
 
 - **A hidden column still accepts the cursor.** `prompt-editor` hides the `!` of bash mode, but `Editor` keeps the cursor column in private state with no public setter, so the extension calls `setCursorCol(1)` directly and degrades to "the cursor stays at column 0" if pi ever renames it — a cosmetic regression only. Letting the cursor sit on the hidden column writes `x!ls` into the text, at which point pi decides it is no longer bash mode.
-- **A `ctx` captured before a session replacement goes stale**, and reading `ctx.ui` throws `This extension ctx is stale after session replacement or reload`. The throw happens when you read the property, before any widget `render()` runs, so a `try/catch` inside `render()` cannot catch it. A timer that outlives the session takes the host process down with it (`exit=1`). `simple-task/` and `working-indicator/` therefore all three: catch inside the callback and stop the timer, wrap every `ctx.ui` access, and stop timers in `session_shutdown`.
+- **A `ctx` captured before a session replacement goes stale**, and reading `ctx.ui` throws `This extension ctx is stale after session replacement or reload`. The throw happens when you read the property, before any widget `render()` runs, so a `try/catch` inside `render()` cannot catch it. A timer that outlives the session takes the host process down with it (`exit=1`). `simple-task/` and `working-indicator/` therefore all three: catch inside the callback and stop the timer, wrap every `ctx.ui` access, and stop timers in `session_shutdown`. `user-message-bar/` hit the other half of the same hazard: pi invalidates the old `ctx` in its teardown while the previous session's user messages are still mounted and rendering, so a stale-context read from inside a **render tick** — where nothing can catch it — reaches the host's `uncaughtException` and kills pi (`/clear` was the reproduction). It resets its color source on `session_shutdown`, which fires before the invalidation, and reads the theme through a `try/catch`; the worst case is a few frames without the bar.
 - **A throwing `renderCall` is silently swallowed** and replaced by `createCallFallback()`: something disappears from the UI and nothing is logged.
 - **Tool registration is first-registration-wins per name.** A second extension registering `bash` is ignored without a warning — which is why everything that shapes `bash` rendering lives in one file.
 - **Reading pi state at module top level breaks; patching a class prototype does not.** In the bundled CLI, `@earendil-works/pi-coding-agent` resolves through the loader's `virtualModules` to the same chunk `interactive-mode.js` uses — but importing `keyHint`/`keyText` yields another module instance's state (`Theme not initialized`, or an empty string), so key names are read from `~/.pi/agent/keybindings.json` instead. The rule is about *state*, not classes: `statusline/footer-suppress.ts` imports `FooterComponent` from the package root and patches `prototype.render`, and an A/B capture shows the patch landing on the instance pi itself constructs. `startup-logo` still wraps its package-root import in a `try/catch`.
