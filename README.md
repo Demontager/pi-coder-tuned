@@ -1,4 +1,4 @@
-**[Themes Live Demo](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html)**
+**[Themes Live Demo](https://jayli.github.io/1d/pi-coder-palettes.html)**
 
 # @bachi/pi-coder
 
