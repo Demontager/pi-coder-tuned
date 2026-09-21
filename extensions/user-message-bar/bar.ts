@@ -2,22 +2,30 @@
  * user-message-bar — 纯逻辑：用户消息框每行行首加一条竖线
  *
  * 用户消息框本来就是 `Box(paddingX = outputPad, paddingY = 1)` + `userMessageBg` 底色，
- * 上下各一行空白内边距。本扩展给**每一行**（含上下那两条空白行）行首加一条竖线：
+ * 上下各一行空白内边距。本扩展给**每一行**（含上下那两条空白行）行首加一条竖线，正文再空一格：
  *
- *     ▏
- *     ▏正文正文
- *     ▏
+ *     ▎
+ *     ▎ 正文正文
+ *     ▎
  *
- * 竖线占的正是**原本就存在的那一格左内边距**：把行首第一格空格换成 `▏`，于是底色、行宽、
- * 正文折行位置全都与改之前一模一样。这一格不能靠「加一格等终端截断」省事 —— pi-tui 的主屏
- * 渲染器发现任何一行超过终端宽度就**直接抛错**（`tui-main-screen.js` 先把整屏 dump 进
- * `pi-tui-crash.log`，再 throw `Rendered line N exceeds terminal width`），整个 TUI 会崩掉。
+ * 竖线占的正是**原本就存在的那一格左内边距**：把行首第一格空格换成 `▎`；正文前多空的那一格
+ * （`BAR_INDENT`）则从**行尾补白**里等量吃掉，于是底色、行宽、正文折行位置全都与改之前一模一样。
+ * 一格都不能靠「加一格等终端截断」省事 —— pi-tui 的主屏渲染器发现任何一行超过终端宽度就
+ * **直接抛错**（`tui-main-screen.js` 先把整屏 dump 进 `pi-tui-crash.log`，再 throw
+ * `Rendered line N exceeds terminal width`），整个 TUI 会崩掉。
  *
- * 颜色取皮肤的 **`toolDiffAdded`** —— 也就是 diff 新增行行号的那个颜色（pi 内置 diff 渲染器
- * 写的是 `theme.fg("toolDiffAdded", "+" + lineNum + …)`，本仓自写的 `tool-diff.ts` 里 add 行的行号
- * 同样走 `FG_ADD` = `toolDiffAdded`），所以它天然是这套皮肤里"新增/正向"的那个亮色。
+ * 行尾那格补白一定够吃：`paddingX = 1` 时 Box 只给孩子 `width - 2` 列，正文再长也留得下一格。
+ * `outputPad = 0`（pi 的设置项）时行首没有内边距可占，竖线 + 缩进共两格都得向行尾借 —— 借不够
+ * 就先保住竖线（少空那一格），连一格都借不出来时这行干脆不加（宁可少画，不能撑宽）。
+ *
+ * 颜色取皮肤的 **`accent`** —— 这套皮肤里"强调/正向"的那个亮色。
  * 它是**前景**槽，直接拿 `getFgAnsi` 用；想换别的槽位（包括 `selectedBg` 这种背景槽，会做一次
- * 48→38 的等值转换当前景用）用 `PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>`。
+ * 48→38 的等值转换当前景用）用 `PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>`。竖线自带前景复位，
+ * 所以竖线后面那个空格不会被染上前景色。
+ *
+ * 竖线那一格**跟着消息底色**（不抠）：Box 把整行裹在 `theme.bg("userMessageBg", …)` 里，
+ * 竖线就坐在里面，字形与底色块连成一片。曾经在竖线前插 `49m`、画完再还原，让那一格裸着，
+ * 结果底色块左边缘被抠出一个缺角 —— 实测观感更差，已回退（别再改回去）。
  *
  * 为什么必须打原型补丁：pi 的扩展 API 里跟用户消息沾边的只有 `registerMarkdownTransformer`，
  * 它是**字符串级**的、只看得见正文源文，看不见 Box 补出来的上下空白行与左内边距 —— 而那两样
@@ -31,17 +39,20 @@
  * 本模块不 import pi / pi-tui：取色源与组件类都由调用方注入，`node --test` 能直跑。
  */
 
-/** 竖线字形：`▏`（U+258F，左侧八分之一块）。 */
-export const BAR_GLYPH = "\u258f";
+/** 竖线字形：`▎`（U+258E）。 */
+export const BAR_GLYPH = "\u258E";
 
-/** 默认取色槽：diff 新增行的行号色（`toolDiffAdded`，见文件头）。 */
-export const DEFAULT_COLOR_NAME = "toolDiffAdded";
+/** 竖线与正文之间空出的半角格数（正文因此比行首竖线缩进两格）。 */
+export const BAR_INDENT = 1;
+
+/** 默认取色槽：皮肤的强调色（`accent`，见文件头）。 */
+export const DEFAULT_COLOR_NAME = "accent";
 
 /**
- * 首选槽位取不到时的兜底顺序（皮肤可能不定义 `toolDiffAdded`，旧皮肤尤其常见）：
- * 新增行号色 → 选中色 → 强调色 → 正文色。
+ * 首选槽位取不到时的兜底顺序（皮肤可能不定义 `accent`，旧皮肤尤其常见）：
+ * 强调色 → 选中色 → diff 新增行行号色 → 正文色。
  */
-const FALLBACK_COLOR_NAMES = ["selectedBg", "accent", "text"];
+const FALLBACK_COLOR_NAMES = ["selectedBg", "toolDiffAdded", "text"];
 
 const ESC = "\u001b";
 const BEL = "\u0007";
@@ -61,40 +72,50 @@ const LEADING_ANSI = new RegExp(`^(?:${ANSI_PART})*`);
 const ONLY_ANSI = new RegExp(`^(?:${ANSI_PART})*$`);
 
 /**
- * 给一行加竖线：吃掉落内边距那一格空格换成竖线，行宽与原来完全一致。
+ * 给一行加竖线：吃掉落内边距那一格空格换成竖线，正文前空 `indent` 格，
+ * 空出来的这几格从行尾补白里等量吃掉 —— 整行可见宽度与原来完全一致。
  *
- * 两种边角情况（都不撑宽，宁可这一行没有竖线）：
- *   - `outputPad = 0`（pi 的设置项）时行首就是正文，不能吃字符 —— 改为从行尾的补白里等量
- *     抵消一格，竖线插在正文前面。
- *   - 行尾连补白都没有（正文正好铺满一行）时原样返回。
+ * 竖线**不抠底色**：它直接坐在 Box 的 `userMessageBg` 里（pi 的 Box 把整行裹在
+ * `theme.bg("userMessageBg", …)` 中），于是那一格与整块消息底色连成一片、只在左边缘多出一个
+ * 字形。曾经在竖线前插 `49m` 再还原，结果底色块左边缘被抠出一个缺角，观感反而更差（已回退）。
+ *
+ * 四种边角情况（都不撑宽，最坏是这一行没有竖线）：
+ *   - `outputPad = 0`（pi 的设置项）时行首就是正文，那一格内边距不存在 —— 竖线本身也得从
+ *     行尾补白里借一格，竖线插在正文前面。
+ *   - 行尾补白不够空 `indent` 格时退化成「只加竖线、不空那一格」。
+ *   - 行尾连竖线那一格都借不出来（正文正好铺满一行）时原样返回。
  */
-export function addBarToLine(line: string, bar: string): string {
+export function addBarToLine(line: string, bar: string, indent: number = BAR_INDENT): string {
 	const head = LEADING_ANSI.exec(line)?.[0] ?? "";
 	const rest = line.slice(head.length);
 
-	// 常规路径：行首第一格是 Box 的左内边距
-	if (rest.startsWith(" ")) return `${head}${bar}${rest.slice(1)}`;
+	// Box 的左内边距（0 / 1 格）：在的话这一格直接当竖线的落脚点
+	const pad = rest.startsWith(" ") ? 1 : 0;
+	const body = pad === 1 ? rest.slice(1) : rest;
 
-	// 无内边距：从行尾补白里吃掉一格抵消
-	const paddingStart = trailingPaddingStart(line);
-	if (paddingStart > head.length) {
-		return `${head}${bar}${line.slice(head.length, paddingStart)}${line.slice(paddingStart + 1)}`;
-	}
+	const padding = trailingSpaceRun(body);
+	const spare = padding ? padding.end - padding.start : 0;
+	const neededByBar = 1 - pad; // 竖线自己要从行尾借的格数
+	if (spare < neededByBar) return line;
 
-	return line;
+	const used = Math.min(indent, spare - neededByBar);
+	const dropped = neededByBar + used;
+	const trimmed = padding ? body.slice(0, padding.end - dropped) + body.slice(padding.end) : body;
+
+	return `${head}${bar}${" ".repeat(used)}${trimmed}`;
 }
 
 /**
- * 行尾「纯空格补白」这段的起点，没有则 -1。判定要求空格后面**只有**零宽序列（`\x1b[49m` 之类），
- * 否则那段空格是正文里的空格，动它会吃掉真正的字符。
+ * 行尾「纯空格补白」这段的下标区间（相对整行），没有则 undefined。判定要求空格后面**只有**
+ * 零宽序列（`\x1b[49m` 之类），否则那段空格是正文里的空格，动它会吃掉真正的字符。
  */
-function trailingPaddingStart(line: string): number {
+function trailingSpaceRun(line: string): { start: number; end: number } | undefined {
 	const last = line.lastIndexOf(" ");
-	if (last < 0) return -1;
-	if (!ONLY_ANSI.test(line.slice(last + 1))) return -1;
+	if (last < 0) return undefined;
+	if (!ONLY_ANSI.test(line.slice(last + 1))) return undefined;
 	let start = last;
 	while (start > 0 && line[start - 1] === " ") start -= 1;
-	return start;
+	return { start, end: last + 1 };
 }
 
 /** 取色源：pi 的 `Theme` 实例（只用到这两个方法，注入后本模块与 pi 解耦）。 */
@@ -159,9 +180,9 @@ export interface UserMessageBarOptions {
 	UserMessageComponent: { prototype: Record<string | symbol, unknown> };
 	/** 取当前皮肤的 Theme，渲染时求值 —— `ctx.ui.theme` 是跨 `/theme` 换肤的活 Proxy。 */
 	theme: () => ThemeColorSource | undefined;
-	/** 取色槽位名，默认 `toolDiffAdded`（diff 新增行行号色）。 */
+	/** 取色槽位名，默认 `accent`（皮肤的强调色）。 */
 	colorName?: string;
-	/** 字形，默认 `▏`。 */
+	/** 字形，默认 `▎`（U+258E）。 */
 	glyph?: string;
 }
 

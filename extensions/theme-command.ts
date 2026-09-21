@@ -38,7 +38,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, truncateToWidth, type Component, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, SelectList, Spacer, truncateToWidth, type Component, type SelectItem } from "@earendil-works/pi-tui";
 
 /** SelectList 一次最多显示几行（色板还要占 5 行，别让选择器顶满屏） */
 const MAX_VISIBLE = 8;
@@ -160,6 +160,8 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		selectList.onCancel = () => done({ action: "cancel", previewed });
 
 		container.addChild(selectList);
+		// 主题列表与下方色卡之间空一行：两者都是多行块，紧贴在一起分不清两个区域的边界。
+		container.addChild(new Spacer(1));
 		container.addChild(new LiveText((width) => swatchLines(previewTheme, width)));
 		container.addChild(
 			new LiveText((width) => [

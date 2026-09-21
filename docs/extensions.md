@@ -1,6 +1,6 @@
 # Extensions reference
 
-24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Three more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`) contain pure-logic modules only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them.
+24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Four more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -28,14 +28,15 @@ pi registers one handler per tool name (first registration wins), so each of the
 
 ### `bash-command-collapse.ts` — the `bash` tool
 
-Collapses long commands to 3 visual lines followed by `… (123 tokens hidden)` — folding is always on, and the `/bash-collapse` command that used to switch it off or change the line budget is gone. Tree indentation and streaming keep only their startup env entry points (`PI_BASH_TREE`, `PI_BASH_STREAM`) — the `/bash-tree` and `/bash-stream` commands are gone too. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. `ctrl+o` expansion shows the command in full. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
+Collapses the command to **2 visual lines** behind a `Run ` prefix, with a trailing `…` on the last row and a `… +N lines` marker when source lines are left over; results hang off the same tree, and `└ ` appears **once**, on the first real output line. Command continuation rows and the truncation marker are indented to the `n` of `Run ` — two spaces while the command is starting, `│ ` once it has finished — and only the word `Run` is bold. `ctrl+o` expansion shows the command in full. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. Output preview lines default to 3 and the preview always keeps the command's status line. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
+
+A failed command is painted `error` rather than success — both the trailing status line and the exit-code footer. That decision reads `isError` **and** matches the status line's shape (`Command exited with code N`, `timed out after N seconds`, `aborted`), because shape alone would repaint a command that merely printed that text. The blank line `appendStatus` writes before the status is dropped instead of rendering as a gap in the tree, and the status line is exempt from preview trimming.
 
 - `PI_BASH_MIN_TIME_MS` (default `2000`) — only show the elapsed-time footer above this duration.
 - `PI_BASH_HIGHLIGHT=off` — disable shell syntax highlighting.
-- `PI_BASH_TREE=off` — disable tree indentation.
 - `PI_BASH_SPINNER=off` — disable the `●` on running rows (implemented in `working-indicator`).
 
-Two details that look simplified but cannot be: it decides "arguments are still streaming" from `!streaming && !argsComplete && isPartial === true` (both thresholds are required, or `/resume` replays lose the command line entirely), and `isError` must be read from `context`, not `result`, because pi's result renderer is called without that field.
+Two details that look simplified but cannot be: it decides "arguments are still streaming" from `!streaming && !argsComplete && isPartial === true` (both thresholds are required, or `/resume` replays lose the command line entirely), and `isError` must be read from `context`, not `result`, because pi's result renderer is called without that field. `PI_BASH_TREE` is gone: the prefix is a tree unconditionally. The shape and its 22 end-to-end assertions are in [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts), which renders through pi's own loader and `ToolExecutionComponent`.
 
 ### `read-path-collapse.ts` — the `read` tool
 
@@ -123,22 +124,24 @@ Three changes to the editor.
 
 ### `user-message-bar/` — the user message box
 
-Puts a `▏` at the start of **every** line of a user message box, including the blank padding lines above and below the text:
+Puts a `▎` and one space at the start of **every** line of a user message box, including the blank padding lines above and below the text, so the body sits two half-width columns in:
 
 ```
-▏
-▏body text
-▏
+▎
+▎ body text
+▎
 ```
 
-The bar occupies the one column of left padding that `Box` already reserves — the leading space is replaced, so the background, the line width and the wrap positions stay exactly as they were. That is not a cosmetic preference: pi-tui's main-screen renderer throws `Rendered line N exceeds terminal width` as soon as one line is a column too wide, which takes the whole TUI down, so a bar drawn *next to* the padding is not an option.
+The glyph occupies the one column of left padding that `Box` already reserves, and the extra indent column is taken back out of the line's **trailing** padding — so the background, the line width and the wrap positions stay exactly as they were. That is not a cosmetic preference: pi-tui's main-screen renderer throws `Rendered line N exceeds terminal width` as soon as one line is a column too wide, which takes the whole TUI down, so a bar drawn *next to* the padding is not an option. A line with no column to spare degrades to bar-without-indent, and a line with nothing to spare loses its bar rather than growing past the edge.
 
-The color is the theme's `toolDiffAdded` — the slot pi's built-in diff gives added-line numbers, and that [`tool-diff.ts`](../extensions/tool-diff.ts) gives the `+` column — with `selectedBg`, `accent` and `text` as fallbacks for themes that leave it undefined.
+The glyph deliberately stays inside the box's `theme.bg("userMessageBg", …)` span so the background block's left edge is continuous. An earlier revision emitted `49m` before the glyph and restored the background after it to leave that one cell bare; it notched the block's left edge and was reverted. Do not reintroduce it — the tests assert exactly one `49m` per line, the trailing one.
+
+The color is the theme's `accent` — the skin's emphasis color — with `selectedBg`, `toolDiffAdded` and `text` as fallbacks for themes that leave it undefined. `PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded` restores the added-line-number green this extension used before.
 
 pi's extension API reaches user messages only through `registerMarkdownTransformer`, which is string-level and never sees the box a message is rendered into, so the bar is drawn by patching `UserMessageComponent.prototype.render`. The patch goes in while the module is evaluated (before any frame is rendered, so resumed sessions get bars too) and is handed the live theme proxy on `session_start`, which is what makes it follow `/theme`. That source has to be dropped again on `session_shutdown`: when the session is replaced (`/clear`, `/new`, `/resume`, `/fork`, `/reload`) pi invalidates the old `ctx` while the previous session's user messages are still mounted and being rendered, and a stale-context read from inside a render tick — where no `try/catch` of ours can catch it — reaches pi's `uncaughtException` and kills the process. The event fires before the invalidation, and reading the theme is wrapped in a `try/catch` on top of that, so the worst case is a few frames without the bar; the next `session_start` restores it. The logic lives in [`user-message-bar/bar.ts`](../extensions/user-message-bar/bar.ts), which takes both the component and the theme as arguments; [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) renders through pi's own `UserMessageComponent`, including the two regressions for the invalidated-`ctx` window.
 
 - `PI_USER_MESSAGE_BAR=off` — leave user message boxes as they are.
-- `PI_USER_MESSAGE_BAR_COLOR` (default `toolDiffAdded`) — theme slot to take the color from; a background slot such as `selectedBg` is converted to a foreground.
+- `PI_USER_MESSAGE_BAR_COLOR` (default `accent`) — theme slot to take the color from; a background slot such as `selectedBg` is converted to a foreground.
 
 ### `working-indicator/` — the working message
 
@@ -292,7 +295,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_BASH_PREVIEW` | `3` | `bash-command-collapse` | bash output preview lines (1–50); `off` restores pi's built-in preview. |
 | `PI_BASH_SPINNER=off` | on | `working-indicator` | Disable the `●` spinner on running bash rows. |
 | `PI_BASH_STREAM=on` | off | `bash-command-collapse` | Use pi's native streaming for bash instead of the collapse path. |
-| `PI_BASH_TREE=off` | on | `bash-command-collapse` | Disable tree indentation (`│`/`└`) for bash output. |
+| `PI_BASH_TREE=off` | on | `bash-command-collapse` | Disable tree indentation (`│`/`└`) for bash output. **Retired** — the prefix is always a tree, the switch is no longer read. |
 | `PI_BELOW_EDITOR_AFTER_STATUSLINE=off` | on | `below-editor-after-statusline` | Leave `belowEditor` widgets where pi puts them. |
 | `PI_CWD_ICON` | ` 📁` | `cwd-statusline` | Icon used by the cwd status line. |
 | `PI_CWD_STATUSLINE=off` | on | `cwd-statusline` | Do not print the cwd status line. |
@@ -309,8 +312,8 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_STATUSLINE_BOOT_SUPPRESS=off` | on | `statusline` | Do not silence pi's built-in footer during the boot window, before this statusline is installed. |
 | `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
 | `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
-| `PI_USER_MESSAGE_BAR=off` | on | `user-message-bar` | Do not draw the `▏` bar into user message boxes. |
-| `PI_USER_MESSAGE_BAR_COLOR` | `toolDiffAdded` | `user-message-bar` | Theme slot the bar takes its color from; a background slot such as `selectedBg` is converted to a foreground. |
+| `PI_USER_MESSAGE_BAR=off` | on | `user-message-bar` | Do not draw the `▎` bar into user message boxes. |
+| `PI_USER_MESSAGE_BAR_COLOR` | `accent` | `user-message-bar` | Theme slot the bar takes its color from; a background slot such as `selectedBg` is converted to a foreground. |
 | `PI_WORKING_SUMMARY=off` | on | `working-indicator` | Disable the prompt summary line. |
 | `PI_WORKING_SUMMARY_GAP` | `1` | `working-indicator` | Minimum blank columns between the working label and the summary. |
 | `PI_WORKING_SUMMARY_LLM=off` | on | `working-indicator` | Truncate the summary instead of asking a model to compress it. |

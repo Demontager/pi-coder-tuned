@@ -2,6 +2,28 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.0.5 — 2026-09-21
+
+Snapshot sync: the bash tool call was rebuilt as a `Run ` command block on a single tree, a failed command is now recognized and painted red, and `user-message-bar` moved its default color from the added-line green to the skin's accent. The command shape and its 22 render assertions arrived together in a directory of their own, so the README's switch table no longer lists the long-gone `PI_BASH_TREE`, and the two count rows (`24 extensions`, test counts) were corrected.
+
+### Added
+
+- **`extensions/bash-command-collapse/render.test.ts`** — 22 end-to-end assertions for the bash block, rendered through pi's own loader and `ToolExecutionComponent` (`bash-command-collapse/` has no `index.ts`, so pi never loads it as an extension — the top-level file imports nothing from it, the directory exists for these tests). They pin the command shape (`Run ` prefix, 2 visual lines, trailing `…`, `… +N lines`), the continuation-column alignment, the single `└ `, the failure colouring in both states, the preview keeping the status line, and the visible width of every line against the terminal width.
+
+### Changed
+
+- **`bash-command-collapse.ts`** — the command block is now `Run ` + **at most 2 visual lines**, the second row's overflow replaced by a trailing `…` and a `… +N lines` marker when whole source lines are left over (the old shape was 3 visual lines plus `… (123 tokens hidden)`). Continuation rows and the marker align their body to the `n` of `Run `: two spaces while the command is starting, `│ ` once it has finished. Only the word `Run` is bold — wrapping the whole prefix would bold the trailing spacing cell too. Results hang off the same tree and `└ ` appears **once**, on the first real output line: the truncation hint keeps `│ `, everything below the corner (further output, warnings, `Took Xs`, `(no output)`) is indented to the body column without a bar, because the tree has already landed there. `PI_BASH_TREE` is retired — the prefix is always a tree — so `PI_BASH_STREAM`, `PI_BASH_PREVIEW`, `PI_BASH_HIGHLIGHT`, `PI_BASH_MIN_TIME_MS` and `PI_BASH_SPINNER` are the remaining switches.
+- **`bash-command-collapse.ts`** — a failed command is painted with the `error` slot instead of `success`, in the collapsed and the expanded view alike. pi appends the status as ordinary output (`appendStatus` writes `\n\n` + `Command exited with code N` / `timed out after N seconds` / `aborted`, and replaces the body with `(no output)` when there was none), so the blank line in front of it used to render as a gap with no prefix — right where the tree should continue. The status is now peeled off together with that blank line, the blank line is dropped, the status becomes a row the preview always keeps (otherwise preview trimming dropped it and left only `│ … (N earlier lines)`), and blank lines **above** the `└ ` get the `│ ` bar back so the fence does not break on them. Blank lines **below** the corner stay blank. Two conditions gate the colouring — `isError` from `context` and the status line's shape — because shape alone would repaint `echo "Command exited with code 2"`.
+- **`user-message-bar/`** — the bar's default colour is now the theme's `accent` (fallbacks `selectedBg` → `toolDiffAdded` → `text`) rather than `toolDiffAdded`, so the bar reads as the skin's emphasis colour; `PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded` restores the previous green on the two themes where the two slots differ.
+- **`theme-command.ts`** — the picker puts a `Spacer(1)` between the theme list and the colour swatches. Both are multi-line blocks and read as one region when they touch.
+- **`themes/pi-coder-summer-night.json`** — `syntaxComment` points at `dimText` (`#6b7089`) instead of the computed `commentBright` (`#6e7dc0`), so code comments match the `Think:` row and the settings hints; the cost is 4.36:1 → 3.50:1 against `night`, which is this palette's lowest tier. `commentBright` stays in the file unreferenced. `successCard` and `errorCard` are both `#161616` now, so the finished and failed tool cards no longer differ in temperature — only their foregrounds do; the shared value sits between the two it replaces (`#11171d` / `#191319`) at 1.133:1 against the terminal background and 1.059:1 against `night`.
+- **`assets/pi-coder-palettes.html`** and **[docs/handbook.zh.md](docs/handbook.zh.md)** resynced (the palette page is byte-identical to the upstream copy again, the handbook now carries the Chinese rationale for the four changes above).
+- **English documentation** updated for the same four changes: [docs/extensions.md](docs/extensions.md) (the bash block section, both `user-message-bar` switches, the retired switch row, the directory count), [docs/themes.md](docs/themes.md), [docs/installation.md](docs/installation.md) (the post-install checklist), [docs/development.md](docs/development.md) and [README](README.md).
+
+### Unchanged
+
+- The suite grows from **624 to 651 tests** (22 bash render assertions, five `user-message-bar` cases), ~36 s wall time. No other extension, theme or config file moved: the snapshot diff was exactly the files listed above.
+
 ## 2.0.4 — 2026-09-20
 
 Snapshot sync: the statusline branch icon moved to a code point no font on this machine covers, all three themes dropped their pending-card background, and `pi-coder-catppuccin` joined the other two on the neutral grey thinking border. The `tool-pending-bar` extension that briefly marked pending cards landed upstream and was reverted before this sync, so it is not part of the snapshot.

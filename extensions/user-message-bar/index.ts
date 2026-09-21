@@ -20,7 +20,7 @@
  * 兜一层 try/catch —— 最坏只是那几帧不画竖线，下一个 `session_start` 自动恢复。
  *
  * `PI_USER_MESSAGE_BAR=off` 关闭；`PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>` 换颜色
- * （默认 `toolDiffAdded`，即 diff 新增行行号的那个颜色；想要更暗可以试 `selectedBg`）。
+ * （默认 `accent`，即皮肤的强调色；想要更暗可以试 `selectedBg`）。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

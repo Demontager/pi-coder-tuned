@@ -1,34 +1,77 @@
 /**
  * Bash Command Collapse Extension
  *
- * 把 bash 工具调用里显示的 shell 命令折叠成前 N 个**视觉行** + 一行「被折叠内容有多大」
- * 提示，避免超长命令（heredoc、多行管道、内联脚本）刷屏。纯显示层：发给模型的 tool call
- * 参数、session 记录里的原文完全不变。
+ * 把 bash 工具调用的显示改成用户 2026-09-21 定的形状：命令最多两行（`Run ` 前缀、
+ * 行尾溢出换一个 `…`），结果挂在同一棵树下面（`│ ` 续段、`└ ` 只出现一次）。
+ * 纯显示层：发给模型的 tool call 参数、session 记录里的原文完全不变。
  *
- * 提示格式 `… (123 tokens hidden)`，token 为估算值。注意 thinking-collapse.ts 已经
- * 换成滚动窗口、不再输出这个提示（底部 spinner 在数 token），所以这套提示格式现在
- * 只剩 bash 命令折叠在用。
- * ctrl+o（app.tools.expand）展开工具输出时，命令也会完整显示。
+ * ## 目标形状（用户给的样例）
  *
- * ## 折叠视图：break-all 硬折行（不提前折行、不用 `…` 截断）
+ * `Run ` 替代 pi 内置的 `$ `；命令最多 **2 个视觉行**，第 2 行**不管溢出多少字符都只把
+ * 末尾换成 `…`**（不推进第 3 行）；命令本身更长时在第 2 行下面补一行 `… +N lines`。
+ * 这两行的起始列都对齐 `Run ` 里 `n` 那一列（第 3 列）。
+ *
+ * ```
+ * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
+ *   ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a
+ *   … +1 lines
+ * ```
+ *
+ * 这是**执行中**的形态：续行与 `… +N lines` 用等宽空格缩进。命令一执行完，这些行的
+ * 前缀就换成 `│ `（树接上了），并在 `Run ` 下面开始挂结果：
+ *
+ * ```
+ * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
+ * │ ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a
+ * │ … +1 lines
+ * │ … (20 earlier lines, ctrl+o to expand)
+ * └ 第一行实质输出
+ *   第二行输出
+ *   Took 2.4s
+ * ```
+ *
+ * `└ ` **只出现一次**，就在除截断提示（`… (N earlier lines, ctrl+o to expand)`）以外的
+ * **第一行实质输出**上；它下面的内容行（后续输出、warnings、`Took Xs` 页脚、没有输出时
+ * 的 `(no output)`）一律用等宽缩进（`  `）对齐正文列、不再画竖线 —— 树在 `└` 那里
+ * 就“落地”了。`└ ` 与它后面的正文之间有 `└ ` 自带的那一个空格。
+ *
+ * **`│` / `└` 是结构符，不是正文**：整棵树的竖线与拐角统一 `muted`，各自**自成一段**
+ * SGR（`styleCommandLine` 把前缀的颜色单独闭合在正文之前，`prefixTreeLines` 也只给前缀
+ * 上色）—— 前缀绝不继承后面那个 token 的颜色（命令续行后面可能是 string / path / comment
+ * 等任意 token，曾经路径那行的 `│` 就跟着 path 色飘了）。
+ *
+ * **只有 `Run` 这个词加粗**（`toolTitle` 正常色 + bold），行尾那格间距与整条命令正文一律
+ * 不加粗 —— 加粗是 `\x1b[1m…\x1b[22m`，必须紧贴这个词，包住整个前缀会让间距看着变宽
+ *（见 `styleCommandPrefix`）。
+ *
+ * `Run `（4 列）比原来的 `$ `（2 列）宽 2 列，所以首行的折行预算要按 4 列扣 ——
+ * `renderCommandLines` 的 `firstRowBudget` 与续行缩进都从 `COMMAND_PROMPT` /
+ * `COMMAND_CHAIN` 现算，别写死数字。
+ *
+ * ## 折叠视图：break-all 硬折行 + 行尾 `…` + `… +N lines`
  *
  * 折行规则是 CSS `word-break: break-all` 那一套：按列预算逐个 grapheme 填充，**装满到
- * 恰好放不下为止再断**，断点就在行末，不管它落在单词/路径中间。实现见 `hardWrapToWidth`。
+ * 恰好放不下为止再断**，断点就在行末，不管它落在单词/路径中间。实现见 `hardWrapRows`。
  *
  * 为什么不用 pi-tui 的 `wrapTextWithAnsi`：它是**贪心词折行 + 长词按列断开**，装不进当前行
- * 剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上 `$ cp <78 列路径>` 渲染成
- * `$ cp` 单独一行 + 路径从中间断成两截：行尾白白空着几十列（就是“提前折行”那个难看的
- * 样子），命令和它的参数还被拆开。硬折行则把每行填满，`$ ` 后面直接跟命令正文。
+ * 剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上 `Run cp <78 列路径>` 渲染成
+ * `Run cp` 单独一行 + 路径从中间断成两截：行尾白白空着几十列（就是“提前折行”那个难看的
+ * 样子），命令和它的参数还被拆开。硬折行则把每行填满。
  *
- * 中间试过第三条路（commit 9024c26）：不折行、装不下就把行尾截成 `…`。它确实不会提前
- * 折行，但一条长命令只剩一行可见内容、后面全丢，信息量太低 —— 现在改成硬折行后，
- * 同样的预算能装满 3 整行正文，超出部分才走隐藏提示。
+ * 中间试过第三条路（commit 9024c26）：不折行、装不下就把行尾截成 `…`。它不提前折行，
+ * 但一条长命令只剩一行可见内容、后面全丢；现在这条“2 行 + 行尾 `…` + `… +N lines`”
+ * 是用户指定的折中：**溢出多少都只吃最后 1 行**，行数恒定可预期。
  *
- * 行数预算（`limit`，默认 3）按**视觉行**算而不是源行：一条超长单行命令占满整个预算
- * 而不是刷十几行，而短行的多行命令（heredoc 等）仍然显示前 3 条源行 —— 两种情况都不
- * 会失控。超出预算的内容（当前源行的尾巴 + 后面所有源行）计入 `… (N tokens hidden)`。
- * 展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则
- * 必须一致，否则展开态又会出现“提前折行”。
+ * 行数预算（`limit`，`DEFAULT_LINES = 2`）按**视觉行**算而不是源行：一条超长单行命令占满
+ * 整个预算而不是刷十几行，而短行的多行命令（heredoc 等）仍然显示前 2 条源行 —— 两种情况
+ * 都不会失控。`… +N lines` 里的 N 只数**整条源行**（第 2 行之后每条还没轮到的源行算 1，
+ * 已经折出来但没放下的碎片也各算 1），不做 token 估算 —— 精确、一眼能对上行数。
+ * 展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则必须一致，否则展开态又会
+ * 出现“提前折行”。
+ *
+ * 语法高亮（`styleCommandLine`）跟着折行走：token 偏移是**源行坐标**，折行碎片也带自己在
+ * 源行里的起点偏移（`WrappedRow.start`，前缀不参与折行、所以不用换算），两边同坐标直接
+ * 比对就对上号 —— 少了这个偏移，续行的颜色会整体错位。
  *
  * ## 输出预览行数（pi 写死 5 行，这里改成 3 行）
  *
@@ -47,34 +90,53 @@
  * 展开态（ctrl+o）自动不受影响：那时 pi 用的是 `new Text(...)` 而不是预览组件，
  * 鸭子判定直接跳过，完整输出一行不裁。
  *
- * ## 输出树形 gutter（`│` / `└`）
+ * ## 输出树形 gutter（`│` 续段 / `└` 只出现一次）
  *
- * 给输出预览的每一行挂一个字符的缩进：除末行外是 `│ `，末行是 `└ `，对齐 codex
- * 的 bash 输出样式 —— 命令在上、输出挂在一棵树下，层次一眼可辨：
+ * 命令执行完，续行从纯缩进换成 `│ `，结果挂在同一棵树下 —— 命令在上、输出在下，层次一眼
+ * 可辨。`└ ` 在**整块结果里只出现一次**，就在第一行实质输出上（用户 2026-09-21 定的形状：
+ * `└` 不再落在最后一行）。细节与三个不能想当然的点见 `prefixTreeLines`。
+ *
+ * 实现挂在 `withPreviewLimit` 里（它本来就要逐 child 找出「哪个子组件是输出」，gutter 用
+ * 的是同一条判定）。三个刻意的设计决定：
+ *   ① **展开态（ctrl+o）不加 gutter、也不裁行** —— 展开态要的就是原样完整输出。
+ *   ② **`└ ` 必须在所有 child 的行都走完后统一上**（`prefixTreeLines(out)` 最后调一次），
+ *     不能逐 child 各画一棵树：那样 warnings / `Took` 段会再长出一个 `└ `，屏幕上就有两行
+ *     带拐角符的内容（实测踩过）。空行仍保持为空行 —— 失败状态那句 `\n\n` 除外，见下节。
+ *   ③ 输出段按 `width - 2` 渲染（`GUTTER_WIDTH`），否则挂上前缀必超宽；结果里的其他段落
+ *     （warnings / `Took`）pi 是按整宽渲染的，在更宽的终端里会把 2 列顶出边缘 —— 已知
+ *     小瑕疵，只在「超长 warnings + 宽终端」下可见（`Took Xs` 这类短行不受影响）。
+ *
+ * ## 失败状态（`Command exited with code N` / ... timed out ... / ... aborted）
+ *
+ * 用户 2026-09-21 提的两件事：提示要染成 error 色，且提示上面那两行空行不能把树断开。
+ * 这两件事的根源是同一个：**pi 把失败状态当成普通输出拼在结果正文末尾**，不是独立字段、
+ * `details` 里也没有标记（`core/tools/bash.ts` 三处 `throw new Error(appendStatus(text, status))`，
+ * `appendStatus` 就是 `` `${text}\n\n${status}` `` —— 注意它平时那个 `text ? … : ""` 三元在这里
+ * 永远是“有 text”那一支，因为 `formatOutput` 已先把空输出换成了 `(no output)`）。
+ * 结果正文逐行 `theme.fg("toolOutput", …)` 后 join，于是：
+ *   - 状态行与输出同色（默认 gray）—— 要红只能**按文本形态认出来再换色**（
+ *     `isFailureStatusLine` + `colorizeFailureStatus`，在 `prefixTreeLines` 里做，
+ *     因为那里已经是“最终行数组”）；
+ *   - 状态前面那句 `\n\n` 在非展开态下会渲染成**两行空行**（`\n\n` → 两个空行），夹在
+ *     预览与提示之间就是用户说的“断层两层”（展开态因为 Text 折行而看不到）。
+ *     `trimPreviewLines` 把状态与其前的空行一起摘下来单独处理：空行不画、状态当作预览
+ *     里**必得占一格**的一行（否则它会被预览裁掉 —— 实测过：状态被裁掉后整块只剩
+ *     一条 `│ … (N earlier lines)` 加两行空行），最后把状态放回尾部。摘空行是**连着摘**的：
+ *     输出自己那些尾部空行（`printf "a\n\n\n"`）一并吃掉，否则它们会同样撑开断层 ——
+ *     尾部的空行没有信息量，腾出来的预算换成真正的输出行更值。
+ *
+ * 形状上结果是「详情跟在正文后、两格缩进对齐」，与 `Took` / warnings 同一套：
  *
  * ```
- * $ cat text.txt
- * │ ... (7 earlier lines, ctrl+o to expand)
- * │ hello world
- * └ hello world
- *
- *  Took 2.4s
+ * Run for f in a b; do echo "-- $f"; done; exit 2
+ * └ -- a
+ *   -- b
+ *   Command exited with code 2      ← 红色（error 槽）
  * ```
  *
- * （`Took Xs` 那行只在执行够久时才画 —— 上面这个例子里命令跑了 2.4s，
- * 见下面「耗时页脚门槛」一节。）
- *
- * 实现挂在 `withPreviewLimit` 里（它本来就要逐 child 找出「哪个子组件是输出」，
- * gutter 用的是同一条判定），细节与三个不能想当然的点见 `prefixTreeLines`。
- * 两个刻意的设计决定：
- *   ① **展开态（ctrl+o）不加 gutter** —— 展开态要的就是原样完整输出。pi 那时用的是
- *     `new Text(...)`（有 `setText`），鸭子判定天然跳过它，所以这条不需要额外分支，
- *     与「展开态不裁预览行」共用同一个机制。
- *   ② **warnings / `Took Xs` 不进树** —— 它们是元信息页脚而不是命令输出，和命令
- *     上方的 `… (N tokens hidden)` 提示一样留在树外（那条提示属于 renderCall 的
- *     块，本来就不在结果组件里）。
- * gutter 占 2 列，所以输出子组件必须按 `width - 2` 渲染（详见 `withPreviewLimit`）。
- * `PI_BASH_TREE=off` 可关；关掉后渲染路径与加 gutter 之前逐行一致。
+ * **两道判定缺一不可**：`context.isError`（真是错的那次）+ 整行等于上面三个形态之一。
+ * 只看形态会把 `echo "Command exited with code 2"` 的正常输出也染红、还会在它排在末尾时
+ * 被当成状态摘走（回归测试盯的就是这条）；只看 `isError` 则会把整个输出正文染红。
  *
  * ## 耗时页脚门槛（短命令不画 `Took`）
  *
@@ -107,29 +169,29 @@
  *
  * ## bash 命令语法高亮（轻量版）
  *
-命令行按 shell 词法上色：命令名 `syntaxFunction`、选项 `-x/--xxx` `syntaxKeyword`、
-引号串与路径 `syntaxString`、`$VAR`/`NAME=` 赋值 `syntaxVariable`、`|`/`&&`/重定向
-`syntaxOperator`、`#` 注释 `syntaxComment`，`$ ` 前缀用 `toolTitle`（正常色，不用 dim）。配色走主题的 `syntax*`
-槽（和 markdown 代码块同一套），所以换主题自动跟着变。默认开，`PI_BASH_HIGHLIGHT=off`
-回到改动前的「整行 toolTitle 粗体」—— 刻意**没有** `/bash-highlight` 指令：纯观感开关，
-env 一个入口就够，没必要再占一条斜杠指令。
-
-参照 `@sting8k/pi-droid-styling` 的 `tool-tags/bash.ts`：它同样是**手写 shell 分词器**
-（`tokenizeShellLinePreservingText` + `colorShellWord`），只在分词失败（引号没闭合）时
-才退回 pi 导出的 `highlightCode(line, "bash")`。这里不采它的退回路径 —— `highlightCode`
-返回的是**带 ANSI 的整行**，而本扩展的折行是 break-all 硬折行、必须「先折纯文本、
-后上色」（反过来会把 SGR 序列从中间切断，见 renderCall 里的注释），带 ANSI 的行没法
-再喂给 `hardWrapRows`。所以分词失败就退回单色粗体，而不是换一个高亮器。
-
-对齐办法：token 偏移是**源行**坐标，碎片是**折行后**坐标，`hardWrapRows` 记下每条
-碎片对应原文的 `[start, end)` 字符区间，上色时按区间切 token。三条要点：
-  ① 一个 token 被折行切成两半时，两半是同一种颜色 —— 视觉上无碍，这就是用户说的
-    「有折行所以高亮可能不准，轻一些」的那部分。
-  ② 引号状态**跨源行**保留（`openQuote`），所以多行字符串（`git commit -m "…\n…"`）
-    的第二行不会被当成命令重新分词。heredoc 正文没有这个待遇（`<<EOF` 不是引号），
-    会按命令行上色 —— 无害，只是不准。
-  ③ 折叠预算用完就停止分词，被隐藏的尾巴不参与上色（也不参与 token 计数以外的任何
-    计算），所以折叠提示里的 token 估算仍然基于纯文本。
+ * 命令行按 shell 词法上色：命令名 `syntaxFunction`、选项 `-x/--xxx` `syntaxKeyword`、
+ * 引号串与路径 `syntaxString`、`$VAR`/`NAME=` 赋值 `syntaxVariable`、`|`/`&&`/重定向
+ * `syntaxOperator`、`#` 注释 `syntaxComment`，`Run ` 前缀用 `toolTitle`（正常色，不用
+ * dim）。配色走主题的 `syntax*` 槽（和 markdown 代码块同一套），所以换主题自动跟着变。
+ * 默认开，`PI_BASH_HIGHLIGHT=off` 回到「整行 toolTitle 粗体」—— 刻意**没有**
+ * `/bash-highlight` 指令：纯观感开关，env 一个入口就够，没必要再占一条斜杠指令。
+ *
+ * 参照 `@sting8k/pi-droid-styling` 的 `tool-tags/bash.ts`：它同样是**手写 shell 分词器**
+ *（`tokenizeShellLinePreservingText` + `colorShellWord`），只在分词失败（引号没闭合）时
+ * 才退回 pi 导出的 `highlightCode(line, "bash")`。这里不采它的退回路径 —— `highlightCode`
+ * 返回的是**带 ANSI 的整行**，而本扩展的折行是 break-all 硬折行、必须「先折纯文本、
+ * 后上色」（反过来会把 SGR 序列从中间切断，见 renderCall 里的注释），带 ANSI 的行没法
+ * 再喂给 `hardWrapRows`。所以分词失败就退回单色粗体，而不是换一个高亮器。
+ *
+ * 对齐办法：token 偏移是**源行**坐标，折行碎片是**折行后**坐标且带自己的起点偏移 ——
+ * `styleCommandLine` 把 token 与正文都换算到源行坐标比较，偏移换算的三步（碎片自带
+ * `start`、第 2 片起减 head 宽度、行尾 `…` 只在纯文本上放）见 `renderCommandLines`。
+ * 三条要点：
+ *   ① 一个 token 被折行切成两半时，两半是同一种颜色 —— 视觉上无碍。
+ *   ② 引号状态**跨源行**保留（`openQuote`），所以多行字符串（`git commit -m "…\n…"`）
+ *     的第二行不会被当成命令重新分词。heredoc 正文没有这个待遇（`<<EOF` 不是引号），
+ *     会按命令行上色 —— 无害，只是不准。
+ *   ③ 被折叠掉的行不参与上色（也根本不进渲染路径）。
 
 ## 输出正文的独立颜色（扩展 token `bashOutput`）
 
@@ -171,8 +233,8 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  *   /bash-preview off         恢复 pi 内置的 5 行预览
  *   /bash-timeout             查看 bash 执行期限（默认 / 上限 / env 覆盖）
  *
- * 折叠固定开启、保留 3 个视觉行（原先的 `/bash-collapse` 指令已删除）；树形缩进与流式
- * 两项只剩启动时的 env 入口：`PI_BASH_TREE=off` / `PI_BASH_STREAM=on`。
+ * 折叠固定开启、保留 2 个视觉行 + 行尾 `…` / `… +N lines`（原先的 `/bash-collapse`
+ * 指令已删除）；树形缩进固定开启（`PI_BASH_TREE` 已废弃），流式只剩 `PI_BASH_STREAM=on`。
  *
  * 附带第五个职责：**短命令不画耗时页脚** —— 默认执行时长 < 2s 就把 `Took 0.1s` 那一行
  *（连它的前导分隔空行）整个去掉，详见上面「耗时页脚门槛」一节。`PI_BASH_MIN_TIME_MS`
@@ -255,8 +317,38 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** 缩略保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。 */
-const DEFAULT_LINES = 3;
+/**
+ * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
+ *
+ * 2 是用户定的观感：第 1 行装到满，第 2 行溢出多少都截成 `…`；命令本身更长时
+ * 第 2 行下面再补一行 `… +N lines` 标记。详见文件头「命令行：2 行 + `Run ` 前缀」一节。
+ */
+const DEFAULT_LINES = 2;
+
+/**
+ * 命令行前缀。老观感是 pi 内置的 `$ `，现在是 `Run `（见文件头「命令行：2 行 + `Run `
+ * 前缀」）。首行用它、续行用 `COMMAND_CHAIN`（两者对**正文列**的影响不同，折行与预算
+ * 都按各自那套算）。
+ */
+const COMMAND_PROMPT = "Run ";
+/**
+ * 结构符（`Run ` 命令行的续行 `│ `、结果的 `└ ` / `│ `）的主题槽 —— **`muted`**。
+ *
+ * 为什么不是 `toolTitle`（`Run ` 那一版用的）：命令行的续行与结果树里的拐角符是**同一棵
+ * 树**的两段，颜色必须一致；`Run ` 是标题、用 `toolTitle` 正常色，树用 `muted` —— 与结果
+ * 侧的 `└ `（`prefixTreeLines`）取同一个槽，于是 `Run ` / `│` / `└ ` 三层各就各位：
+ * 前缀亮、结构灰。
+ */
+const COMMAND_CHAIN_COLOR = "muted";
+/**
+ * 树形 gutter 的竖线行：命令还没结束时的续行、执行完的续行、输出/命令的截断提示都用它
+ *（见文件头「输出树形 gutter」）。2 列。
+ */
+const COMMAND_CHAIN = "│ ";
+/** 纯缩进（2 列）：命令执行中还没接上树时的续行、结果树里 `└ ` 之后的正文续行。 */
+const COMMAND_INDENT = "  ";
+/** 行尾溢出标记（命令行最后一行末尾、截断提示行行首共用）。 */
+const ELLIPSIS = "…";
 
 /**
  * 输出预览保留的行数（pi 内置是 5，这里改成 3）。
@@ -363,186 +455,92 @@ function effectiveTimeoutSeconds(requested: unknown): number {
 	return Math.min(requestedSeconds, max);
 }
 
-/** CJK 等全角字符按 2 列宽度计，保证截出来的行数贴近终端实际行数。 */
-function charWidth(code: number): number {
-	if (
-		(code >= 0x1100 && code <= 0x115f) ||
-		(code >= 0x2e80 && code <= 0xa4cf) ||
-		(code >= 0xac00 && code <= 0xd7a3) ||
-		(code >= 0xf900 && code <= 0xfaff) ||
-		(code >= 0xfe30 && code <= 0xfe6f) ||
-		(code >= 0xff00 && code <= 0xff60) ||
-		(code >= 0xffe0 && code <= 0xffe6) ||
-		code >= 0x20000
-	) {
-		return 2;
-	}
-	return 1;
-}
-
-/** token 估算：宽字符（中日韩等）≈ 1 token/字，其余 ≈ 1 token/4 字符。 */
-function estimateTokens(text: string): number {
-	let wide = 0;
-	let narrow = 0;
-	for (const ch of text) {
-		if (charWidth(ch.codePointAt(0) ?? 0) === 2) wide++;
-		else narrow++;
-	}
-	return Math.max(1, Math.ceil(wide + narrow / 4));
-}
-
-/** 1234 → "1.2k"，避免提示行里出现五位数。 */
-function formatCount(n: number): string {
-	if (n < 1000) return String(n);
-	const k = n / 1000;
-	const text = k >= 10 ? k.toFixed(0) : k.toFixed(1);
-	return `${text.replace(/\.0$/, "")}k`;
-}
-
 /** grapheme 分段器（pi-tui 没导出它自己的实例，所以本地建一个；Node 内置 Intl.Segmenter）。 */
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-/** 一条折行碎片：`text` 是碎片本身，`start`/`end` 是它在**折行前原文**里的字符偏移。 */
+/** 一条折行碎片：正文本身（**不含前缀**）、它在**源行**里的字符偏移、以及自己那行的前缀。 */
 interface WrappedRow {
 	text: string;
 	start: number;
-	end: number;
+	prefix: string;
 }
 
 /**
- * **break-all 硬折行**（带偏移）：按列预算逐个 grapheme 填充，装满就断 —— 类似 CSS 的
- * `word-break: break-all`，不管断点是不是单词/路径中间。除了碎片文本还记下它在原文里
- * 的 `[start, end)` 字符区间，命令高亮靠它把「先折行、后上色」接起来 —— token 偏移是
- * **源行**坐标、碎片是**折行后**坐标，没有这个区间就对不上号。
+ * **break-all 硬折行**：按列预算逐个 grapheme 填充，装满就断 —— 类似 CSS 的
+ * `word-break: break-all`，不管断点是不是单词/路径中间。**不丢内容**：碎片拼起来就是
+ * 原文（下一步怎么摆、怎么截由调用方决定）。
  *
- * 为什么不用 pi-tui 的 `wrapTextWithAnsi`：它是**贪心词折行 + 长词按列断开**，
- * 一个装不进当前行剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上
- * `$ cp <78 列路径>` 渲染成 `$ cp` 单独一行 + 路径从中间断成两截，行尾白白空着
- * 几十列，命令和它的参数还被拆开。硬折行则把每行填到恰好装不下为止，断点就在
- * 行末，不会提前折行。
+ * 为什么不用 pi-tui 的 `wrapTextWithAnsi`：它是**贪心词折行 + 长词按列断开**，一个装不进
+ * 当前行剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上 `Run cp <78 列路径>`
+ * 渲染成 `Run cp` 单独一行 + 路径从中间断成两截：行尾白白空着几十列（就是“提前折行”那个
+ * 难看的样子），命令和它的参数还被拆开。硬折行则把每行填满，`Run ` 后面直接跟命令正文。
  *
- * 按 grapheme 而不是按列硬切：emoji / 组合字符的 segment 长度 ≠ 1 个字符，
- * 按字符下标切会把它们切成两半。宽字符（CJK 等，2 列）装不进剩下的 1 列时
- * 在它**前面**断行（行尾留 1 列空白）—— 一个 grapheme 不可分。
+ * **前缀按行算**：第 1 行是 `firstPrefix`（`Run `），其余行是 `linePrefix`（`│ ` 或两格
+ * 缩进）—— 预算是**扣掉该行前缀宽度之后**的正文预算，所以挂上前缀永远正好占满一行，不会
+ * 顶出 gutter 一格（`Run ` 4 列、`│ ` 2 列，两种前缀下正文错一列是刻意的：首行跟着
+ * `Run ` 走，续行对齐到 `Run ` 的 `n` 列）。
  *
- * @param firstRowBudget 首行预算（给 timeout 后缀留位置）
- * @param restRowBudget  其余行预算
+ * **带偏移**（`WrappedRow.start`）：命令高亮靠它把「先折行、后上色」接起来 —— token 偏移
+ * 是**源行**坐标、碎片是**折行后**坐标，没有这个区间就对不上号（详见 `styleCommandLine`）。
+ *
+ * 按 grapheme 而不是按列硬切：emoji / 组合字符的 segment 长度 ≠ 1 个字符，按字符下标切会把
+ * 它们切成两半。宽字符（CJK 等，2 列）装不进剩下的 1 列时在它**前面**断行（行尾留 1 列
+ * 空白）—— 一个 grapheme 不可分。
+ *
+ * @param firstPrefix 第 1 行的前缀（`Run `）
+ * @param linePrefix  其余行的前缀（`│ ` / 两格缩进）
+ * @param firstRowBudget 第 1 行的**整行**预算（含前缀；timeout 后缀已经从里面扣过了）
+ * @param restRowBudget  其余行的**整行**预算
  */
-function hardWrapRows(text: string, firstRowBudget: number, restRowBudget: number): WrappedRow[] {
+function hardWrapRows(text: string, firstPrefix: string, linePrefix: string, firstRowBudget: number, restRowBudget: number): WrappedRow[] {
 	const rows: WrappedRow[] = [];
 	let row = "";
 	let rowWidth = 0;
 	let rowStart = 0;
-	let budget = Math.max(1, firstRowBudget);
+	let prefix = firstPrefix;
+	let budget = Math.max(1, firstRowBudget - visibleWidth(firstPrefix));
 	for (const { segment, index } of graphemeSegmenter.segment(text)) {
 		const w = visibleWidth(segment);
 		// rowWidth > 0 守卫：单个 grapheme 比整行预算还宽时（极窄终端）也得放下，
 		// 否则会产生空行死循环
 		if (rowWidth > 0 && rowWidth + w > budget) {
-			rows.push({ text: row, start: rowStart, end: index });
-			budget = Math.max(1, restRowBudget);
+			rows.push({ text: row, start: rowStart, prefix });
+			prefix = linePrefix;
+			budget = Math.max(1, restRowBudget - visibleWidth(linePrefix));
 			row = segment;
 			rowWidth = w;
 			rowStart = index;
 		} else {
-			// row 为空说明这是本行第一个 grapheme，记下它的原文偏移
+			// row 为空说明这是本行第一个 grapheme，记下它在源行里的偏移
 			if (row === "") rowStart = index;
 			row += segment;
 			rowWidth += w;
 		}
 	}
-	rows.push({ text: row, start: rowStart, end: rowStart + row.length });
+	rows.push({ text: row, start: rowStart, prefix });
 	return rows;
 }
 
-/* -------------------------------------------------------------------------- *
- * bash 命令语法高亮（见文件头「bash 命令语法高亮（轻量版）」一节）
- * -------------------------------------------------------------------------- */
-
-type ShellTokenKind = "space" | "comment" | "operator" | "command" | "flag" | "string" | "path" | "variable" | "word";
-
-/** 一个词法单元；`start`/`end` 是**源行内**的字符偏移（不含 `$ ` 前缀）。 */
-interface ShellToken {
-	kind: ShellTokenKind;
-	start: number;
-	end: number;
-}
-
-/** token → 主题色槽。`null` = 不上色（空白原样输出）。 */
-const SHELL_TOKEN_COLORS: Record<ShellTokenKind, ThemeColor | null> = {
-	space: null,
-	comment: "syntaxComment",
-	operator: "syntaxOperator",
-	command: "syntaxFunction",
-	flag: "syntaxKeyword",
-	string: "syntaxString",
-	path: "syntaxString",
-	variable: "syntaxVariable",
-	word: "syntaxString",
-};
-
-/** `$VAR` / `${VAR}`。 */
-const SHELL_VAR_PATTERN = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
-/** 赋值：`NAME=`。 */
-const SHELL_ASSIGN_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/**
- * 操作符，**先长后短**按顺序取第一个匹配。重定向那条带可选的数字 fd，所以
- * `2>&1` 会被切成 `2>&`（操作符）+ `1`（词）而不是把 `2` 当成参数。
- */
-const SHELL_OPERATOR_PATTERNS = [/^&&/, /^\|\|/, /^\|&/, /^;;/, /^<<-?/, /^\d*(?:>>|>&|<&|<|>)/, /^[|&;()]/];
-/** 能起头的操作符字符（粗筛用，避免对每个字符都跑一遍正则 —— 长命令行下是 O(n²)）。 */
-const SHELL_OPERATOR_CHARS = new Set(["|", "&", ";", "(", ")", "<", ">"]);
-/** 这些操作符后面接的是新命令（`cmd1 | cmd2`），其余（重定向等）后面接的是参数。 */
-const SHELL_COMMAND_NEXT_OPS = new Set(["|", "||", "&&", ";", "&", "|&", "("]);
-
-function stripOuterQuotes(word: string): string {
-	const match = /^(['"])([\s\S]*)\1$/.exec(word);
-	return match ? match[2]! : word;
-}
-
-/** 纯数字后面紧跟 `<`/`>` 才是 fd 重定向（`2>`）；否则 `foo2` 里的 `2` 属于词。 */
-function isFdRedirectAt(line: string, pos: number): boolean {
-	let j = pos;
-	while (j < line.length && line[j]! >= "0" && line[j]! <= "9") j++;
-	const next = line[j];
-	return next === "<" || next === ">";
-}
-
-/** 在 `pos` 处匹配一个操作符；不是操作符返回 null。 */
-function matchShellOperatorAt(line: string, pos: number): string | null {
-	const char = line[pos]!;
-	if (!SHELL_OPERATOR_CHARS.has(char) && !(char >= "0" && char <= "9")) return null;
-	const rest = line.slice(pos);
-	for (const pattern of SHELL_OPERATOR_PATTERNS) {
-		const match = pattern.exec(rest);
-		if (match) return match[0];
-	}
-	return null;
+/** 一条**待上色**的命令行：`text` 是纯文本（含前缀与行尾 `…`），上色信息齐备。 */
+interface PendingRow {
+	text: string;
+	prefix: string;
+	/** 正文起点在**源行**里的字符偏移（首片为 0，续片为碎片自身偏移）。 */
+	sourceStart: number;
+	tokens: ShellToken[] | null;
+	/** 这一行挂上前缀后的整行预算（截断 `…` 用）。 */
+	budget: number;
 }
 
 /**
- * 词的归类。顺序有意义：赋值 > 引号串 > 选项 > `$VAR` > 路径 > 命令/参数。
- * `"--foo"` 算引号串而不是选项；`$HOME/x` 算变量而不是路径（`$` 优先）。
+ * 一条命令的渲染结果。`hiddenLines` 是**整个视觉行**没显示的条数（`0` 就没有标记行），
+ * 被行尾 `…` 吃掉的那一行也计在内。
  */
-function classifyShellWord(word: string, commandExpected: boolean): ShellTokenKind {
-	const normalized = stripOuterQuotes(word);
-	if (SHELL_ASSIGN_PATTERN.test(normalized)) return "variable";
-	if (word.startsWith("'") || word.startsWith('"')) return "string";
-	if (word.startsWith("-") && word.length > 1) return "flag";
-	if (SHELL_VAR_PATTERN.test(normalized)) return "variable";
-	// 含 `/` 就是路径；额外的分支覆盖裸的 `.` / `..` / `~`
-	if (normalized.includes("/") || /^\.{1,2}(?:\/|$)/.test(normalized) || normalized.startsWith("~/")) return "path";
-	return commandExpected ? "command" : "word";
+interface CommandRender {
+	lines: string[];
+	hiddenLines: number;
 }
 
-/**
- * 给一条源行分词。token **连续覆盖整行**（含空白 token），所以折行碎片可以直接按
- * 偏移切片上色，不用再去猜碎片和 token 的对应关系。
- *
- * `openQuote` 是上一条源行留下的未闭合引号：多行字符串的第二行整段算 string，
- * 不会被当成一条新命令重新分词。分词**不会失败**（不像参照插件那样返回 undefined
- * 退回 highlightCode）—— 引号没闭合就一路吃到行尾并把状态传给下一条源行。
- */
 function tokenizeShellLine(line: string, openQuote: string | null): { tokens: ShellToken[]; openQuote: string | null } {
 	const tokens: ShellToken[] = [];
 	let quote = openQuote;
@@ -634,55 +632,255 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
 }
 
 /**
- * 给一条折行碎片上色。`prefix` 是这条源行在折行文本里的前缀（第一条源行是 `$ `，
- * 其余为空），`line` 是**不含前缀**的源行原文 —— token 偏移就是按它算的。
- * `tokens` 为 null（高亮关掉）时退回改动前的整行单色粗体 —— 连 `$ ` 也一起粗体，
- * 逐字符和改动前一致。
+ * 命令行前缀的上色。三类前缀三种待遇：
+ *   - `Run ` —— **只把 `Run` 这个词加粗**（`toolTitle` 正常色 + bold），后面那个空格与
+ *     命令正文一律不加粗（用户 2026-09-21 定的：只有 `Run` 这一个单词是标题）；
+ *   - `│ ` —— **结构符**，与结果侧的 `└ ` 同一个 `muted`（`COMMAND_CHAIN_COLOR`），
+ *     不加粗；
+ *   - 两格缩进（命令还在跑、树还没接上）—— 原样空格、不染色；空串原样返回（同一条
+ *     源行折出来的后续碎片没有前缀）。
+ *
+ * 加粗必须**紧贴这个词**（`bold("Run")` 而不是 `bold(prefix)`）：粗体是 SGR `\x1b[1m…\x1b[22m`，
+ * 包住前缀会把行尾那个空格也变粗 —— 与正文的间距看着会变宽。
  */
-function styleWrappedRow(row: WrappedRow, prefix: string, line: string, tokens: ShellToken[] | null, theme: any): string {
-	if (!tokens) return theme.fg("toolTitle", theme.bold(row.text));
-	// `$ ` 前缀不参与分词（否则裸 `$` 会被当成命令名上色），单独用正常色 `toolTitle`
-	const prefixEnd = Math.min(row.end, prefix.length);
-	let out = row.start < prefixEnd ? theme.fg("toolTitle", row.text.slice(0, prefixEnd - row.start)) : "";
-	const from = Math.max(0, row.start - prefix.length);
-	const to = Math.max(from, row.end - prefix.length);
-	if (to <= from) return out;
+function styleCommandPrefix(prefix: string, theme: any): string {
+	if (prefix === "" || prefix === COMMAND_INDENT) return prefix;
+	if (prefix === COMMAND_CHAIN) return theme.fg(COMMAND_CHAIN_COLOR, prefix);
+	// `Run ` → `Run`（bold）+ ` `（普通）
+	return theme.fg("toolTitle", theme.bold(prefix.slice(0, -1)) + prefix.slice(-1));
+}
 
-	let cursor = from;
+/**
+ * 给**一行命令**上色：`prefix` 整段按**结构符**上色（`Run ` = `toolTitle`、`│ ` / 两格缩进 =
+ * `muted`，见 `styleCommandPrefix`），`body` 是**不含前缀**的正文，按 token 上色。高亮关掉时
+ * 正文整段 `toolTitle` + 粗体（改动前的观感，只是前缀换成了 `Run `）。
+ *
+ * 前缀的颜色**必须在这一段就闭合**（`\x1b[39m`，由 `theme.fg` 自己收尾）：`│ ` 是**结构符**
+ * 而不是正文；要是让后面的 token 色透到前缀上，路径那行的 `│` 就会跟 path 色一起飘
+ *（实测踩过）。
+ *
+ * `sourceStart` 是 `body` 起点在**源行**里的字符偏移 —— token 的偏移也是源行坐标，折行
+ * 碎片从源行任意位置开始，所以必须带着走，否则续行的语法高亮会整体错位。
+ */
+function styleCommandLine(prefix: string, body: string, tokens: ShellToken[] | null, sourceStart: number, theme: any): string {
+	const head = styleCommandPrefix(prefix, theme);
+	if (!tokens) return head + theme.fg("toolTitle", body);
+
+	// 正文一律不加粗（只有 `Run` 那个词是粗体，见 styleCommandPrefix）
+	const style = (kind: ShellTokenKind, chunk: string) => {
+		const color = SHELL_TOKEN_COLORS[kind];
+		return color === null ? chunk : theme.fg(color, chunk);
+	};
+
+	const sourceEnd = sourceStart + body.length;
+	let out = head;
+	let cursor = sourceStart;
 	for (const token of tokens) {
-		if (token.end <= from) continue;
-		if (token.start >= to) break;
-		const start = Math.max(token.start, cursor);
-		const end = Math.min(token.end, to);
-		if (start >= end) continue;
-		const text = line.slice(start, end);
-		const color = SHELL_TOKEN_COLORS[token.kind];
-		// 命令名保留粗体，当作整块的视觉锚点（改动前整行都是粗体）
-		out += color === null ? text : theme.fg(color, token.kind === "command" ? theme.bold(text) : text);
-		cursor = end;
+		if (token.end <= cursor) continue;
+		if (token.start >= sourceEnd) break;
+		const from = Math.max(token.start, cursor);
+		const to = Math.min(token.end, sourceEnd);
+		if (from > cursor) out += body.slice(cursor - sourceStart, from - sourceStart);
+		out += style(token.kind, body.slice(from - sourceStart, to - sourceStart));
+		cursor = to;
 	}
 	// token 连续覆盖整行，所以正常走不到这里；真走到就按老样子兜底，不丢字符
-	if (cursor < to) out += theme.fg("toolTitle", theme.bold(line.slice(cursor, to)));
+	if (cursor < sourceEnd) out += theme.fg("toolTitle", body.slice(cursor - sourceStart));
 	return out;
 }
 
 /**
- * 一条源行 → 折行碎片（带偏移）+ 该行的 token。高亮关掉时不分词，`nextQuote` 原样
- * 透传（此时引号状态没有意义）。
+ * 把行尾一个可见字符换成 `…`：`prefix + text` 的可见宽度保持不变（空正文原样返回）。
+ *
+ * 为什么不用 `truncateToWidth(row, budget, ELLIPSIS)`：目标串已经**装满**预算时它直接
+ * 原样返回（`visibleWidth <= maxWidth` 就不动），而行满恰恰是最常见的溢出形态。
+ * 宽字符占 2 列、装不下时会白空 1 列，可接受（与 `hardWrapRows` 的断行规则同源）。
  */
-function wrapAndTokenizeLine(
-	prefix: string,
-	line: string,
+function ellipsizeTail(prefix: string, text: string, budget: number): string {
+	if (text === "") return text;
+	const limit = Math.max(1, budget - visibleWidth(prefix));
+	let out = "";
+	let used = 0;
+	for (const { segment } of graphemeSegmenter.segment(text)) {
+		const w = visibleWidth(segment);
+		if (used + w > limit - 1) break;
+		out += segment;
+		used += w;
+	}
+	return out + ELLIPSIS;
+}
+
+/**
+ * 渲染一条命令（可能多源行）：折行到 `limit` 个视觉行，装不下的归 `hiddenLines`。
+ *
+ * 前缀：第 1 条源行用 `firstPrefix`（`Run `）起头，它折出来的续行、以及后面每条源行都用
+ * `linePrefix`（`│ ` 或两格缩进）—— 于是续行的正文对齐到 `Run ` 的 `n` 列（见文件头）。
+ *
+ * 规则（详见文件头「命令行：2 行 + `Run ` 前缀」）：
+ *   ① **只要有溢出**，最后保留的那个视觉行末尾就换成 `…`（不管溢出的是一行的尾巴
+ *      还是后面几行）；没溢出就一个 `…` 也不画；
+ *   ② `hiddenLines` = 最后保留行**之后**还剩多少个视觉行：本条源行折到但没显示的碎片各
+ *      算 1 行，后面每条没轮到的源行再各算 1 行。
+ *
+ * 折行、截断都在**纯文本**上做（`hardWrapRows` / `ellipsizeTail` 负责自带前缀的宽度），
+ * 最后才逐行上色 —— 反过来会把 SGR 序列从中间切断。
+ */
+function renderCommandLines(
+	lines: string[],
+	firstPrefix: string,
+	linePrefix: string,
 	firstRowBudget: number,
 	restRowBudget: number,
 	openQuote: string | null,
 	highlight: boolean,
-): { rows: WrappedRow[]; tokens: ShellToken[] | null; nextQuote: string | null } {
-	const rows = hardWrapRows(prefix + line, firstRowBudget, restRowBudget);
-	if (!highlight) return { rows, tokens: null, nextQuote: openQuote };
-	const result = tokenizeShellLine(line, openQuote);
-	return { rows, tokens: result.tokens, nextQuote: result.openQuote };
+	limit: number,
+	theme: any,
+): CommandRender {
+	// 先全部按**纯文本**摆好（前缀 + 折行 + 行尾 `…`），最后一步再上色 —— 行尾 `…`
+	// 必须在纯文本上放，否则会把 SGR 序列从中间切断
+	const pending: PendingRow[] = [];
+	let hiddenLines = 0;
+	let hiddenTail = 0;
+	let quote = openQuote;
+
+	for (let index = 0; index < lines.length; index++) {
+		if (pending.length >= limit) {
+			// 后面每条源行都算一行没显示（它自己折几行不改变这个事实）
+			hiddenLines += lines.length - index;
+			break;
+		}
+		const line = lines[index]!;
+		// 第 1 条源行用 `Run ` 起头，其余源行用它自己的续行前缀
+		const head = pending.length === 0 ? firstPrefix : linePrefix;
+		const rows = hardWrapRows(line, head, linePrefix, Math.max(1, pending.length === 0 ? firstRowBudget : restRowBudget), restRowBudget);
+		// 引号状态同上一条源行一样跨行保留（分词只影响上色，与摆行顺序无关）
+		const tokenized = highlight ? tokenizeShellLine(line, quote) : { tokens: null, openQuote: quote };
+		quote = tokenized.openQuote;
+
+		const room = limit - pending.length;
+		const take = Math.min(rows.length, room);
+		for (let i = 0; i < take; i++) {
+			const row = rows[i]!;
+			pending.push({
+				text: row.text,
+				prefix: row.prefix,
+				sourceStart: row.start,
+				tokens: tokenized.tokens,
+				budget: row.prefix === firstPrefix ? firstRowBudget : restRowBudget,
+			});
+		}
+		if (rows.length > take) {
+			// 本条源行还有碎片没放下：它们就是“没显示的视觉行”
+			hiddenTail = rows.length - take;
+			break;
+		}
+	}
+
+	hiddenLines += hiddenTail;
+	if (hiddenLines > 0 && pending.length > 0) {
+		// 还剩内容没显示：最后保留的那行末尾换成 `…`（宽度不变）
+		const last = pending[pending.length - 1]!;
+		last.text = ellipsizeTail(last.prefix, last.text, last.budget);
+	}
+
+	return {
+		lines: pending.map((row) => styleCommandLine(row.prefix, row.text, row.tokens, row.sourceStart, theme)),
+		hiddenLines,
+	};
 }
+
+type ShellTokenKind = "space" | "comment" | "operator" | "command" | "flag" | "string" | "path" | "variable" | "word";
+
+/** 一个词法单元；`start`/`end` 是**源行内**的字符偏移（不含 `$ ` 前缀）。 */
+interface ShellToken {
+	kind: ShellTokenKind;
+	start: number;
+	end: number;
+}
+
+/** token → 主题色槽。`null` = 不上色（空白原样输出）。 */
+const SHELL_TOKEN_COLORS: Record<ShellTokenKind, ThemeColor | null> = {
+	space: null,
+	comment: "syntaxComment",
+	operator: "syntaxOperator",
+	command: "syntaxFunction",
+	flag: "syntaxKeyword",
+	string: "syntaxString",
+	path: "syntaxString",
+	variable: "syntaxVariable",
+	word: "syntaxString",
+};
+
+/** `$VAR` / `${VAR}`。 */
+const SHELL_VAR_PATTERN = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
+/** 赋值：`NAME=`。 */
+const SHELL_ASSIGN_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/**
+ * 操作符，**先长后短**按顺序取第一个匹配。重定向那条带可选的数字 fd，所以
+ * `2>&1` 会被切成 `2>&`（操作符）+ `1`（词）而不是把 `2` 当成参数。
+ */
+const SHELL_OPERATOR_PATTERNS = [/^&&/, /^\|\|/, /^\|&/, /^;;/, /^<<-?/, /^\d*(?:>>|>&|<&|<|>)/, /^[|&;()]/];
+/** 能起头的操作符字符（粗筛用，避免对每个字符都跑一遍正则 —— 长命令行下是 O(n²)）。 */
+const SHELL_OPERATOR_CHARS = new Set(["|", "&", ";", "(", ")", "<", ">"]);
+/** 这些操作符后面接的是新命令（`cmd1 | cmd2`），其余（重定向等）后面接的是参数。 */
+const SHELL_COMMAND_NEXT_OPS = new Set(["|", "||", "&&", ";", "&", "|&", "("]);
+
+function stripOuterQuotes(word: string): string {
+	const match = /^(['"])([\s\S]*)\1$/.exec(word);
+	return match ? match[2]! : word;
+}
+
+/** 纯数字后面紧跟 `<`/`>` 才是 fd 重定向（`2>`）；否则 `foo2` 里的 `2` 属于词。 */
+function isFdRedirectAt(line: string, pos: number): boolean {
+	let j = pos;
+	while (j < line.length && line[j]! >= "0" && line[j]! <= "9") j++;
+	const next = line[j];
+	return next === "<" || next === ">";
+}
+
+/** 在 `pos` 处匹配一个操作符；不是操作符返回 null。 */
+function matchShellOperatorAt(line: string, pos: number): string | null {
+	const char = line[pos]!;
+	if (!SHELL_OPERATOR_CHARS.has(char) && !(char >= "0" && char <= "9")) return null;
+	const rest = line.slice(pos);
+	for (const pattern of SHELL_OPERATOR_PATTERNS) {
+		const match = pattern.exec(rest);
+		if (match) return match[0];
+	}
+	return null;
+}
+
+/**
+ * 词的归类。顺序有意义：赋值 > 引号串 > 选项 > `$VAR` > 路径 > 命令/参数。
+ * `"--foo"` 算引号串而不是选项；`$HOME/x` 算变量而不是路径（`$` 优先）。
+ */
+function classifyShellWord(word: string, commandExpected: boolean): ShellTokenKind {
+	const normalized = stripOuterQuotes(word);
+	if (SHELL_ASSIGN_PATTERN.test(normalized)) return "variable";
+	if (word.startsWith("'") || word.startsWith('"')) return "string";
+	if (word.startsWith("-") && word.length > 1) return "flag";
+	if (SHELL_VAR_PATTERN.test(normalized)) return "variable";
+	// 含 `/` 就是路径；额外的分支覆盖裸的 `.` / `..` / `~`
+	if (normalized.includes("/") || /^\.{1,2}(?:\/|$)/.test(normalized) || normalized.startsWith("~/")) return "path";
+	return commandExpected ? "command" : "word";
+}
+
+/**
+ * 给一条源行分词。token **连续覆盖整行**（含空白 token），所以折行碎片可以直接按
+ * 偏移切片上色，不用再去猜碎片和 token 的对应关系。
+ *
+ * `openQuote` 是上一条源行留下的未闭合引号：多行字符串的第二行整段算 string，
+ * 不会被当成一条新命令重新分词。分词**不会失败**（不像参照插件那样返回 undefined
+ * 退回 highlightCode）—— 引号没闭合就一路吃到行尾并把状态传给下一条源行。
+ */
+
+/**
+ * 给**一行命令**上色：`prefix` 整段 `toolTitle` 正常色（`Run ` / `│ ` / 两格缩进），`body`
+ * 是**不含前缀**的正文，按 token 上色。高亮关掉时正文整段 `toolTitle` + 粗体（改动前的
+ * 观感，只是前缀换成了 `Run `）。
+ *
+ * `sourceStart` 是 `body` 起点在**源行**里的字符偏移 —— token 的偏移也是源行坐标，折行
+ * 碎片从源行任意位置开始，所以必须带着走，否则续行的语法高亮会整体错位。
 
 /** pi 的 agent 目录（`PI_CODING_AGENT_DIR` 可覆盖，否则 `~/.pi/agent`）。 */
 function resolveAgentDir(): string {
@@ -805,36 +1003,119 @@ function withBottomBlank(inner: any) {
 }
 
 /**
- * 树形 gutter 占的列数（`│ ` / `└ ` = 1 个制表符（box-drawing 竖线 / 拐角，不是 TAB）+ 1 个空格）。
+ * 树形 gutter 占的列数（`│ ` / `└ ` = 1 个 box-drawing 字符 + 1 个空格 = 2 列）。
  * 输出子组件必须按 `width - GUTTER_WIDTH` 渲染，否则加上前缀就超宽。
  */
 const GUTTER_WIDTH = 2;
+/** 树里“还有下文”的行：命令续行、命令折叠标记、输出的截断提示。 */
+const GUTTER_PIPE = COMMAND_CHAIN;
+/** 树里“正文内容”的续行缩进（与 `└ ` 等宽，正文对齐）。 */
+const GUTTER_BODY = COMMAND_INDENT;
 
 /**
- * 给输出行画**树形 gutter**：除末行外每行前面挂 `│ `，末行挂 `└ `（对齐 codex
- * 的 bash 输出样式），让输出与命令行之间的层次关系一眼可辨。
+ * 输出预览自己补的那条截断提示（`… (N earlier lines, <key> to expand)`）的形态。
+ */
+function isPreviewHintLine(line: string): boolean {
+	const plain = stripAnsiCodes(line);
+	// `... ` 是 pi 内置的写法（`truncateToWidth` 的省略号），`… ` 是我们在
+	// `trimPreviewLines` 里改写的那个，两种形态都要认。
+	return (plain.startsWith("... (") || plain.startsWith(`${ELLIPSIS} (`)) && plain.includes("earlier lines");
+}
+
+/**
+ * 这个（剥掉 SGR 后的）纯文本是不是 pi 的**失败状态行**。
+ *
+ * pi 把命令的失败状态**焊死在输出正文里** —— `core/tools/bash.ts` 三处
+ * `throw new Error(appendStatus(text, status))`，而 `appendStatus` 是
+ * `` `${text ? `${text}\n\n` : ""}${status}` ``。三个 status：退出码非 0 / 超时被杀 / 被中断，
+ * 都是失败。
+ *
+ * 结果里没有独立字段、`details` 里也没标记，**想单独给它上色只能按文本形态认**。所以调用方
+ * 还得用 `context.isError` 把“真的是错的那次”加上 —— 本函数只管形态那半边（见文件头
+ * 「失败状态」一节）。
+ */
+function isFailureStatusLine(line: string): boolean {
+	const plain = stripAnsiCodes(line).trim();
+	return /^Command (?:exited with code \d+|timed out after [\d.]+ seconds|aborted)$/.test(plain);
+}
+
+/**
+ * 把失败状态行换成 `error` 前景色（`prefixTreeLines` 上树前调用，只动颜色、不动文本）。
+ *
+ * pi 写的是 `theme.fg("toolOutput", line)`（默认 gray）—— 那一行只有一个 SGR 前缀、末尾
+ * 一个 `\u001b[39m`，所以直接拆掉重包一层 `error` 就行（不会丢内层样式：这一行本来就
+ * 没有）。行尾补白原样接回去，于是宽度与上底色都不变。
+ */
+function colorizeFailureStatus(line: string, theme: any): string {
+	if (!isFailureStatusLine(line)) return line;
+	const padding = /\s+$/.exec(line)?.[0] ?? "";
+	return theme.fg("error", stripAnsiCodes(line).replace(/\s+$/, "")) + padding;
+}
+
+/**
+ * 把**整块结果**的行数组画成树形：**第一个实质内容行**挂 `└ `，它前面的行（截断提示）
+ * 挂 `│ `，它后面的行缩进两格（`  `），空行原样保留。
+ *
+ * 用户定的形状（2026-09-21）：`└ ` 在**整块结果里只出现一次**、就在第一个实质输出行上；
+ * 那之下的内容行（第二行正文、warnings、`Took Xs` 页脚）不再画竖线，只用等宽缩进对齐
+ * 正文 —— 树在 `└` 那里就“落地”了，不再向下延伸：
+ *
+ * ```
+ * Run cat big.txt
+ * │ … (12 earlier lines, ctrl+o to expand)
+ * └ line 12
+ *   line 13
+ * ```
  *
  * 三个不能想当然的点：
- *   ① **前导空行不上前缀**：那是命令与输出之间的分隔行，外层
- *     `stripLeadingBlanks` 还要靠「这一行是空的」把它剥掉 —— 一旦挂上前缀
- *     就变成非空行，剥不掉了（行里还可能带前景色转义序列，所以判空必须先剔
- *     ANSI 再 trim，跟 `stripLeadingBlanks` 的判法一致）。
- *   ② `└` 挂在**最后一个非空行**上而不是数组末行：pi 的输出是 `.trim()` 过的，
- *     正常不会有尾部空行，但万一有，`└ ` 挂在空行上会变成一行只有拐角符。
- *     尾部空行照旧挂 `│ `，竖线保持连续。
- *   ③ 输出**内部的空行也要挂 `│`**（只跳前导那一段），否则竖线断在半路，
- *     看上去不像一棵树。
- * 全是空行时直接原样返回（没内容可挂）。
+ *   ① **必须在所有 child 的行走完后再统一上前缀**（不能逐 child 各画一棵树）：
+ *     `└ ` 只能在整块里出现一次，逐 child 画会让第二段（warnings / 页脚）又长出一个
+ *     `└ ` —— 实测过，输出里会出现两行带拐角符的正文。
+ *   ② **前导空行不上前缀**：那是命令与输出之间的分隔行（pi 的 `new Text("\n" + …)`），
+ *     外层 `stripLeadingBlanks` 还要靠「这一行是空的」把它剥掉 —— 一旦挂上前缀就变成
+ *     非空行，剥不掉了（行里可能带前景色转义序列，所以判空必须先剔 ANSI 再 trim，
+ *     与 `stripLeadingBlanks` 的判法一致）。footer / warnings 段自己那个前导空行
+ *     同理留成空行，当作结果内部的段落间距。
+ *   ③ 截断提示行（`… (N earlier lines, …)`）在正文前面，所以它挂 `│ `（“下文还没完”），
+ *     `└ ` 留给正文第一行。
+ *   ④ **前缀自成一段 SGR**（`theme.fg("muted", GUTTER_PIPE)` 把它单独包起来），绝不让后面
+ *     正文的颜色透上来 —— 拐角符 / 竖线是结构符，`└ ` 与它后面的正文因此是同一种灰。
+ *   ⑤ **栅栏以上的空行也带 `│ `**（用户 2026-09-21 第二次报的：`│ … (326 earlier lines…)`
+ *     与 `└ Node.js v26.4.0` 之间那个空行，光秃秃地空着就成了“断层”）。这类空行来自 pi 的
+ *     预览窗口开头（`truncateToVisualLines` 从尾部倒着切，空行是原样带进来的）或失败状态
+ *     前面的分隔空行；`prefixTreeLines` 在 `first`（第一个非空行）与 `start`（第一个实质
+ *     内容行，或它上面的截断提示行）之间补 `│ `。**`└ ` 以下的空行不补** —— 树在那里就
+ *     指到首行实质输出了，下面那截是缩进对齐的续行（更多输出、`[Full output: …]` 之类的
+ *     warnings、`Took`），各自成段；再画竖线反而像树还没完（用户 2026-09-21 第三次反馈：
+ *     `[Full output:` 上面那行不该有 `│`）。
+ *
+ * 为什么不用 `setText(child,…)` 直接改子组件：它的 render 缓存在**首次渲染时以传入
+ * width 为准**，把前缀送进去会让正文被它自己再折一次行（ansi 感知的贪心词折行），
+ * 于是“先折行、后上色”的硬折行外套就白做了。逐 child 渲染 + 行数组挂前缀不改变各行
+ * 宽度，缓存与实际显示始终一致（详见 `withPreviewLimit`）。
  */
-function prefixTreeLines(lines: string[], theme: any, gutter: boolean): string[] {
-	if (!gutter || lines.length === 0) return lines;
-	const isBlank = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").trim() === "";
-	let start = 0;
-	while (start < lines.length && isBlank(lines[start])) start++;
+function prefixTreeLines(lines: string[], theme: any, isError = false): string[] {
+	const isBlank = (s: string) => stripAnsiCodes(s).trim() === "";
+	// 最前面那串空行是命令与结果之间的分隔行（`stripLeadingBlanks` 还得靠它判空），
+	// 所以 `first` 之前的空行保持空行 —— 树的起点在 `start`（第一个实质内容行，或它前面的截断提示行）。
+	let first = 0;
+	while (first < lines.length && isBlank(lines[first]!)) first++;
+	let start = first;
+	while (start < lines.length && (isBlank(lines[start]!) || isPreviewHintLine(lines[start]!))) start++;
 	if (start >= lines.length) return lines;
-	let last = lines.length - 1;
-	while (last > start && isBlank(lines[last])) last--;
-	return lines.map((line, i) => (i < start ? line : theme.fg("muted", i === last ? "└ " : "│ ") + line));
+	// 栅栏**以上**（`first` 之后、`start` 之前）的空行补 `│ ` —— 用户 2026-09-21 定的：
+	// 空行也不能把栅栏断开。这里的空行来自 pi 的预览窗口开头（`truncateToVisualLines`
+	// 从尾部倒着切，空行是原样带进来的）或失败状态前面的分隔空行 —— 光秃秃地空着就是“断层”。
+	// `└ ` **以下**的空行不再补：树在 `└ ` 那一行就指到首行实质输出了，下面那截是缩进对齐的
+	// 续行（更多输出、`[Full output: …]` 之类的 warnings、`Took`），各自成段；
+	// 再画竖线反而像树还没完（用户 2026-09-21 第二次反馈：`[Full output:` 上面那行不该有 `│`）。
+	const pipeBlank = (i: number) => i > first && i < start;
+	return lines.map((line, i) => {
+		if (isBlank(line)) return pipeBlank(i) ? theme.fg("muted", GUTTER_PIPE) + line : line;
+		if (i < start) return theme.fg("muted", GUTTER_PIPE) + line;
+		if (i === start) return theme.fg("muted", "└ ") + (isError ? colorizeFailureStatus(line, theme) : line);
+		return GUTTER_BODY + (isError ? colorizeFailureStatus(line, theme) : line);
+	});
 }
 
 /**
@@ -883,8 +1164,8 @@ function shouldHideTimeFooter(lastChild: any, elapsedMs: number | undefined, min
 }
 
 /**
- * 把 pi 内置 bash 渲染器的**输出预览**从 5 行裁到 `previewLines` 行，给输出
- * 挂上树形 gutter（`gutter` 为 true 时），并在短命令上丢掉耗时页脚。
+ * 把 pi 内置 bash 渲染器的**输出预览**从 5 行裁到 `previewLines` 行，给整块结果挂上树形
+ * gutter，并在短命令上丢掉耗时页脚、在无输出时补一行 `(no output)`。
  *
  * pi 的行数写死在它的 `BASH_PREVIEW_LINES = 5`（模块私有常量，改不了，也没有
  * 设置项），所以只能在拿到它的组件之后做后处理。详见文件头「输出预览行数」一节。
@@ -899,24 +1180,39 @@ function shouldHideTimeFooter(lastChild: any, elapsedMs: number | undefined, min
  * `instanceof Text`：扩展 import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，
  * 与 pi 运行时（bundle）用的 Text 不是同一个类对象，`instanceof` 跨模块实例必然 false。
  *
- * **展开态（ctrl+o）自动不受影响**：那时 pi 用的是 `new Text("\n" + styledOutput)`
- * 而不是预览组件，所以鸭子判定直接跳过它，完整输出一行不裁、**也不挂 gutter**
- * （展开态要的就是原样输出）—— 正是想要的。
+ * 所有 child 的行先**原样拼进一个数组**，最后统一交给 `prefixTreeLines` 画一次树 ——
+ * `└ ` 于是自然落在**第一个实质内容行**上（输出段里的第一行正文；截断提示行在它上面，
+ * 挂 `│ `），后面的输出行 / warnings / `Took` 页脚都只缩进两格。
+ *
+ * **展开态（ctrl+o）整块跳过**：pi 那时用的是 `new Text("\n" + styledOutput)`，输出全在
+ * 一个 child 里、行数也不裁，所以连树都不挂 —— 展开态要的就是原样完整输出。
  *
  * 耗时页脚的过滤（`shouldHideTimeFooter`）也在这里：末位 child 是 `Took X.Xs` 页脚、
  * 且实际耗时短于门槛时，把它整个跳过（连它那行前导空行一起 —— 那是正文与页脚之间的
  * 分隔行，页脚不画时不该留）。详见文件头「耗时页脚门槛」一节。
  */
-function withPreviewLimit(inner: any, previewLines: number, theme: any, gutter: boolean, elapsedMs: () => number | undefined, minTimeFooterMs: number) {
+function withPreviewLimit(
+	inner: any,
+	previewLines: number,
+	theme: any,
+	/** 展开态（ctrl+o）：整块按原样透传（不裁行、不挂树）。 */
+	expanded: boolean,
+	/** pi 当前给的是 partial 结果（流式中）—— 决定“还没输出”要不要画成 `(no output)`。 */
+	isPartial: () => boolean,
+	/** 这块结果是错的（`context.isError`）—— 只有它为真才认失败状态，免得误染正常输出。 */
+	isError: boolean,
+	/** 真实耗时（毫秒；`undefined` = pi 根本没画页脚）。 */
+	elapsedMs: () => number | undefined,
+	minTimeFooterMs: number,
+) {
 	return {
 		render(width: number): string[] {
 			const out: string[] = [];
 			let trimmed = false;
-			// gutter 占 2 列，所以**输出子组件必须按 width - 2 渲染**：pi 的预览行是按
-			// 传进去的宽度折行 / 截断的（`truncateToVisualLines` 内部用 `Text.render(width)`），
-			// 按整宽渲染再加前缀就会超出终端宽度。其余子组件（warnings / Took）不上
-			// 前缀，照旧按整宽渲染。
-			const contentWidth = gutter ? Math.max(1, width - GUTTER_WIDTH) : width;
+			// gutter 占 2 列，所以**输出预览按 width - 2 渲染**：pi 的预览行是按传进去的
+			// 宽度折行 / 截断的（`truncateToVisualLines` 内部用 `Text.render(width)`），
+			// 按整宽渲染再加前缀就会超出终端宽度。
+			const contentWidth = Math.max(1, width - GUTTER_WIDTH);
 			// 耗时页脚的判定放在 render 里而不是拿组件时就算死：流式模式下 pi 每秒
 			// `invalidate()` 一次（内置 renderResult 里那个 setInterval），跨过门槛的
 			// 那一刻页脚就能出现，不用等下一次 partial 结果。
@@ -924,17 +1220,35 @@ function withPreviewLimit(inner: any, previewLines: number, theme: any, gutter: 
 			if (shouldHideTimeFooter(children[children.length - 1], elapsedMs(), minTimeFooterMs)) {
 				children = children.slice(0, -1);
 			}
+			// 展开态（ctrl+o）要的就是原样完整输出：不裁行、不挂 gutter。pi 那时用的是
+			// `new Text("\n" + styledOutput)`，一个 child 装全部输出，直接按原宽透传 ——
+			// 只把失败状态那行染红（用户要的是提示见红，展开态也该红）。
+			if (expanded) {
+				for (const child of children) {
+					const rendered = child.render(width) as string[];
+					out.push(...(isError ? rendered.map((line) => colorizeFailureStatus(line, theme)) : rendered));
+				}
+				return out;
+			}
 			for (const child of children) {
 				const isOutput = !trimmed && typeof child.setText !== "function";
-				const lines: string[] = child.render(isOutput ? contentWidth : width);
 				if (!isOutput) {
-					out.push(...lines);
+					// pi 对空输出一个 child 都不加（内置渲染器的 `if (output)` 守卫），
+					// 于是用户只看见光秃的一行 `Run xxx`，分不清是“真的没输出”还是
+					// “渲染坏了”。在**输出本该出现的位置**补一行 `(no output)`（用户样例
+					// 里 `└ ` 就挂它前面），这样它排在 warnings / `Took` 之前。
+					// **执行中不补**：流式模式 pi 会先发一个空 partial 快照
+					//（`onUpdate({ content: [] })`），那时“还没输出”不等于“没有输出”。
+					out.push(...(trimmed || isPartial() ? child.render(contentWidth) : [theme.fg("toolOutput", "(no output)"), ...child.render(contentWidth)]));
 					continue;
 				}
 				trimmed = true;
-				out.push(...prefixTreeLines(trimPreviewLines(lines, previewLines, contentWidth, theme), theme, gutter));
+				// **输出段按 contentWidth 渲染**：整块结果的行都要挂 2 列前缀，不先
+				// 扣掉的话按整宽折出来的正文会顶出终端宽度。
+				out.push(...trimPreviewLines(child.render(contentWidth), previewLines, contentWidth, theme, isError));
 			}
-			return out;
+			// 最后统一上树：`└ ` 在整块里只出现一次（见 prefixTreeLines ①）
+			return prefixTreeLines(out, theme, isError);
 		},
 		invalidate() {
 			inner.invalidate?.();
@@ -955,27 +1269,80 @@ function withPreviewLimit(inner: any, previewLines: number, theme: any, gutter: 
  *     否则那 1~2 行就**静默消失**了。用传进来的 `theme`（pi 运行时真正初始化过的那份）
  *     复刻 pi 的格式与配色，键名读 `keybindings.json`（见 `expandKeyText`）。
  */
-function trimPreviewLines(lines: string[], previewLines: number, width: number, theme: any): string[] {
+function trimPreviewLines(lines: string[], previewLines: number, width: number, theme: any, isError: boolean): string[] {
 	if (lines.length <= 1) return lines;
 	const head = lines[0]; // 前导空行（去留由外层 stripLeadingBlanks 决定）
-	let rest = lines.slice(1);
-	let hintLine: string | undefined;
-	const firstPlain = (rest[0] ?? "").replace(/\x1b\[[0-9;]*m/g, "");
-	if (firstPlain.startsWith("... (") && firstPlain.includes("earlier lines")) {
-		hintLine = rest[0];
-		rest = rest.slice(1);
+	const body = lines.slice(1);
+	const hintLine = isPreviewHintLine(body[0] ?? "") ? body[0] : undefined;
+	const rows = hintLine ? body.slice(1) : body;
+
+	// ① 尾部是 pi 的失败状态（见文件头「失败状态」一节）时，把它和它前面那一串分隔空行
+	// 单独摘出来：那些空行没有信息量，不该吃预览预算（把状态自己挤出可视区的正是它们）。
+	// **只在 `isError` 时认** —— 正常输出里出现同样字样（例如把这句话 echo 出来）不碰。
+	let status: string | undefined;
+	let separators: string[] = [];
+	let content = rows;
+	if (isError && rows.length > 0 && isFailureStatusLine(rows[rows.length - 1]!)) {
+		status = rows[rows.length - 1];
+		let cut = rows.length - 1;
+		while (cut > 0 && isBlankResultLine(rows[cut - 1]!)) cut -= 1;
+		separators = rows.slice(cut, rows.length - 1);
+		content = rows.slice(0, cut);
 	}
-	if (rest.length <= previewLines) return lines;
-	const dropped = rest.length - previewLines;
-	const kept = rest.slice(dropped);
-	const hint = hintLine
-		? hintLine.replace(/(\(\s*)(\d+)(\s*earlier lines)/, (_m, open, count, tail) => `${open}${Number(count) + dropped}${tail}`)
-		: truncateToWidth(
-				theme.fg("muted", `... (${dropped} earlier lines,`) + " " + theme.fg("dim", expandKeyText()) + theme.fg("muted", " to expand") + theme.fg("muted", ")"),
-				width,
-				"...",
-			);
-	return [head, hint, ...kept];
+
+	// ② 预算：状态自己占一格，其余留给内容。
+	const budget = Math.max(1, previewLines - (status === undefined ? 0 : 1));
+
+	// ③ 窗口 = 内容的尾部 `budget` 行（pi 的预览本来保留的就是尾部）。窗口整段都是空行时
+	// 往上拉，让最近一行正文留在窗口里 —— 空行不该把预览独吞。
+	let start = Math.max(0, content.length - budget);
+	let end = content.length;
+	if (content.length > 0 && content.slice(start).every((line) => isBlankResultLine(line))) {
+		let last = content.length - 1;
+		while (last >= 0 && isBlankResultLine(content[last]!)) last -= 1;
+		if (last >= 0) {
+			start = Math.max(0, last - budget + 1);
+			end = last + 1;
+		}
+	}
+	const window = content.slice(start, end);
+
+	// ④ 一行正文都留不下时（内容全被裁掉），把状态前面那串分隔空行补回来 —— 用户 2026-09-21
+	// 定的形状：空行要带 `│`，而不是光秃秃的空白（见文件头 ⑤）。有正文时不补：
+	// `└ ` 已经落在正文上，它下面再补一行 `│` 反而像没完。
+	const fillers = window.length === 0 && status !== undefined ? separators.slice(-budget) : [];
+
+	// 什么都没动（没状态、窗口就是全部内容、没补空行）→ 原样返回 `lines`：保住 pi 自己画的
+	// 行（提示行的配色与折行宽度都是它定的）。只把提示行的省略号统一成 `…`。
+	if (status === undefined && fillers.length === 0 && window.length === content.length && end === content.length) {
+		return hintLine === undefined ? lines : [head, withOurEllipsis(hintLine), ...rows];
+	}
+
+	// ⑤ 提示行的计数 = pi 原来那个数（它窗口之上的视觉行）+ 我们没显示的内容行。
+	// 状态前那串分隔空行不计（它们本来就不载信息：算进去会让一条内容全显示完的失败命令
+	// 凭空多出一行 `(2 earlier lines)`，实测踩过）。
+	const hidden =
+		(hintLine ? Number(/(\(\s*)(\d+)(\s*earlier lines)/.exec(hintLine)?.[2] ?? 0) : 0) + (content.length - window.length);
+	const rendered: string[] = [];
+	if (hidden > 0) {
+		const hint = hintLine
+			? withOurEllipsis(hintLine.replace(/(\(\s*)(\d+)(\s*earlier lines)/, (_m, open, _count, tail) => `${open}${hidden}${tail}`))
+			: theme.fg("muted", `${ELLIPSIS} (${hidden} earlier lines,`) +
+			  (expandKeyText() === "" ? "" : ` ${theme.fg("dim", expandKeyText())}`) +
+			  theme.fg("muted", " to expand)");
+		rendered.push(truncateToWidth(hint, width, ELLIPSIS));
+	}
+	return [head, ...rendered, ...fillers, ...window, ...(status === undefined ? [] : [status])];
+}
+
+/** pi 的提示行用三个点（`truncateToWidth` 的省略号），本扩展统一成单个 `…`。 */
+function withOurEllipsis(line: string): string {
+	return line.replace("...", ELLIPSIS);
+}
+
+/** 结果里的一行（带样式）去掉 SGR 后是不是空的。 */
+function isBlankResultLine(line: string): boolean {
+	return stripAnsiCodes(line).trim() === "";
 }
 
 /**
@@ -1038,13 +1405,12 @@ export default function (pi: ExtensionAPI) {
 	// 输出预览行数：pi 内置写死 5（`BASH_PREVIEW_LINES`，模块私有常量 + 无设置项），
 	// 所以只能在扩展里后处理。/bash-preview 可改；PI_BASH_PREVIEW 启动时覆盖。
 	let previewLines = clampPreviewLines(Number(process.env.PI_BASH_PREVIEW));
-	// 输出树形 gutter（`│ ` / `└ `）：默认开（对齐 codex）。PI_BASH_TREE=off 启动时关闭。
-	// 与 previewLines 相互独立：`/bash-preview off` 恢复 pi 的 5 行预览后 gutter 照旧生效。
-	const treeEnabled = process.env.PI_BASH_TREE?.trim().toLowerCase() !== "off";
+	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
+	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines 一样在注册时读一次。
 	// 流式输出开关：默认关（非流式，对齐 opencode / codex）。PI_BASH_STREAM=on 恢复 pi 原生流式。
 	const streaming = process.env.PI_BASH_STREAM?.trim().toLowerCase() === "on";
 	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
-	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines / treeEnabled 一样在注册时读一次。
+	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines 一样在注册时读一次。
 	const minTimeFooterMs = resolveMinTimeFooterMs(process.env.PI_BASH_MIN_TIME_MS);
 	// 命令语法高亮开关：默认开。PI_BASH_HIGHLIGHT=off 启动时关闭（回到整行 toolTitle 粗体）。
 	// 刻意**不注册 /bash-highlight 指令** —— 这是个纯观感开关，env 一个入口就够，
@@ -1110,7 +1476,8 @@ export default function (pi: ExtensionAPI) {
 			// contentBox 里，只有这一行），但 self 模式下两者是两个独立的 Box，
 			// 各自的 paddingY 会叠加上去，所以这里把三者全部去掉，让输出紧贴命令。
 			// 整块的**下边界**空行则由 withBottomBlank 补回来（只补最外侧那一行，
-			// 不会落到命令与输出之间）。
+			// 不会落到命令与输出之间）—— 它也会经过树形 gutter 判定，从而在树里
+			// 收尾一根 `│ `（见 withPreviewLimit）。
 			// 耗时页脚门槛判据（见文件头「耗时页脚门槛」）：与 pi 画那行字用的是**同一个量**
 			// —— `state.endedAt ?? Date.now()` 减 `state.startedAt`（内置 renderResult 刚在上面
 			// 那次调用里补上了 endedAt）。做成**函数**、在 render 时才求值：流式模式下每秒
@@ -1121,7 +1488,9 @@ export default function (pi: ExtensionAPI) {
 			const box = new Box(1, 0, stateBgFn(theme, options.isPartial, context.isError === true));
 			box.addChild(
 				withBottomBlank(
-					stripLeadingBlanks(withPreviewLimit(inner, Math.max(1, Math.round(previewLines)), theme, treeEnabled, elapsedMs, minTimeFooterMs)),
+					stripLeadingBlanks(
+						withPreviewLimit(inner, Math.max(1, Math.round(previewLines)), theme, options.expanded === true, () => options.isPartial === true, context.isError === true, elapsedMs, minTimeFooterMs),
+					),
 				),
 			);
 			return box;
@@ -1198,7 +1567,8 @@ export default function (pi: ExtensionAPI) {
 
 			const commandDisplay = invalid ? theme.fg("error", "[invalid arg]") : command ? command : theme.fg("toolOutput", "...");
 			const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
-			const styledFull = theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+			// invalid / 空命令走 pi-tui 折行分支，这一行没有正文可分词，所以 `Run` 的粗体在这里拼
+			const styledFull = theme.fg("toolTitle", theme.bold(COMMAND_PROMPT.trimEnd()) + " ") + commandDisplay + timeoutSuffix;
 
 			// 缓存放在组件闭包里而不是 state：流式阶段 args 会不断变长，
 			// 而 state 是整行共享的，按 width 缓存会返回旧命令的行。
@@ -1223,72 +1593,65 @@ export default function (pi: ExtensionAPI) {
 
 					let result: string[];
 					// invalid（args.command 不是字符串）/ 空命令走 pi-tui 折行分支：这两种文本固定是
-					// `$ [invalid arg]` / `$ ...`，短到根本不会折行，而那个分支能原样保留
+					// `Run [invalid arg]` / `Run ...`，短到根本不会折行，而那个分支能原样保留
 					// 嵌套样式（error 色 / toolOutput 色），不用在硬折分支里重建
 					if (!context.expanded && !invalid) {
-						// 折叠态：**break-all 硬折行** + 视觉行数预算（`limit`，默认 3 行）。
-						// 详见文件头「折叠视图：break-all 硬折行」一节。
-						// 先折**纯文本**再逐行上样式：反过来会把 SGR 序列从中间切断。
+						// 折叠态：**break-all 硬折行** + 视觉行数预算（`limit`，默认 2 行）。
+						// 详见文件头「命令行：2 行 + `Run ` 前缀」一节。
+						// 先把行尾 `…` 放在**纯文本**上，再整行上色 —— 反过来会把 SGR
+						// 序列从中间切断。
 						const commandLines = (command || "...").split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						// 首行（且仅首行）要给 timeout 后缀留位置，否则长命令会把后缀挤掉
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
-						const shown: string[] = [];
-						const hiddenParts: string[] = [];
-						let budgetExhausted = false;
-						// 引号状态跨源行保留（多行字符串的第二行不会被当成新命令分词）
-						let openQuote: string | null = null;
-						for (let i = 0; i < commandLines.length && !budgetExhausted; i++) {
-							const line = commandLines[i]!;
-							const prefix = i === 0 ? "$ " : "";
-							const { rows, tokens, nextQuote } = wrapAndTokenizeLine(prefix, line, i === 0 ? firstRowBudget : wrapWidth, wrapWidth, openQuote, highlightEnabled);
-							openQuote = nextQuote;
-							for (let r = 0; r < rows.length; r++) {
-								if (shown.length >= limit) {
-									// 预算用完：本源行剩下的碎片（拼回去就是它的尾巴）
-									// + 后续源行全部隐藏。硬折行不丢字符，所以碎片直接
-									// join("") 就是原文尾巴（不用像旧代码那样用
-									// startsWith 反推截断点）。用的是**纯文本**碎片，所以
-									// token 估算不会把 SGR 序列算进去。
-									hiddenParts.push(rows.slice(r).map((piece) => piece.text).join(""));
-									for (let j = i + 1; j < commandLines.length; j++) hiddenParts.push(commandLines[j]!);
-									budgetExhausted = true;
-									break;
-								}
-								shown.push(styleWrappedRow(rows[r]!, prefix, line, tokens, theme) + (i === 0 && r === 0 ? timeoutSuffix : ""));
-							}
-						}
-						result = shown;
-						// 只要有任何内容被折掉或被折叠就出提示：一行长命令硬折后可能
-						// 刚好装满预算（行数 == limit），靠「行数 > limit」判定会漏
-						const hidden = hiddenParts.join("\n");
-						if (hidden.trim() !== "") {
-							const hint = theme.fg("muted", `… (${formatCount(estimateTokens(hidden))} tokens hidden)`);
-							result = [...shown, truncateToWidth(hint, wrapWidth, "…")];
+						// 执行中续行只用等宽缩进，`│ ` 是“命令已结束”的信号（用户定的观感，
+						// 见文件头「命令行：2 行 + `Run ` 前缀」）
+						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
+						const { lines, hiddenLines } = renderCommandLines(
+							commandLines,
+							COMMAND_PROMPT,
+							linePrefix,
+							firstRowBudget,
+							wrapWidth,
+							null,
+							highlightEnabled,
+							limit,
+							theme,
+						);
+						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
+						// 命令本身没显示完 → `… +N lines`（执行中不挂 `│ `，与续行一致）
+						if (hiddenLines > 0) {
+							const hint = theme.fg("muted", `${linePrefix}${ELLIPSIS} +${hiddenLines} lines`);
+							result = [...result, truncateToWidth(hint, wrapWidth, ELLIPSIS)];
 						}
 					} else if (invalid || !command) {
-						// invalid（args.command 不是字符串）/ 空命令：文本固定是 `$ [invalid arg]`
-						// / `$ ...`，短到根本不会折行，而折行分支能原样保留嵌套样式
+						// invalid（args.command 不是字符串）/ 空命令：文本固定是 `Run [invalid arg]`
+						// / `Run ...`，短到根本不会折行，而折行分支能原样保留嵌套样式
 						//（error 色 / toolOutput 色），不用在硬折分支里重建
 						result = wrapTextWithAnsi(styledFull, wrapWidth);
 					} else {
 						// 展开态（ctrl+o）/ 关闭折叠：要的就是完整命令，**同样用 break-all
 						// 硬折行** —— 贪心词折行在这里一样会把长路径整块挪到下一行
-						// 再从中间断开（就是用户看到的 `$ ` 后面直接折行），展开态只是
+						// 再从中间断开（就是用户看到的 `Run ` 后面直接折行），展开态只是
 						// 不限行数，折行规则必须一致。
 						const commandLines = command.split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
-						const rows: string[] = [];
-						let openQuote: string | null = null;
-						for (let i = 0; i < commandLines.length; i++) {
-							const line = commandLines[i]!;
-							const prefix = i === 0 ? "$ " : "";
-							const { rows: pieces, tokens, nextQuote } = wrapAndTokenizeLine(prefix, line, i === 0 ? firstRowBudget : wrapWidth, wrapWidth, openQuote, highlightEnabled);
-							openQuote = nextQuote;
-							for (const piece of pieces) rows.push(styleWrappedRow(piece, prefix, line, tokens, theme));
-						}
-						result = rows.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
+						// 执行中续行用等宽缩进，完成后才换成 `│ `（与折叠态同一条规则）
+						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
+						// 与折叠态共用同一套摆行逻辑，只把行数预算放开（`hiddenLines` 必为 0）
+						const { lines } = renderCommandLines(
+							commandLines,
+							COMMAND_PROMPT,
+							linePrefix,
+							firstRowBudget,
+							wrapWidth,
+							null,
+							highlightEnabled,
+							Number.MAX_SAFE_INTEGER,
+							theme,
+						);
+						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
 					}
 
 					// 染色块的上下边界空行（见文件头「染色块的上下边界空行」）：
