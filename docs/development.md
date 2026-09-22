@@ -13,7 +13,7 @@ These come from pi's extension discovery and they decide where a file may live:
 | `extensions/<dir>/*.test.ts` | No — only the directory's `index.ts` is loaded. |
 | `extensions/*.test.ts` (top level) | **Yes** — pi would try to load it. Never put tests at the top level. |
 
-`thinking-collapse/`, `tool-diff/` and `prompt-editor/` are the three helper-only directories here: `thinking-collapse.ts`, `tool-diff.ts` and `prompt-editor.ts` import them, and pi never loads them directly.
+`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/` and `read-path-collapse/` are the helper-only directories here: `thinking-collapse.ts`, `tool-diff.ts`, `prompt-editor.ts`, `bash-command-collapse.ts` and `read-path-collapse.ts` import them or are covered by their tests, and pi never loads them directly.
 
 Two consequences worth remembering:
 
@@ -23,20 +23,20 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 651 tests, ~36 s
+npm test        # node --test — 839 tests, ~36 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 651 tests, ~36 s
+node --test --test-concurrency=4      # 839 tests, ~36 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 
-Two test files go the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match); [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) does the same for the message box, comparing patched and unpatched frames of the same text at the same width — which is what proves the prototype patch landed on the class pi actually renders with, the one failure this feature can have. [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts) goes through the same loader and `ToolExecutionComponent` and asserts the rendered lines of the command block, including a failed command's status line. Both locate pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and both **skip** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point them at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
+Two test files go the other way: [`prompt-editor/render.test.ts`](../extensions/prompt-editor/render.test.ts) loads the **real** extension through pi's own loader and asserts the `!` bash-mode render contract line by line and column by column, with only the surroundings faked (a `tui` that has just `terminal.rows` and `requestRender()`, an identity `borderColor`, keybindings that never match); [`user-message-bar/index.test.ts`](../extensions/user-message-bar/index.test.ts) does the same for the message box, comparing patched and unpatched frames of the same text at the same width — which is what proves the prototype patch landed on the class pi actually renders with, the one failure this feature can have. [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts) goes through the same loader and `ToolExecutionComponent` and asserts the rendered lines of the command block, including a failed command's status line. [`read-path-collapse/render.test.ts`](../extensions/read-path-collapse/render.test.ts) does it for the read block — the `• ` dot, its per-state color, the two-column indent, the absence of a background and of boundary blank lines, plus a control case proving other tools keep pi's default shell. All of them locate pi's library entry by reading the `# cmd-shim-target=` line out of the `pi` shim, and all **skip** — rather than failing or faking a pass — when pi cannot be resolved, because the copy under `~/.pi/agent/npm` is often an empty shell after `pi update --extensions`. Point them at a real entry with `PI_TEST_PI_ENTRY=/path/to/index.js`.
 
 **Tests passing is not enough.** pi loads `.ts` with its own loader, and a construct node accepts can still fail there:
 
@@ -60,7 +60,7 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 24 loaded by reading the startup list:
+Then check that all 25 loaded by reading the startup list:
 
 ```
 [Extensions]
@@ -108,7 +108,7 @@ A new tool name and a new command name must not collide with any other extension
 
 This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with three deliberate deltas:
 
-1. `config/models.json` and `config/mcp.json` are not shipped, and the three model-selection keys were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. See [configuration.md](configuration.md#what-is-not-shipped).
+1. `config/models.json` and `config/mcp.json` are not shipped, and the three model-selection keys were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default. See [configuration.md](configuration.md#what-is-not-shipped).
 2. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
 3. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
 
@@ -117,18 +117,22 @@ So when the snapshot changes upstream:
 ```bash
 SRC=/Users/bachi/jaylli/litellm-any/clients/pi   # the snapshot the extension lives in
 DST=/Users/bachi/jaylli/pi-coder                 # this package
-cp -R "$SRC/extensions/." "$DST/extensions/"
-cp "$SRC/themes/"*.json "$DST/themes/"
+rsync -a --delete "$SRC/extensions/" "$DST/extensions/"
+rsync -a --include='*.json' --exclude='*' "$SRC/themes/" "$DST/themes/"
 cp "$SRC/AGENTS.md" "$DST/config/AGENTS.md"
 cp "$SRC/README.md" "$DST/docs/handbook.zh.md"   # the handbook is the snapshot README, verbatim
+cp /path/to/litellm-any/docs/pi-coder-palettes.html "$DST/assets/pi-coder-palettes.html"
 diff -r "$SRC/extensions" "$DST/extensions"     # expect: no output
-diff -r "$SRC/themes" "$DST/themes"              # expect: no output
-diff "$SRC/AGENTS.md" "$DST/config/AGENTS.md"    # expect: no output
+diff -r "$SRC/themes" "$DST/themes"              # expect: only ayu1.png / ayu2.png, which live in assets/ here
 npm test
 # bump "version" in package.json, add a CHANGELOG entry, update the counts in README.md and docs/
 ```
 
-Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot, and `diff` on it is expected to show exactly the three removed model keys.
+The two `rsync --delete` runs are deliberate: a snapshot sync must remove what upstream removed. `cp -R` leaves stale files behind — `themes/pi-coder-summer-night.json` survived this way in 2.0.0–2.0.5 — and a stale theme or extension is invisible until someone notices it in `/theme` or a startup list. Because `--delete` is destructive, run it only against `extensions/` and `themes/`, where the destination is a pure copy of the source; never against `docs/`, `assets/` or `config/`.
+
+`docs/handbook.zh.md` is the snapshot README verbatim, so it is not hand-edited here; the package-specific instructions live in the English docs. It still describes the snapshot's own repository layout (`cp clients/pi/...`), which is the machine it was written for.
+
+Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the three removed model keys; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
 
 ## Publishing
 

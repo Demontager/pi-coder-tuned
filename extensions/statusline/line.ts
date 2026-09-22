@@ -66,6 +66,14 @@ export const BRANCH_ICON = "\u15cc";
 export const LEADING_INDENT = " ";
 /** 本扩展自己的 setStatus key（清残留用，渲染时也跳过）。 */
 export const STATUSLINE_KEY = "statusline";
+/**
+ * 强制排在最前面的 status key，按这个数组的顺序排；不在表里的按注册顺序跟在后面。
+ *
+ * 为什么不是纯注册顺序：**模式指示必须在行首**。它跟着路径、checkpoint 计数这些
+ * 会变长的段，而第二行是「超长只截断、不折行」—— 放尾部时一条长路径就能把它挤到看不见。
+ * 注册顺序取决于 pi 加载扩展的顺序（目录字母序），写在那里的话改个文件名就会变，太脆。
+ */
+export const STATUS_PRIORITY = ["plan-mode"] as const;
 const MAX_STATUS_ITEMS = 5;
 
 /** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
@@ -107,12 +115,27 @@ export function composeFooterLines(
 }
 
 /**
- * 第二行：其它扩展 `ctx.ui.setStatus()` 的文本（cwd-statusline / rewind / simple-task）。
+ * 第二行：其它扩展 `ctx.ui.setStatus()` 的文本（模式指示 / cwd / rewind checkpoint …）。
  * 自带 ANSI 的原样渲染（那些扩展已经自己配过色），没色的统一给 muted。
+ *
+ * 顺序：先按 `STATUS_PRIORITY`（模式指示排行首），其余按注册顺序。
  */
 export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineGitSource): string {
-	const visible = [...git.getExtensionStatuses().entries()]
-		.filter(([key, value]) => key !== STATUSLINE_KEY && value.trim().length > 0)
+	const entries = [...git.getExtensionStatuses().entries()].filter(
+		([key, value]) => key !== STATUSLINE_KEY && value.trim().length > 0,
+	);
+
+	const rank = (key: string): number => {
+		const index = (STATUS_PRIORITY as readonly string[]).indexOf(key);
+		return index === -1 ? STATUS_PRIORITY.length : index;
+	};
+	// 稳定排序：同 rank 的保持 Map 的插入序（`Array.prototype.sort` 在现代 V8 上稳定）
+	const ordered = entries
+		.map((entry, index) => ({ entry, index }))
+		.sort((a, b) => rank(a.entry[0]) - rank(b.entry[0]) || a.index - b.index)
+		.map((wrapped) => wrapped.entry);
+
+	const visible = ordered
 		.slice(0, MAX_STATUS_ITEMS)
 		.map(([, value]) => (hasAnsi(value) ? value : theme.fg("muted", value.trim())));
 	return visible.join(dim(theme, SEPARATOR));

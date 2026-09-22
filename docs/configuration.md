@@ -40,7 +40,7 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 | Key | Value here | Notes |
 | --- | --- | --- |
 | `lastChangelogVersion` | `"0.85.1"` | Internal marker for "last changelog the user saw". It only suppresses a changelog notice; harmless to keep or delete. |
-| `theme` | `"pi-coder-summer-night"` | Must equal the `name` field inside `themes/pi-coder-summer-night.json`, not just the file name. |
+| `theme` | `"pi-coder-1337"` | Must equal the `name` field inside `themes/pi-coder-1337.json`, not just the file name. |
 | `defaultThinkingLevel` | `"xhigh"` | Startup thinking level. Not available on every model; see `thinkingLevelMap` in your `models.json`. |
 | `compaction.enabled` / `reserveTokens` / `keepRecentTokens` | `true` / `52429` / `20000` | `keepRecentTokens` is pi's default; `reserveTokens` is raised well above pi's `16384` default because this setup's models stream long thinking blocks. |
 | `npmCommand` | `["pnpm", "--config.node-linker=hoisted"]` | See above. Machine-specific. |
@@ -67,7 +67,11 @@ Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and 
 
 ## What is not shipped
 
-### `models.json`
+### `config/settings.json` and `config/AGENTS.md`
+
+`config/settings.json` holds the two machine-specific entries above; everything else in it is portable. `config/AGENTS.md` is the agent's global working rules and is not machine-specific at all.
+
+`config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.mcp.json`.
 
 Provider and model registrations are machine-specific: this setup's `litellm-any` provider points at a LiteLLM gateway on `127.0.0.1:996` (LAN address on other machines), carries a compat configuration, and registers six model ids that must match the gateway's routes exactly. Shipping it would be wrong on every other machine, so it is excluded.
 

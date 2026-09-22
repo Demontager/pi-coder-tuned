@@ -40,7 +40,8 @@ import {
 	type State,
 	type TaskStatus,
 } from "./types.ts";
-import { GLYPHS, buildWidgetLines } from "./widget.ts";
+// 只引 buildWidgetLines：GLYPHS 只被 widget 自己的渲染用，本文件不再直接碰符号表。
+import { buildWidgetLines } from "./widget.ts";
 import { widgetGaps } from "./gap.ts";
 
 const WIDGET_KEY = "simple-task";
@@ -134,29 +135,11 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			// ctx 可能已 stale（会话结束 / reload / 切换会话），ctx.ui 的 getter 会抛。
 			// 吞掉即可 —— 界面本来就要消失，没什么可渲染的。
 			try {
-				ctx.ui.setStatus(WIDGET_KEY, undefined);
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
 			} catch {
 				/* ctx 已失效 */
 			}
 			ensureTimer();
-			return;
-		}
-
-		const { done } = countByStatus(state);
-		const total = state.tasks.length;
-		const complete = isComplete(state);
-		try {
-			ctx.ui.setStatus(
-				WIDGET_KEY,
-				ctx.ui.theme.fg(
-					complete ? "success" : "accent",
-					`${complete ? GLYPHS.done : GLYPHS.header} ${done}/${total}`,
-				),
-			);
-		} catch {
-			stopTimer();
-			lastCtx = undefined;
 			return;
 		}
 

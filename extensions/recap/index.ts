@@ -6,6 +6,11 @@
  *   2. 对话结束后**静止 10 秒**（没有任何新输入）自动生成一条摘要，显示在输入框上方。
  *   发出新消息后摘要立即消失（它已经是上一轮的过期提醒了）。
  *
+ * `/recap` 是**幂等**的：同一轮对话已经生成过摘要（手动或自动都算）且此后没有新对话时，
+ * 再执行直接返回 —— 不重跑模型、不清 widget、也不发通知。理由是重复执行本来就会生成一份
+ * 一模一样的摘要（丢给模型的最后一轮对话根本没变），而一旦这次生成失败（模型返回空 /
+ * thinking-only），那条「没能生成 recap」的提示就会把屏幕上刚生成的摘要顶掉。
+ *
  * **有子代理在跑时不算「结束」**：静止 10s 只是「主回合结束了」的信号，而异步子代理
  * （`subagent({ async: true })`）是脱离回合的 —— 主回合早早 settled，子代理还在后台跑，
  * 10s 到点就会把「刚把任务发出去、还在等」总结成「这轮干完了」。所以计时器到点先问一句
@@ -250,17 +255,37 @@ export default function (pi: ExtensionAPI) {
 
 	// ─── 生成 ──────────────────────────────────────────────────
 
-	async function generate(ctx: ExtensionContext, force = false): Promise<void> {
-		if (ctx.mode !== "tui") return;
-
+	/**
+	 * 当前对话的最后一轮 user / assistant 配对，以及它的指纹。
+	 *
+	 * 指纹同时用作两件事：`generate` 的去重键（同一轮不重复调模型），以及 `/recap` 的
+	 * 重复执行闸门（见命令 handler）。两处必须用同一个函数算，否则两边会各算各的。
+	 * 取不到（没有 model、或还没有成对的 user + assistant）时返回 undefined。
+	 */
+	function latestExchange(ctx: ExtensionContext):
+		| { key: string; exchange: { user: string; assistant: string }; model: NonNullable<ExtensionContext["model"]> }
+		| undefined {
 		const model = ctx.model;
-		if (!model) return;
+		if (!model) return undefined;
 
 		const branch = (ctx.sessionManager?.getBranch?.() ?? []) as unknown[];
 		const exchange = getLastExchange(branch);
-		if (!exchange) return;
+		if (!exchange) return undefined;
 
-		const key = [exchange.user, exchange.assistant, model.provider, model.id].join("\u0000");
+		return {
+			key: [exchange.user, exchange.assistant, model.provider, model.id].join("\u0000"),
+			exchange,
+			model,
+		};
+	}
+
+	async function generate(ctx: ExtensionContext, force = false): Promise<void> {
+		if (ctx.mode !== "tui") return;
+
+		const latest = latestExchange(ctx);
+		if (!latest) return;
+		const { key, exchange, model } = latest;
+
 		if (!force && completedKey === key && currentRecap) return;
 
 		const controller = new AbortController();
@@ -360,6 +385,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("recap", {
 		description: "总结当前对话",
 		handler: async (_args, ctx) => {
+			// 重复执行闸门：已经为**当前这一轮对话**生成过摘要、且它还挂在屏幕上时，直接返回。
+			// 这时再跑一遍模型只会得到同一份摘要（最后一轮对话根本没变），而万一它这次返回空
+			// （失败提示会把刚生成的摘要顶掉）连屏幕上那条也保不住。所以什么都不做，让它留着。
+			// 注意判据是「摘要存在 **且** 指纹相同」：指纹不同说明此后的对话已经换了一轮（例如
+			// 非交互来源的新消息，`input` 处理器清不到），那就该照常重新生成。
+			const latest = latestExchange(ctx);
+			if (latest && currentRecap && completedKey === latest.key) return;
+
 			cancel();
 			currentRecap = "";
 			completedKey = undefined;

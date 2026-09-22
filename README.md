@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **24 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **25 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -15,7 +15,7 @@ This is a working setup, not a collection of demos. Every extension is used dail
 
 A startup header, a one-line statusline, a `❯` prompt, and a diff renderer that paints whole lines.
 
-The startup list loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`cwd-statusline`, `simple-task`, `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
+The startup list loses its `[Context]`, `[Prompts]` and `[Themes]` sections, which carry no information. The statusline's second line is written by other extensions (`plan-mode` first, then `cwd-statusline` and `rewind`) through `ctx.ui.setStatus()`, so it grows with whatever you have installed.
 
 Colors come from the active theme rather than from hardcoded values, so `/theme` repaints everything on the next frame.
 
@@ -48,8 +48,8 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 
 | Extension | What it does |
 | --- | --- |
-| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: the command takes a `Run ` prefix and at most 2 visual lines ending in `…`, results hang off the same tree with a single `└ ` on the first real output line (a failed command's `Command exited with code N` is detected by shape and painted `error`, expanded or not). Hard-wrap at the column budget, shell syntax highlighting, its own background box. The shape and its 22 render assertions are in [`bash-command-collapse/render.test.ts`](extensions/bash-command-collapse/render.test.ts). |
-| [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: long paths stay on one line, ellipsis at the front, file name kept whole. |
+| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Overrides `bash`: a `• ` status dot (dim while running, green on success, red on failure), then the command behind a `Run ` prefix on at most 2 visual lines ending in `…`, with results hanging off the same tree and a single `└ ` on the first real output line (a failed command's `Command exited with code N` is detected by shape and painted `error`, expanded or not). No background and no boundary blank lines, hard-wrap at the column budget, shell syntax highlighting. The shape and its 25 render assertions are in [`bash-command-collapse/render.test.ts`](extensions/bash-command-collapse/render.test.ts). |
+| [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Overrides `read`'s title row: the same `• ` dot and no-background shell as the bash block, results indented to the `Read` column, and long paths on one line with the ellipsis at the front and the file name kept whole. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Overrides `edit`/`write`: Claude Code style full-line diff backgrounds, line-number gutter, inline and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Thinking blocks render as one continuous horizontally scrolling line labelled `Think: `. |
 | [`user-message-bar/`](extensions/user-message-bar/) | A `▎` (U+258E) plus one space at the head of every line of a user message box, including the blank padding lines, in the theme's `accent` color. The glyph replaces the one column of left padding and the extra indent is taken back out of the trailing padding, so background, width and wrap positions stay as they were. |
@@ -59,7 +59,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd, and prunes `[Context]`/`[Prompts]`/`[Themes]` from the startup list. |
 | [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time. |
 | [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. |
-| [`recap/`](extensions/recap/) | `/recap`, plus an automatic summary above the editor after 10s of idling. |
+| [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
 | [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. |
 | [`mcp/`](extensions/mcp/) | MCP servers become pi tools (`mcp__<server>__<tool>`) over stdio, streamable HTTP or legacy SSE, with `/mcp` status commands. |
@@ -69,19 +69,20 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`below-editor-after-statusline.ts`](extensions/below-editor-after-statusline.ts) | Moves `belowEditor` widgets underneath the statusline. |
 | [`folder-history.ts`](extensions/folder-history.ts) | Persists command history per working directory and injects it into the editor's native ↑/↓. |
 | [`theme-command.ts`](extensions/theme-command.ts) | `/theme` with live preview: arrow keys preview, Enter persists, Esc cancels. |
+| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode (normal → plan → execute): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning, `exit_plan_mode` submits the plan for approval, `[DONE:n]` advances the steps. |
 | [`init-command.ts`](extensions/init-command.ts) | Claude Code style `/init`: update `CLAUDE.md`, else `AGENTS.md`, else create `AGENTS.md`. |
 | [`clear-command.ts`](extensions/clear-command.ts) | `/clear` as an alias of `/new`. |
 | [`exit-command.ts`](extensions/exit-command.ts) | `exit`, `quit` or `bye` on an otherwise empty prompt quits pi; `/exit` too. |
 
 ### Themes
 
-`pi-coder-summer-night` (the default here), `pi-coder-catppuccin` and `pi-coder-ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. Details in [docs/themes.md](docs/themes.md).
+`pi-coder-1337` (the default here, ported from Codex CLI's built-in `1337`), `pi-coder-catppuccin` and `pi-coder-ayu` — reference-only palettes whose `colors` entries point at `vars`, plus two custom diff-background tokens that [`tool-diff.ts`](extensions/tool-diff.ts) reads. `vars` keeps only what a slot still references (35 / 31 / 27 entries). Details in [docs/themes.md](docs/themes.md).
 
 All three are laid out side by side in the [palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html): every variable and slot assignment, plus a terminal preview you can switch between the three themes.
 
 ### Commands
 
-`/ask` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/init` `/mcp` `/recap` `/rewind` `/tasks` `/theme`
+`/ask` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -95,6 +96,8 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_BASH_STREAM=on` | off | Use pi's native streaming for bash instead of the collapse path. |
 | `PI_FENCELESS_CODE=off` | on | Keep Markdown code fences. |
 | `PI_LOGO=off` | on | Do not install the startup header. |
+| `PI_PLAN_MODE=off` | on | Disable plan mode entirely (`PI_PLAN_MODE_AUTO=off` only disables the model's `enter_plan_mode` tool). |
+| `PI_READ_COLLAPSE=off` | on | Keep pi's built-in `read` title row. |
 | `PI_SUBAGENT_LOG_GUARD=notify` | `drop` | Show `[pi-subagents]` diagnostics through `ctx.ui.notify` instead of dropping them. |
 
 ## Global config files
@@ -132,16 +135,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 24 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 25 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 651 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 839 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 651 tests
+npm test        # node --test, 839 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

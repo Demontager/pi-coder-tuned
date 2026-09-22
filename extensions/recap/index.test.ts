@@ -99,19 +99,22 @@ interface Recorder {
 	completeCalls: number;
 	/** 每次 `setWidget(key, <factory>)` 记一个；undefined 不入列。 */
 	widgets: WidgetFactory[];
+	/** `ui.notify` 收到的文案（成功是一条 `✦ Recap: …`，失败是「没能生成 recap…」）。 */
+	notifies: string[];
 }
 
 /** 假 ctx：只提供 recap 这条路径上真正用到的东西。 */
-function createContext(recorder: Recorder): unknown {
+function createContext(recorder: Recorder, branch?: unknown[]): unknown {
 	return {
 		mode: "tui",
 		isIdle: () => true,
 		model: { provider: "test", id: "test-model" },
 		sessionManager: {
-			getBranch: () => [
-				{ type: "message", message: { role: "user", content: "把 recap 的定时改成等子代理结束" } },
-				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "改完了，正在等子代理的结果。" }] } },
-			],
+			getBranch: () =>
+				branch ?? [
+					{ type: "message", message: { role: "user", content: "把 recap 的定时改成等子代理结束" } },
+					{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "改完了，正在等子代理的结果。" }] } },
+				],
 		},
 		modelRegistry: {
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
@@ -124,7 +127,9 @@ function createContext(recorder: Recorder): unknown {
 			setWidget: (_key: string, widget: unknown) => {
 				if (widget) recorder.widgets.push(widget as WidgetFactory);
 			},
-			notify: () => {},
+			notify: (message: string) => {
+				recorder.notifies.push(message);
+			},
 		},
 	};
 }
@@ -221,7 +226,7 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 		assert.ok(shutdown, "应该注册了 session_shutdown");
 		assert.ok(extension.commands.has("recap"), "应该注册了 /recap 命令");
 
-		const recorder: Recorder = { completeCalls: 0, widgets: [] };
+		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
 		const ctx = createContext(recorder);
 
 		// 回合结束：起 10s 空闲表（此刻不会有任何输出）。
@@ -281,7 +286,7 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		assert.ok(command, "应该注册了 /recap 命令");
 
 		// /recap 是 force=true 的那条路（不走 10s 闲置闸门），拿到的 widget 工厂就是渲染现场。
-		const recorder: Recorder = { completeCalls: 0, widgets: [] };
+		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
 		await command.handler("", createContext(recorder));
 		assert.equal(recorder.widgets.length, 1, "/recap 应该挂上 widget");
 
@@ -342,6 +347,82 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		assert.equal(outerLines.length, 3, "外层那次 walk 看到邻居有内容 → 补前导空行");
 		assert.equal(outerLines[0], "");
 		assert.match(outerLines[1] ?? "", /✦ Recap:/);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+/**
+ * `/recap` 的重复执行闸门：同一轮对话已经生成过摘要、且它还挂在屏幕上时，再执行不重跑
+ * 模型、不重挂 widget、也不发通知 —— 那次生成一旦返回空，失败提示就会把刚生成的摘要顶掉。
+ * 判据是「摘要存在 **且** 指纹（最后一轮 user+assistant+model）与上次生成时相同」，
+ * 所以新对话一来闸门就放开：正常路径下 `input` 事件已经先把状态清了（这里也顺带覆盖），
+ * 非交互来源的新消息则会因为指纹不同而放开。
+ */
+test("/recap 重复执行不重跑模型、不发提示；有新对话后才重新生成", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const bus = createTestBus();
+		const pi = (await import(pathToFileURL(piEntry as string).href)) as {
+			discoverAndLoadExtensions: (
+				configuredPaths: string[],
+				cwd: string,
+				agentDir?: string,
+				eventBus?: unknown,
+			) => Promise<{
+				extensions: Array<{
+					handlers: Map<string, Handler[]>;
+					commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>;
+				}>;
+				errors: Array<{ path: string; error: string }>;
+			}>;
+		};
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, bus);
+		assert.deepEqual(loaded.errors, []);
+		const command = loaded.extensions[0]?.commands.get("recap");
+		const onInput = loaded.extensions[0]?.handlers.get("input")?.[0];
+		assert.ok(command, "应该注册了 /recap 命令");
+		assert.ok(onInput, "应该注册了 input");
+
+		/** 可变的对话分支：push 一对新消息就等于又聊了一轮。 */
+		const branch: unknown[] = [
+			{ type: "message", message: { role: "user", content: "甲" } },
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "乙" }] } },
+		];
+		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
+		const ctx = createContext(recorder, branch);
+
+		// 第一次：正常生成 + 通知。
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 1, "第一次 /recap 应该生成");
+		assert.equal(recorder.widgets.length, 1);
+		assert.deepEqual(recorder.notifies, ["✦ Recap: 已把 recap 定时改成等子代理结束"]);
+
+		// 第二次（没有新对话）：闸门命中，什么都不做。
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 1, "同一轮对话不该第二次调模型");
+		assert.equal(recorder.widgets.length, 1, "不该重挂 widget");
+		assert.equal(recorder.notifies.length, 1, "不该再发通知（失败提示会把摘要顶掉）");
+
+		// 新对话 + 交互输入：`input` 先把摘要与状态清掉，再执行就该重新生成。
+		branch.push({ type: "message", message: { role: "user", content: "丙" } });
+		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "丁" }] } });
+		await onInput({ source: "interactive" }, ctx);
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 2, "input 清过状态后应该重新生成");
+		assert.equal(recorder.notifies.length, 2);
+
+		// 紧接着再按一次：又成了同一轮，不再重复。
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 2, "同一轮仍不重复");
+
+		// 新对话但没人发过 `input`（非交互来源的消息，清不到状态）→ 指纹不同，闸门同样放开。
+		branch.push({ type: "message", message: { role: "user", content: "戊" } });
+		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "己" }] } });
+		await command.handler("", ctx);
+		assert.equal(recorder.completeCalls, 3, "指纹变了就该重新生成");
+
+		await loaded.extensions[0]?.handlers.get("session_shutdown")?.[0]?.({}, ctx);
 	} finally {
 		workspace.cleanup();
 	}

@@ -1,12 +1,12 @@
 # Themes
 
-Three themes ship with this package: `pi-coder-summer-night` (the one `config/settings.json` selects), `pi-coder-catppuccin` and `pi-coder-ayu`. All three carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`.
+Three themes ship with this package: `pi-coder-1337` (the one `config/settings.json` selects), `pi-coder-catppuccin` and `pi-coder-ayu`. All three carry the `pi-coder-` prefix, so their names cannot collide with themes from another installed package. Before 2.0.0 they shipped as `summer-night`, `catppuccin` and `ayu`; `pi-coder-summer-night` (an iceberg.vim palette) existed through 2.0.5 and was replaced by `pi-coder-1337`.
 
 ## Switching themes
 
 Two ways, both with the same result:
 
-- `/theme` — the picker from `theme-command.ts`. Arrow keys preview live, Enter persists to `settings.json`, Esc leaves settings untouched. `/theme pi-coder-summer-night` switches directly.
+- `/theme` — the picker from `theme-command.ts`. Arrow keys preview live, Enter persists to `settings.json`, Esc leaves settings untouched. `/theme pi-coder-1337` switches directly.
 - `/settings` → Theme — pi's built-in path, which also mixes in the light/dark auto modes.
 
 pi loads themes from three places:
@@ -21,27 +21,50 @@ The copy commands in [installation.md](installation.md#apply-the-global-config-f
 
 ## The three themes
 
-### `pi-coder-summer-night`
+### `pi-coder-1337`
 
-The author's own palette and the current default: a Tokyo Night blue base (`night` `#1a1b26`, `panel` `#16161e`, `select` `#2d2c5d`, `find` `#283457`) carrying foregrounds and line colors taken from [iceberg.vim](https://github.com/cocopon/iceberg.vim) — body text `#c6c8d1` (iceberg's `Normal`), `muted` `#818596` (`StatusLine`), `dim` and `Think:` rows `#6b7089` (`Comment`), plus `red` `#e27878`, `green` `#b4be82`, `yellow` `#e2a478`, `magenta` `#a093c7`, `teal` `#89b8c2` and `blue` `#84a0c6`. Against `night` that is roughly 10.2:1 for body text, 4.7:1 for `muted` and 3.5:1 for `dim` — dimmer than pi-coder-catppuccin, so comments and settings hints read faintly. If that is too faint, raise `vars.ui`, `vars.dimText` and `vars.ayuThinking` (the last two are separate variables holding the same grey).
+The current default and the thinnest port of the three: it takes Codex CLI's built-in syntax theme `1337` (Mark Herpich's Sublime palette, one of the 32 themes two-face bundles into the Codex binary; `[tui] theme = "1337"` in `~/.codex/config.toml` selects it). It was re-derived from the theme blob embedded in the local codex executable (a zlib-compressed scope→color table) and reconciled scope by scope against upstream's `1337.tmTheme`: all 48 named scopes matched, 37 of them byte-identical, and the remaining 11 are Codex merging a scope into `None` — neither side ever held two different values for one scope.
 
-The file has 40 `vars` and no `#` literal color values: every entry in `colors` is a variable reference, `export` included (`panel` / `night` / `select`), `text` points at `fg` rather than the terminal default, and the only non-`vars` value is the blanked `toolPendingBg` below. `toolPendingBg` is the empty string, so a tool card that is still running keeps the terminal's default background and carries no badge at all — the card's colors switch only when it finishes or fails, and `vars.pendingCard` is left in the file unreferenced. Variable names are not a reliable guide to what they hold — several still carry Tokyo Night's names while containing iceberg colors (`teal` holds a cyan, `moonLilac` another cyan, `ayuThinking` the same grey as `dim`). `bashOutput` is defined here too (`#818596`, its own variable), and `toolDiffAdded` points at `addedGreen` (`#8bc391`) rather than `teal` or `green` — the string color — so added-line numbers and the `+` column carry the conventional green: 7.83:1 on the `addedLine` background, and 4.96:1 for body text over the 30% inline tint `tool-diff.ts` lays down. It is no longer the same color as `success`, which stays `teal`. `syntaxComment` points at `dimText` (`#6b7089`) rather than at the computed `commentBright`, which is now unreferenced: code comments cost 4.36:1 → 3.50:1 against `night`, in exchange for matching the `Think:` row and the settings hints. `vars.successCard` and `vars.errorCard` are both `#161616` now, so the two finished states no longer differ in temperature — only their foregrounds do; `#161616` is 1.133:1 against the terminal background `#040404` and 1.059:1 against `night`, between the two values it replaced (`#11171d` / `#191319`).
+1337 defines **code syntax only** — `background` `#191919`, `foreground` `#f8f8f2`, `caret`, `selection` `#515151`, `lineHighlight`, `invisibles` `#3b3a32`, plus those 48 named scope entries in 28 distinct foreground colors. It has no UI slots at all, so of pi's 59 colors the syntax slots translate directly and the UI slots are picked from the same 28 values:
+
+| pi slot | 1337 scope | Value |
+| --- | --- | --- |
+| `syntaxComment` | `comment` | `#6d6d6d` |
+| `syntaxString` | `string` | `#fbe3bf` |
+| `syntaxNumber` | `constant.numeric` | `#fdb082` |
+| `syntaxVariable` | `variable` | `#e9fdac` |
+| `syntaxKeyword` | `keyword` (`storage` and `entity.name.tag` share its value) | `#ff5e5e` |
+| `syntaxFunction`, `syntaxType` | `entity.name.function` / `entity.name.class` / `entity.other.inherited-class` (all three same) | `#8cdaff` |
+| `syntaxOperator` | no matching scope → falls back to `foreground` | `#f8f8f2` |
+| `syntaxPunctuation` | `punctuation.definition.*` | `#ffffff` |
+
+Two merges are deliberate. 1337 splits function/class names (`#8cdaff`) from library functions (`support.function`, `#6699cc`) while pi has one `syntaxFunction`: the shared value wins and `syntaxType` follows it, and `#6699cc` is not wasted — it becomes `mdLink`. And `mdHeading` does **not** take 1337's `markup.heading` (`#75715e`): that value is only 3.58:1 on `#191919`, and pi paints the startup list's `[Skills]` / `[Extensions]` section labels with `mdHeading` too; it uses `constant.language`'s orange `#ff8942` (7.46:1) instead.
+
+The remaining UI slots come from 1337's own palette: `border` / `selectedBg` ← `selection`, `borderMuted` ← `invisibles`, `warning` ← `constant.numeric`, `success` ← git-gutter's insertion green `#a6e22e`, `toolTitle` sharing `#8cdaff`, `toolOutput` ← `variable.parameter.function`, `mdListBullet` ← `storage.type` `#fbdfb5`, `bashMode` ← `variable.parameter`, `customMessageLabel` ← the PHP namespace pink `#ffb2f9`. The thinking ladder follows 1337's own cool→warm order, with the top two levels locked (below).
+
+**Six values are locked to the removed `pi-coder-summer-night`**, not to 1337: `toolDiffAdded` / `toolDiffRemoved` / `toolDiffAddedBg` / `toolDiffRemovedBg` (the diff foregrounds and the full-line backgrounds) and `thinkingXhigh` / `thinkingMax`. One consequence is worth stating: those two line backgrounds were picked for summer-night's `#161616` card (1.14 / 1.12:1) and against this theme's `#202020` success card they are 1.02 / 1.01:1 — nearly flat, so the line background adds almost nothing inside a dark diff block (the foreground green is unaffected at 7.83:1). Making them visible again means changing either `toolSuccessBg` or the two backgrounds; it is not an oversight.
+
+`error` is deliberately **not** 1337's `markup.deleted` (`#f92672`): it shares one `vars.removedRed` (`#e27878`) with `toolDiffRemoved`, so editing one place changes both — 6.02:1 on `#191919` and 6.43:1 on `toolErrorBg`. `#f92672` and 1337's `support.constant` `#ecfdb9` are the only two 1337 values this theme gives up. `accent` / `borderAccent` are `#8cdaff`, the same value as `vars.funcBlue` but a **separate** variable, so tuning the accent does not repaint `syntaxFunction` / `syntaxType` / `toolTitle` with it. `mdCode` is the deep cyan `#0d92c1` (accent's previous value, 4.94:1), kept in its own `vars.mdCodeCyan`.
+
+Four backgrounds are specified rather than derived: `userMessageBg` / `customMessageBg` `#242424`, `toolSuccessBg` `#202020`, `toolErrorBg` `#171010`, and `export.cardBg` `#181825` with `export.pageBg` `#111111`. `toolPendingBg` is blank like the other two themes'.
+
+The file has 35 `vars` and 59 colors, with no `#` literal in `colors` and a single empty value (`toolPendingBg`). It also defines `bashOutput` (`#999999`, its own variable) where `pi-coder-catppuccin` does not.
 
 ### `pi-coder-catppuccin`
 
-A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions). The palette lives in `vars` (37 of them) and `colors` only references it. Three entries are empty strings meaning "terminal default": `text`, `syntaxVariable` and `toolPendingBg`. The upstream file's single 256-color index (`toolPendingBg: 233`) was converted to hex `#140e1e` and then blanked entirely, so all three themes in this package are free of integer color values — `bgAnsi()` emits `48;5;N` for an integer, which mixes poorly with a truecolor palette.
+A port of Catppuccin Mocha from [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions). The palette lives in `vars` (31 of them, of which 20 are upstream Mocha) and `colors` only references it. Three entries are empty strings meaning "terminal default": `text`, `syntaxVariable` and `toolPendingBg`. The upstream file's single 256-color index (`toolPendingBg: 233`) was converted to hex `#140e1e` and then blanked entirely, so all three themes in this package are free of integer color values — `bgAnsi()` emits `48;5;N` for an integer, which mixes poorly with a truecolor palette.
 
-One deliberate deviation from upstream beyond the layout: `thinkingXhigh` and `thinkingMax` leave the palette's `blue` for the same neutral grey as the other two themes (`vars.thinkingGrey`, `#626262`), for the reason under `pi-coder-ayu` below.
+One deliberate deviation from upstream beyond the layout: `thinkingXhigh` and `thinkingMax` leave the palette's `blue` for a neutral grey (`vars.thinkingGrey`, `#626262`), for the reason under `pi-coder-ayu` below. The top two levels are no longer one color across the package: `pi-coder-1337` locks them to `#696969`.
 
 ### `pi-coder-ayu`
 
-A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. Like `pi-coder-summer-night` — and unlike `pi-coder-catppuccin` — it defines `bashOutput`.
+A port of the official `ayu-dark` palette from [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes), reformatted to the same four-section shape as `pi-coder-catppuccin.json` and with all 55 colors going through `vars`. Like `pi-coder-1337` — and unlike `pi-coder-catppuccin` — it defines `bashOutput`.
 
 Four deliberate deviations from upstream:
 
 1. **Strings vs. added diff lines.** Upstream points `syntaxString` (strings in code) and `toolDiffAdded` (the foreground of added diff lines, including line numbers and `+`) at the same green `#AAD94C`. Here `syntaxString` points at a darker `stringGreen` (`#67a567`) so code strings and diff additions do not glow identically; diff additions keep the upstream green. Side effect: the new green is close in luminance to `muted`, so strings and comments are told apart mostly by hue.
-2. **Thinking borders.** Upstream paints `thinkingXhigh` red (`#D95757`). Here `thinkingXhigh` and `thinkingMax` are both a neutral grey (`#626262`, the grey the other two themes use as well), because the editor border takes the color of the current level and this setup defaults to `xhigh` — a red border reads as an error. The top two levels are now distinguished from each other only by luminance.
-3. **Pending tool cards have no background.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter), so a finished card is the lighter one; this file keeps `toolSuccessBg: #10151F` and sets `toolPendingBg` to the empty string. The pending value moved several times first (`#171F24` → `#191919` → `#1d1c1d` → `#1b1c1d` → `#1f1f1f` → `#171717` → `""`), always on a `vars` entry of its own: only `toolPendingBg` changed, while `userMessageBg` / `customMessageBg` keep `#1b1c1d`. A pending card is now indistinguishable from the surrounding background, which is intended: no badge and no tint means nothing changes at the moment the card finishes. `vars.pendingCard` (`#101017`) and `vars.toolPendingBg` (`#171717`) stay in their files unreferenced.
+2. **Thinking borders.** Upstream paints `thinkingXhigh` red (`#D95757`). Here `thinkingXhigh` and `thinkingMax` are both a neutral grey (`#626262`, the same treatment `pi-coder-catppuccin` uses), because the editor border takes the color of the current level and this setup defaults to `xhigh` — a red border reads as an error. The top two levels are now distinguished from each other only by luminance.
+3. **Pending tool cards have no background.** Upstream has `toolPendingBg: #10151F` (darker) and `toolSuccessBg: #171F24` (lighter), so a finished card is the lighter one; this file keeps `toolSuccessBg: #10151F` and sets `toolPendingBg` to the empty string. The pending value moved several times first (`#171F24` → `#191919` → `#1d1c1d` → `#1b1c1d` → `#1f1f1f` → `#171717` → `""`), always on a `vars` entry of its own: only `toolPendingBg` changed, while `userMessageBg` / `customMessageBg` keep `#1b1c1d`. A pending card is now indistinguishable from the surrounding background, which is intended: no badge and no tint means nothing changes at the moment the card finishes. The `vars` entries the old values lived on (`pendingCard` `#101017`, `toolPendingBg` `#171717`) are gone along with every other variable no slot references — see the trimming rule below.
 4. **User message text has a fixed color.** `userMessageText` points at `textColor` (`#dbdbdd`, a var added for it) rather than `fg`, the terminal's default foreground, so user messages read the same on any terminal.
 
 ## Anatomy of a theme file
@@ -49,7 +72,7 @@ Four deliberate deviations from upstream:
 ```jsonc
 {
   "$schema": "...",
-  "name": "pi-coder-summer-night",     // must equal the file name (minus .json)
+  "name": "pi-coder-1337",     // must equal the file name (minus .json)
   "vars": { "panelBg": "#0e1622", ... },
   "colors": { "bg": "panelBg", ... },
   "export": { "pageBg": "panelBg", "cardBg": "bg", "infoBg": "infoBg" }
@@ -59,6 +82,7 @@ Four deliberate deviations from upstream:
 - Every non-`#` value in `colors` is looked up in `vars`. A missing reference throws `Variable reference not found`, **the whole theme fails to load**, and pi falls back to the built-in `dark` theme without an error message. This is the single most common way to break a theme.
 - An empty string means "terminal default foreground" — used by `text` and, in pi-coder-catppuccin, `syntaxVariable`.
 - `export` only affects HTML produced by `/export`; when it is missing, pi derives those colors from `userMessageBg`. In these files it is set explicitly, and through `vars` references like every other color.
+- **`vars` holds only variables a slot still uses**: blanking a color to `""` leaves the variable it pointed at referenced by nothing, and those entries are deleted rather than kept as spares (they cannot break loading either way, but they do read as if something used them). The single exception is `pi-coder-catppuccin`'s `pendingPanel` (`#0b151f`), kept whole as a ready value should the pending background ever come back. So the three files carry 35 / 31 / 27 `vars` for 59 / 54 / 55 colors.
 
 ## Custom tokens
 
@@ -70,7 +94,7 @@ Three tokens in these files are **not** part of pi's official theme schema:
 | `toolDiffRemovedBg` | `tool-diff.ts` | Full-line background of removed diff lines. |
 | `bashOutput` | `bash-command-collapse.ts` | Foreground of bash output text only. |
 
-All three themes define the two diff backgrounds. `pi-coder-ayu` and `pi-coder-summer-night` also define `bashOutput`.
+All three themes define the two diff backgrounds. `pi-coder-ayu` and `pi-coder-1337` also define `bashOutput`.
 
 ### Why they work at all
 

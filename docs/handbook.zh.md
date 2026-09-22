@@ -49,6 +49,7 @@ cp -R clients/pi/extensions/user-message-bar   ~/.pi/agent/extensions/   # 同�
 cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bash-command-collapse.ts 的端到端渲染测试（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
+cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
@@ -92,8 +93,11 @@ LAN IP）；`settings.json` 的 `defaultModel`（会被 `auto-default-model/` �
   所以别照 `~/.zshrc` 里那句 `CLAUDE_CODE_EFFORT_LEVEL=max` 抄成 `max`。目录里没有的档位
   （如 `qwen3.8-flash` 的 `high`）保留只为形状一致，后端忽略、不报错。
 - **只有 `qwen3.8-max` / `qwen3.8-flash` / `deepseek-flash-qd` 声明 `input: ["text","image"]`**：
-  qoder 目录里 `qmodel_38max` / `qfmodel` / `dfmodel` 三条是 `is_vl: true`，前两条实测发纯色 PNG
-  能被正确识别。其余条目别顺手补 image —— idealab 后端吃不下，同一张图发过去是 HTTP 400。
+  qoder 目录里 `qmodel_38max` / `qfmodel` / `dfmodel` 三条是 `is_vl: true`，三条都实测过发纯色 PNG
+  能被正确识别。注意 `dfmodel` 的识图**依赖网关侧 2026-09-22 的修复**：在那之前 `read` 这类工具返回的图
+  会走 tool 消息、被内联成 base64 文本（不是 image part），读进 5 张大图后每次请求都被 qoder 网关
+  400 顶回来；修好后 tool 结果的图会另起一条 user 消息按真图片发（详见根目录 `CLAUDE.md` 的
+  「tool 结果里的图片」一条）。其余条目别顺手补 image —— idealab 后端吃不下，同一张图发过去是 HTTP 400。
 - `settings.json` 的 `modelThinkingLevels` 把 `deepseek-flash` 与 `deepseek-flash-qd` 钉在 `max`
   （这两个的 map 里 `max` 有真值），其余跟随全局 `xhigh`。
 - `doubleEscapeAction: "none"` 是**把内置的双击 Esc 动作关掉**，交给 `rewind/` 接管。
@@ -136,68 +140,14 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
 `name` 字段**（`loadThemeJson()` 拼 `${name}.json` 找文件）—— 改主题名要**同时**改文件名、`name`
 和 `settings.json` 的 `theme` 三处，只改一处的话要么选择器显示旧名、要么 `theme` 值落空。
 
-- `pi-coder-summer-night.json` —— 本机自写皮肤，**当前在用**。调色板以 [iceberg.vim](https://github.com/cocopon/iceberg.vim)
-  （cocopon，`colors/iceberg.vim` 里 `&background == 'dark'` 那一段 + 它末尾 `terminal_ansi_colors` 的 16 个色值）为底，
-  40 个 `vars` 分四类：**26 个是那里的字面值**（折 21 个不同色值，5 组同值：`magenta` / `moonLilac` = `#a093c7`、
-  `cyan` / `sky` = `#95c4ce`、`ayuThinking` / `dimText` = `#6b7089`、`bashOutput` / `ui` = `#818596`、
-  `comment` / `frame` = `#515e97`）；**1 个是按前者算出来的** —— `commentBright`（`comment` 的 HSL 饱和度与亮度各 ×1.3 =
-  `#6e7dc0`；这条规则能逐字复现上一版的 `#565f89` → `#707cb2`，所以照用了），**原本只给 `syntaxComment` 用，现已不再被引用**（按你要求注释改成与 `dim` 同色 `#6b7089`，见下面第 4 条的替代说明；变量留着不删）；
-  **12 个是上一版留下的底色、按要求一个没动** —— `night` / `panel` / `select` 三个主底色、`find`（上一版从 VS Code
-  `editor.findMatchBackground` `#3d59a166` 压出来的实色等价物），以及下面这几类：
-  `addedLine` `#1c241b` / `removedLine` `#2e1c21` **取自 `pi-coder-catppuccin.json`**（就是 catppuccin 里同名 token 指向的
-  `diffAddedBg` / `diffRemovedBg`，本仓只喂 `toolDiffAddedBg` / `toolDiffRemovedBg` 这两项）；
-  `pendingCard` / `successCard` / `errorCard` 是**暗化卡片底色**（上一版按 `#1a1b26` / `#1d2631` / `#291f29` 统一乘 0.6，
-  感知亮度 L\* 降约 50%），原本是工具调用色块（Read / bash / task_set / Edit / Write …）pending、ok、error 三态的背景——
-  **`successCard` 与 `errorCard` 现已按你要求双双改成中性 `#161616`**（两态不再有冷暖差别，只剩它们各自的前景；
-  `#161616` 对终端底色 `#040404` 1.133:1、对 `night` 1.059:1，正好落在原来两值 `#11171d` / `#191319` 之间）；
-  **现在只有 ok / error 两态还在用** —— `toolPendingBg` 已按要求清空成 `""`（终端默认底色，`bgAnsi()` 发 `\x1b[49m`），
-  pending 期间卡片不再有任何底色或额外标记，卡片上的颜色只随「完成 / 报错」切换，
-  `pendingCard` 因此变成一个无人引用的死变量（变量本身可以留着，删了也不会报错，因为已经没人查它）；
-  `ayuUserBg` `#1b1c1d` 是**从 `pi-coder-ayu.json` 搬回来的**（ayu 的 `userMessageBg`，给 `userMessageBg` —— 比它之前的藏蓝 `#1e202e` 略暗、去蓝）；
-  再加上 `thinkingGrey` `#626262`（只给 `thinkingXhigh` / `thinkingMax`，两档同色）；**1 个是后加的 diff 新增行前景**（`addedGreen` `#8bc391`，`toolDiffAdded` 原指 `teal`，见本节末尾）。**这一轮改的只是前景与线条**，
-  变量名仍沿用 Tokyo Night 的旧名（`teal` 里装的是青、`moonLilac` 里装的是另一个青、`ayuThinking` 里装的是 iceberg 的灰），
-  改色时以文件为准。灰阶对位：正文 `fg` `#c6c8d1` = `Normal`；`ui`（muted）`#818596` = `StatusLine` 前景、
-  `ghost`（thinkingLow）`#686f9a` = `Folded` 前景、`comment`（thinkingMinimal 与滚动条拇指）`#515e97` = `SpecialKey`、
-  `ayuThinking` / `dimText` `#6b7089` = `Comment`（按你要求 dim 与 Think 同色；两个变量同值但**各立一个 `vars`** ——
-  这仓的习惯是「改一个不连带改另一个」）、`markdown`（工具输出正文）`#a3adcb` = `TSFunction`、`brace`（标点与列表点）`#cdd1e6` = `CursorLineNr` 前景、
-  `white` `#d2d4de` = 它的亮白 15。线条按「越实越亮」排：`hairline`（borderMuted）`#2a3158` < `slate`（代码块边框 / thinkingOff）`#3e445e`
-  < `quote`（引用条）`#444b71` < `frame`（border）与 `comment` `#515e97` < `separator`（mdHr）`#5b6389`
-  —— 这五个的来源依次是 `CursorLineNr` 底色、`MatchParen` / `StatusLineNC` 底色、`LineNr` / `SignColumn` / `FoldColumn` 前景、
-  `SpecialKey`、`PmenuSel` 底色（`comment` 与 `frame` 同值，因为滚动条拇指/最低档思考边框与编辑器外框本来就是一个亮度）。彩色一律取 iceberg 的终端色：
-  `red` `#e27878` / `green` `#b4be82` / `yellow` `#e2a478` / `magenta` `#a093c7` 是它第 1 / 2 / 3 / 5 号，
-  `orange` `#e9b189`、`cyan` `#95c4ce`、`sky`（accent、borderAccent、syntaxType）、`operator`（mdHeading、syntaxOperator）`#91acd1`
-  是亮色号，`blue` `#84a0c6` 是它的 `Function` / `Statement` / `Type` / `Operator`，`teal` `#89b8c2` 是它的 `String` / `Identifier`，
-  `moonLilac` / `magenta` `#a093c7` 是它的 `Constant`（第 5 号紫）。
-  **四条存心 deviation**，加一条范围说明：
-
-  1. **`syntaxKeyword` 与 `mdCode` 走 `moonLilac` 紫 `#a093c7`**（= iceberg 的 `Constant`，上一版是旧 summer-night 传下来的深青 `#0d92c1`），不是 iceberg 的 `Statement` 蓝 ——
-     保住「关键字与行内代码同色」的形状；之所以拿紫不拿青：iceberg 的青只有一档 `#89b8c2`，已经给了 `teal`（成功 / 链接），
-     关键字再占它的话 markdown 里**行内代码会与链接同色**、代码里关键字与 `syntaxType` 只差一档亮度（1.14:1）；
-     紫与函数蓝（`#84a0c6`，|ΔL| 1.04:1）、类型青（`#95c4ce`，1.48:1）亮度也接近，但色相分得很开。
-  2. **`syntaxString` 走绿 `#b4be82`**，而 iceberg 的 `String` 其实是青 `#89b8c2` —— 沿用「字符串=绿」的分工。
-  3. **最高两档思考档仍是中性灰 `#626262`**（不是 iceberg 的蓝灰）—— 同 pi-coder-ayu 那节第 2 条：彩色边框读着像报错。
-  4. **代码注释与 dim 同色**：`syntaxComment` 按你要求指向 `dimText` `#6b7089`（= iceberg 的 `Comment`，也是 `dim` 与 `thinkingText` 的色）——
-     原先那个算出来的 `commentBright` `#6e7dc0` 因此不再被引用（变量留着，见上）。代价是代码注释在 `night` 上从 4.36:1 降到 3.50:1
-     （与 `dim` 的 3.50 一致、本仓最低一档），换来的是注释与 `Think:` 行、设置页提示同一档灰；嫌淡就把 `colors.syntaxComment` 改回 `commentBright`。
-  5. **12 个底色没变**（见上），这一轮只换前景与线条。
-  当前层级（相对终端底色 `#040404`）：工具卡片 1.133:1 < 用户消息 1.201:1 < diff 行 1.273-1.286:1 —— 卡片被暗化过、
-  而 catppuccin 的 diff 底色本身很含蓄，diff 行现在只比它所在的卡片亮 1.90-1.98×（catppuccin 自己的卡片是 2.6-3.5×）。
-  卡片上正文的对比度：`text` 10.84、`muted` 4.94、`toolOutput` 8.10、`error` 6.20（两态卡片同值，因为底色相同）。
-  对比度（相对 `night` `#1a1b26`，括号里是上一版同项）：正文 10.24（8.10）、muted 4.66（4.18）、dim 3.50（3.59）、
-  代码注释 3.50（4.24，按你要求改成与 dim 同色后变淡；原 `commentBright` 是 4.36）、关键字 6.10（4.80）、函数 6.37（6.79）、类型 9.01（8.11）、字符串 8.65（9.35）、数字 9.05（8.40）、
-  标点 11.28（8.93）、错误 5.85（6.46）—— 整体比上一版亮一档、艳度降一档（iceberg 的色偏灰）。
-  `colors` 里没有一个 `#` 字面量色值（全引用 `vars`；`text` 指向 `fg` `#c6c8d1`，不是 `""` 的终端默认前景），
-  唯一的非 `vars` 值是被清空的 `toolPendingBg: ""`（见下）。
-  注意 **`toolDiffAdded` 用自定的 `addedGreen` `#8bc391`，不是 `green` `#b4be82`**（后者在这套皮肤里是字符串色）——
-  按你要求从 `teal` `#89b8c2`（iceberg 的 6 号青）换成传统「绿 add」。它同时是 diff 新增行的行号与 `+` 号色：
-  `addedLine` 行底色上 7.83:1（原 `teal` 7.36:1）；`tool-diff.ts` 那 30% 行内混色后片段底色是 `#3d543e`，其上正文仍有 4.96:1。
-  副作用是它与 `success`（仍是 `teal` `#89b8c2`）不再同色，幻彩 spinner 去重后因此由 5 色变 6 色。
 - `pi-coder-catppuccin.json` —— 移植上游 [bacnh85/pi-extensions](https://github.com/bacnh85/pi-extensions)
-  的 Catppuccin Mocha 皮肤。与 `pi-coder-summer-night` 一样全走 `vars`（`bgAnsi()` 对整数会直接发
+  的 Catppuccin Mocha 皮肤。与另两套一样全走 `vars`（`bgAnsi()` 对整数会直接发
   `48;5;N`，所以上游遗留的唯一一个 256 色索引 `toolPendingBg: 233` 已先改成 hex 字面量、
-  后来按要求整个清空成 `""`，现在三份皮肤都没有整数字面量）。本仓对它的存心 deviation 一处：
+  后来按要求整个清空成 `""`，现在三套皮肤都没有整数字面量）。本仓对它的存心 deviation 一处：
   `thinkingXhigh` / `thinkingMax` 不再走调色板的 `blue`，与另两套皮肤统一成中性灰 `#626262`
-  （新增 `vars.thinkingGrey`）—— 理由同下面 ayu 的第 2 条，三套皮肤的最高两档从此同色。
+  （新增 `vars.thinkingGrey`）—— 理由同下面 ayu 的第 2 条。**pi-coder-1337 按你的要求锁到 `#696969`**，
+  catppuccin 与 ayu 仍是这个 `#626262`，三套皮肤的最高两档分成了两档：`#626262`（catppuccin / ayu）
+  与 `#696969`（1337）。
 - `pi-coder-ayu.json` —— 移植 [iodic/pi-ayu-themes](https://github.com/iodic/pi-ayu-themes) 的
   `ayu-dark`（官方 Ayu 调色板），**格式照 `pi-coder-catppuccin.json` 抄**：同样的
   `$schema` / `vars` / `colors` / `export` 四段，`colors` 的 key 与键序照 pi-coder-catppuccin 抄（pi-coder-ayu 多一个
@@ -227,7 +177,7 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   3. `toolPendingBg`：上游是 `#1b1c1d`（与它的 `userMessageBg` 同一个值），本仓先按你要求改成中性
      `#1f1f1f`、后又调成 `#171717`，**现在三套皮肤统一清空成 `""`**（终端默认底色）—— 只影响 pending 态
      的工具卡片底色，`userMessageBg` / `customMessageBg` 走它们自己那个仍为 `#1b1c1d` 的变量，不受影响；
-     `vars.toolPendingBg` 那个 `#171717` 保留在文件里但已无人引用（删不删都不影响加载）。
+     它的 `vars` 条目（`#171717` / `#1b1c1d`）与三套皮肤里其他无人引用的变量一起删掉了，文件里已不留痕。
 
   整体观感是「近黑蓝底 + 高对比亮色」，
   正文在面板上 8.4-9.2:1（pi-coder-catppuccin 12.7）；代价是 Ayu 自己的灰阶偏暗：`muted` `#6B7385`
@@ -238,20 +188,102 @@ pass-through），`Qwen3.8-Max-DogFooding` 则对应 `gateway/config.yaml` 里�
   三份变体文件随之从 `~/.pi/agent/npm/` 消失，`/theme` 里不再有这三个名字），所以本机的 Ayu 皮肤
   只剩本仓这份 `pi-coder-ayu.json` —— 它是同一套 dark 调色板的「可按文件改」版本；要回到上游三套变体只需
   重新 `pi install npm:pi-ayu-themes`。
+- `pi-coder-1337.json` —— **当前在用**（`settings.json` 的 `theme` 指向它）。移植 Codex CLI 的**内置语法主题 `1337`**（`~/.codex/config.toml` 的
+  `[tui] theme = "1337"` 就是它）。1337 是 Mark Herpich 的 Sublime 配色，被 two-face 打包进
+  Codex 二进制的 32 套主题之一。取色方式可复核：从本机那份 codex 可执行文件里解出嵌入的 theme blob
+  （`zlib` 解压后是可读的 scope→色值表），再与上游 `1337.tmTheme` 逐条对账 —— 两边 48 个有名 scope
+  全部命中，其中 37 个逐字节同值，其余 11 个是 Codex 侧把该 scope 合并成 `None`（不单独着色、
+  继承父级）—— 两边都没有出现过「同一 scope 两个不同色值」的情况，所以下面那些值不是「照着观感配的」。
+  1337 本身只有**代码语法**一层 —— `background` `#191919` / `foreground` `#f8f8f2` / `caret` `#f8f8f0` /
+  `selection` `#515151` / `lineHighlight` `#3D3D3D55` / `invisibles` `#3B3A32`，加 **48 个有名 scope
+  条目、28 个不同前景色**，**没有任何 UI 槽位**。所以 pi 那 59 个颜色分两类来源：语法槽位按下表直译，
+  UI 槽位在这 28 个色值里挑（挑不到就用 `foreground`），只有 12 个不是 1337 的色（见本节末）。
 
-三份皮肤共同的两条硬约束：
+  语法槽位（`colors` 键 ← 1337 scope，全部取上游字面值；pi 只有 8 个语法槽，所以要合并）：
+
+  | pi 槽位 | 1337 scope | 色值 |
+  | --- | --- | --- |
+  | `syntaxComment` | `comment` | `#6d6d6d` |
+  | `syntaxString` | `string` | `#fbe3bf` |
+  | `syntaxNumber` | `constant.numeric` | `#fdb082` |
+  | `syntaxVariable` | `variable` | `#e9fdac` |
+  | `syntaxKeyword` | `keyword`（`storage` 与 `entity.name.tag` 同值） | `#ff5e5e` |
+  | `syntaxFunction`、`syntaxType` | `entity.name.function` / `entity.name.class` / `entity.other.inherited-class`（三者同值） | `#8cdaff` |
+  | `syntaxOperator` | **无对应 scope** → 落到 `foreground` | `#f8f8f2` |
+  | `syntaxPunctuation` | `punctuation.definition.*` | `#ffffff` |
+
+  两处合并的取舍要交代：① 1337 把「函数名 / 类名 / 继承类」（`#8cdaff`）与 `support.function`
+  库函数（`#6699cc`）分成两支，pi 只有一个 `syntaxFunction` —— 取 `#8cdaff`，它是前三者的共同值，
+  `syntaxType` 也跟它（在 1337 里类名与函数名本来就同色）；`#6699cc` 没浪费，转手给了 `mdLink`。
+  （`support.class` / `support.type` 在 1337 里是另一个米色 `#fbe3bf`，与字符串同值，没有采用 ——
+  让 `syntaxType` 跟类名走才合 1337 自己的分工。）② `mdHeading` **没有用** 1337 的 `markup.heading` `#75715e` ——
+  那个值在 `#191919` 上只有 3.58:1，而且 pi 的 `mdHeading` 不只画 markdown 标题，还画启动页那批
+  `[Skills]` / `[Extensions]` 分组标签（`interactive-mode.js` 的 `addLoadedSection` 默认色），太暗读不清；
+  改用 `constant.language` 的橙 `#ff8942`（7.46:1）。
+
+  整体对账（把 `colors` 的值展开 `vars` 后逐一对回 1337 的调色板）：**59 个槽位里 46 个取自 1337、
+  12 个不是、1 个是空串** —— 12 个已在本节逐一点名（5 个指定 + 6 个锁死 + 1 个 `error` 统一），
+  没有一处「随手拿个相近色」。
+
+  非语法槽位全部从 1337 自己的色板上取（括号里是对 `#191919` 的对比度）：`border` / `selectedBg` ←
+  `selection` `#515151`、`borderMuted` ← `invisibles` `#3b3a32`、`warning` ← `constant.numeric` `#fdb082`、
+  `success` ← git-gutter 的 `#a6e22e`（1337 自己给「插入」的用色）、`toolTitle` 与
+  `syntaxFunction` 共用 `#8cdaff`（11.38:1）、`toolOutput` ← `variable.parameter.function` `#d0d0d0`（11.40:1）、
+  `mdListBullet` ← `storage.type` `#fbdfb5`、`bashMode` ← `variable.parameter` `#fc9354`、
+  `customMessageLabel` ← PHP 命名空间 `#ffb2f9`。
+  思考档走 1337 自己的冷→暖阶梯：`thinkingOff` = `invisibles`、`thinkingMinimal` = `selection`、
+  `thinkingLow` ← `support.function` `#6699cc`、`thinkingMedium` ← `entity.other.attribute-name` `#97d8ea`、
+  `thinkingHigh` ← `variable.language.*` `#d699ff`，最高两档锁死（见下）。
+
+  **六个锁死槽位是照你指定的值写死的**（不是 1337 的色）：
+  `toolDiffAdded` `#8bc391` / `toolDiffRemoved` `#e27878` / `toolDiffAddedBg` `#1c241b` /
+  `toolDiffRemovedBg` `#2e1c21`（diff 行前景 + 整行底色四件套）、`thinkingXhigh` / `thinkingMax` `#696969`
+  （最高两档思考边框）。锁死时比对过两份 JSON 的解析结果，6/6 全等；现在只剩这份值本身。
+  **这里有一个锁死带来的必然后果要交代**：那两个 diff 行底色是**为 `#161616` 卡片挑的**
+  （对卡片 1.14 / 1.12:1），换到本皮肤指定的 `#202020` 成功卡片上只剩 **1.02 / 1.01:1** —— 行底色几乎是平的，
+  在深色 diff 块里基本看不出来（前景色不受影响，`addedGreen` 对新增行底色仍是 7.83:1）。
+  这不是漏改：两侧的锁死要求互相拉扯，行底色要重新可见就得改 `toolSuccessBg` 或这两个底色中的一个。
+
+  另按你要求**把报错色统一到 diff 删除行的前景色**：`error` 不再用 1337 的 `markup.deleted` `#f92672`，
+  而是与 `toolDiffRemoved` 共用同一个 `vars.removedRed` `#e27878` —— 共用一个变量而不是两个同值变量，
+  这样改一处两边同时变，才叫「统一」。`#f92672`（1337 的 `markup.deleted`）因此彻底退出这份皮肤，
+  变量也从 `vars` 里删掉了 —— 连同后面 `mdCode` 换色撤下的 `#ecfdb9`（1337 的 `support.constant`），
+  这份皮肤一共放弃了两个 1337 色值。`error` 对 `#191919` 的对比度随之从 4.65:1 变成
+  **6.02:1**（在 `toolErrorBg` `#171010` 上是 6.43:1）。新增行侧不动：`toolDiffAdded` / `addedGreen`
+  仍是指定值 `#8bc391`。
+
+  四个指定底色：`userMessageBg` / `customMessageBg` `#242424`、`toolSuccessBg` `#202020`、`toolErrorBg` `#171010`、
+  `export.cardBg` `#181825`（另配 `export.pageBg` `#111111`，同族推的、比 cardBg 暗一档）；
+  `toolPendingBg` 与另三套一样清空成 `""`。
+  `accent` / `borderAccent` 按你要求改成了 `#8cdaff` —— 这次**是** 1337 自己的色（函数名 / 类名那个青蓝，
+  与 `vars.funcBlue` 同值），但**各立一个 `vars`**（`accent` 与 `funcBlue` 分开，改一个不连带改另一个，
+  本仓习惯）—— 所以调 accent 不会顺手把 `syntaxFunction` / `syntaxType` / `toolTitle` 一起改掉。
+  对 `#191919` 11.38:1（旧值 `#0d92c1` 是 4.94:1），选中的行 / 光标 / logo 因此明显更亮。
+
+  `mdCode`（行内代码）同时按你要求换成 **`#0d92c1`**，就是 accent 撤下来的那个深青 —— 新开一个
+  `vars.mdCodeCyan` 装它，与 accent 解耦。它原来指向的 1337 色 `support.constant` `#ecfdb9` 因此不再被引用，
+  变量已从文件里删掉（板页变量表同步换一格，总数仍是 35）。行内代码对 `#191919` 4.94:1
+  （代码块底色 `#202020` 上 4.58:1）—— 比注释 / `dim` 的 3.40:1 亮一档、比语法关键字的 5.87:1 弱一档，
+  处在语法色阶的下半段，读是够读，嫌淡就往上抬。
+
+  与另三套的一个结构性差别：**它也定义了 `bashOutput`**（`#999999`，bash 输出正文的独立灰 ——
+  与它自己的 `muted` 同值但各立一个 `vars`，改一个不连带改另一个），机制同 ayu，catppuccin 没有。
+
+三套皮肤共同的两条硬约束：
 
 - **`colors` 正在引用的 `vars` 变量不能删**：`colors` 的值只要不是 `#` 开头（也不是空串）就会被当变量引用去 `vars` 里查，
   查不到直接抛 `Variable reference not found`，**整个主题加载失败**并回退内置 `dark`。反过来，把某个颜色值清空成
-  `""` 之后（三套皮肤的 `toolPendingBg` 就是这个状态），它原来指向的变量变成无人引用，可以留着也可以删，两者都不影响加载。
+  `""` 之后（三套皮肤的 `toolPendingBg` 都是这个状态），它原来指向的变量变成无人引用，可以留着也可以删，两者都不影响加载。
+  **本仓的做法是删**：三套皮肤里的 `vars` 只保留仍被 `colors` / `export` 直接或间接引用的条目（仅 `pi-coder-catppuccin` 的
+  `pendingPanel` 按你要求整条保留，留作后续恢复 pending 底色的备选值——它独一无二，未被任何槽位引用）。
   另注意 **空串是合法值**，不是「未定义」：`bgAnsi("")` 发 `\x1b[49m`（终端默认底色）、`fgAnsi("")` 发 `\x1b[39m`，
   token 仍在表里，`theme.bg(token, ...)` 不会报错。
 - **缺了主题文件会静默降级**：`initTheme()` 加载失败时是 `catch` 后静默回退内置 `dark`，不报错、
   不启 watcher —— 重装时最容易漏的就是这一行（它不在 `cp config/*.json` 那几行的覆盖范围内）。
 
-三份皮肤里都有 pi 官方 schema 没有的自定义 token：`toolDiffAddedBg` / `toolDiffRemovedBg`
+三套皮肤里都有 pi 官方 schema 没有的自定义 token：`toolDiffAddedBg` / `toolDiffRemovedBg`
 （diff **整行底色**；`toolDiffAdded` / `toolDiffRemoved` / `toolDiffContext` 三个前景色是标准 token），
-pi-coder-ayu 另有第三个 `bashOutput`（见下节）。
+`bashOutput` 是第三个（ayu / 1337 都有，catppuccin 没有，见下节）。
 它们能生效靠三件事凑齐：主题校验实际用的是 TypeBox 的 `Compile().Check()`，**对未知 key 放行**
 （`theme-schema.json` 里那句 `additionalProperties: false` 不是执行路径）；`createTheme()` 把不在那 7 个
 ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按 key 查表、不校验 key 是否在联合类型里
@@ -268,12 +300,12 @@ ThemeBg 名单里的颜色一律收进 `fgColors` 表；而 `getFgAnsi()` 是按
 把上游那份皮肤文件一起解析，同名 token 逐个比 ANSI 值 —— 同值才叫「搬运」，不同值要么是漏改，
 要么是有意 deviation，得在注释或文档里交代清楚。
 
-### `bashOutput`：bash 输出正文的独立颜色（pi-coder-ayu 与 pi-coder-summer-night 都定义了）
+### `bashOutput`：bash 输出正文的独立颜色（ayu / 1337 都定义了）
 
 `pi-coder-ayu.json` 多一个 pi 官方 schema 没有的 token `bashOutput`（值 `#6B7385`，与那条
 `… (N tokens hidden)` 折叠提示同为 `muted` 灰，但**自己一个 `vars.bashOutput`** —— 改 `muted`
-不会连带动它）；`pi-coder-summer-night.json` 后来照同样形状加了一个（`#818596`，等于它自己的
-`muted`/`ui`，同样是独立 `vars`）。它买的是「只改 bash 输出正文的颜色，不跟其他颜色混掉」：pi 内置的 bash 渲染器把
+不会连带动它）；`pi-coder-1337.json` 也有一份（`#999999`，等于它的 `muted`，独立 `vars`）。
+它买的是「只改 bash 输出正文的颜色，不跟其他颜色混掉」：pi 内置的 bash 渲染器把
 输出正文写死成 `toolOutput`，而那是**所有工具输出共用**的槽（read / grep / ls 的正文都吃它），
 所以这个 token 只能由 `bash-command-collapse.ts` 生效 —— 机制（在委托给内置渲染器的同步窗口里
 临时改主题单例的 `fgColors`）写在该扩展文件头「输出正文的独立颜色」一节。两条行为要知道：
@@ -408,7 +440,8 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `thinking-collapse.ts` | thinking 块渲染成**一条连续横向滚动的行**（固定 1 行，不注册命令）：所有换行（模型自己折的行、空行分段、列表项、代码围栏内）全部拼进同一条行 —— 上一段结束后下一段直接接续在上一段的结尾，**不另起一行**，Think 区域从头到尾只有一行不间断的 token 流；**段落接缝（空行处）中文 ↔ 中文补一个逗号**（上段末尾已有标点不重复补，英文/混排仍按空格规则，段内折行不补），行首 `Think: ` 标签（顶格，无竖线 gutter），整行超宽时从头部丢掉溢出字符、行首补 `…`，行尾永远是最新 token，不折行；**没有短段回填补满逻辑**（曾有，会打断流动观感，已移除），短 thinking 行尾留白不补 |
 | `fenceless-code-block/` | Markdown 代码块去掉开合围栏（连 `lang` 标签一起），代码正文按 pi 的缩进铺开、语法着色保留，**不加底色**（观感来自 npm `@itc-steve/pi-theme`，但只取去围栏这一半）；`render.ts` 是纯逻辑（量度 / 折行 / Markdown 类都注入），入口只接线。`PI_FENCELESS_CODE=off` 关闭 |
 | `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▎`（U+258E，左侧四分之一块），**竖线跟着消息底色**（不抠底 —— 它直接坐在 Box 的 `userMessageBg` 里，与底色块连成一片），竖线后空一格（正文共缩进两格），颜色取 **皮肤的强调色 `accent`**（`PI_USER_MESSAGE_BAR_COLOR` 可换槽位，显式指定 `toolDiffAdded` 则拿回原来的 diff 新增行行号色；兜底顺序 `accent` → `selectedBg` → `toolDiffAdded` → `text`）；`UserMessageComponent.prototype.render` 补丁 —— 竖线占原本那一格左内边距，多空的那一格（`BAR_INDENT`）则从**行尾补白**里等量吃回来，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行；`outputPad = 1` 时 Box 只给孩子 `width - 2` 列，所以正文总能留得下那一格，已在 `index.test.ts` 用长正文折行逐行验宽度）。**别再改成「竖线格无底色」**：那需要在竖线前插 `49m`、画完再还原 `48;…m`，而结果是底色块左边缘被抠出一个缺角，实测观感更差（曾这么做过，已回退）；`bar.ts` 是纯逻辑，入口只接线；取色源在 `session_shutdown` 时摘掉、读皮肤再兜一层 try/catch —— 会话替换（`/clear`、`/new`、`/resume`、`/fork`、`/reload`）时 pi 会作废旧 ctx，而旧消息这时还挂在聊天区里，渲染 tick 里抛出的 stale-ctx 异常没人接得住，会直达 pi 的 `uncaughtException` 把进程带走。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
-| `bash-command-collapse.ts` | bash 工具块的命令 + 树形输出（**用户 2026-09-21 定的形状**）：命令以 `Run ` 起头（pi 内置是 `$ `）、最多 **2 个视觉行**，第 2 行溢出多少都只把行尾换成 `…`，命令更长时再补一行 `… +N lines`；两类续行（折行续行、折叠标记）的正文都对齐 `Run ` 的 `n` 列 —— 执行中是两格缩进，命令一执行完就换成 `│ `。结果挂在同一棵树下：`└ ` **整块只出现一次**、在第一行实质输出上（截断提示行挂 `│ `，`└ ` 之下的输出 / warnings / `Took Xs` 只缩进两格不再画竖线），没有输出时补一行 `(no output)`（`└ ` 挂它前面）；`│ ` / `└ ` 取 `muted`（结构符，`Run ` 取 `toolTitle`；两者**各自是一段独立的前景 SGR**，前缀绝不继承后面 token 的颜色 —— 曾经路径那行的 `│` 跟着 path 色飘过）。只有 `Run` **这一个词**加粗（`bold("Run") + " "`，包住整个前缀会把行尾那格间距也变粗），命令正文一律不加粗（原先是命令名加粗）。**命令失败时** pi 把状态当普通输出拼在结果末尾（`appendStatus` 的 `\n\n` + `Command exited with code N` / `timed out after N seconds` / `aborted`，无输出时正文已被 pi 换成了 `(no output)`）—— 那句 `\n\n` 原本渲染成两行**没有前导符**的空行（用户说的“中间断层两层”），现在 `trimPreviewLines` 把状态与其前的空行一起摘下来、空行不画、状态当作预览必占的一行（否则它会被预览裁掉，只剩一条 `│ … (N earlier lines)`），`└ ` **之上**的空行补 `│ `（用户 2026-09-21 定的：栅栏不能断在空行上；来源是 pi 预览窗口开头的空行与失败状态前面的分隔空行），`└ ` **之下**的空行保持空行（树在那里就落地了，下面那截是缩进对齐的续行 —— 更多输出、`[Full output: …]` 之类的 warnings、`Took`，各自成段；挂竖线反而像还没完），最后按 `error` 槽染红（`isError` + `isFailureStatusLine` 两道判定：只看形态会把 `echo "Command exited with code 2"` 这种正常输出也染红）并放回尾部，展开态（ctrl+o）同样染色（不裁行、不挂树）。同时保留：非流式（`onUpdate` 摘掉）、break-all 硬折行 + 行首 `Run ` 语法高亮（`syntax*` 槽）、`/bash-preview` 输出预览行数、`/bash-timeout`、短命令（<2s）不画 `Took` 页脚、`bashOutput` 独立输出色。详见文件头与 `bash-command-collapse/render.test.ts` |
+| `bash-command-collapse.ts` | bash 工具块的命令 + 树形输出（**用户 2026-09-21 定的形状**）：命令**首行**行首是一颗状态圆点 `•` **加一个空格**（执行中 `dim` / 成功 `toolDiffAdded` / 失败 `toolDiffRemoved`，**只有首行有**，续行、折叠标记与整棵结果树前面没有；这一列与结果侧的缩进共用同一个 `INDENT_WIDTH`，所以 `Run` / `│` / `└` 同在列 2、正文同在列 4），命令以 `Run ` 起头（pi 内置是 `$ `）、最多 **2 个视觉行**，第 2 行溢出多少都只把行尾换成 `…`，命令更长时再补一行 `… +N lines`；两类续行（折行续行、折叠标记）的正文都对齐 `Run ` 的 `n` 列 —— 执行中是两格缩进，命令一执行完就换成 `│ `。结果挂在同一棵树下：`└ ` **整块只出现一次**、在第一行实质输出上（截断提示行挂 `│ `，`└ ` 之下的输出 / warnings / `Took Xs` 只缩进两格不再画竖线），没有输出时补一行 `(no output)`（`└ ` 挂它前面）；`│ ` / `└ ` 取 `muted`（结构符，`Run ` 取 `toolTitle`；两者**各自是一段独立的前景 SGR**，前缀绝不继承后面 token 的颜色 —— 曾经路径那行的 `│` 跟着 path 色飘过）。只有 `Run` **这一个词**加粗（`bold("Run") + " "`，包住整个前缀会把行尾那格间距也变粗），命令正文一律不加粗（原先是命令名加粗）。**命令失败时** pi 把状态当普通输出拼在结果末尾（`appendStatus` 的 `\n\n` + `Command exited with code N` / `timed out after N seconds` / `aborted`，无输出时正文已被 pi 换成了 `(no output)`）—— 那句 `\n\n` 原本渲染成两行**没有前导符**的空行（用户说的“中间断层两层”），现在 `trimPreviewLines` 把状态与其前的空行一起摘下来、空行不画、状态当作预览必占的一行（否则它会被预览裁掉，只剩一条 `│ … (N earlier lines)`），`└ ` **之上**的空行补 `│ `（用户 2026-09-21 定的：栅栏不能断在空行上；来源是 pi 预览窗口开头的空行与失败状态前面的分隔空行），`└ ` **之下**的空行保持空行（树在那里就落地了，下面那截是缩进对齐的续行 —— 更多输出、`[Full output: …]` 之类的 warnings、`Took`，各自成段；挂竖线反而像还没完），最后按 `error` 槽染红（`isError` + `isFailureStatusLine` 两道判定：只看形态会把 `echo "Command exited with code 2"` 这种正常输出也染红）并放回尾部，展开态（ctrl+o）同样染色（不裁行、不挂树）。整块**既不带底色也不留边界空行**（`Box` 不带 bgFn、`paddingY: 0`：命令就是块的第 1 行、结果就是最后一行；左边距由组件自己画 —— 首行是 `• `、其余行两格空格，结果侧挂同宽的那一列。**只去 bash 的**底色，其他工具照旧）。同时保留：非流式（`onUpdate` 摘掉）、break-all 硬折行 + 行首 `Run ` 语法高亮（`syntax*` 槽）、`/bash-preview` 输出预览行数、`/bash-timeout`、短命令（<2s）不画 `Took` 页脚、`bashOutput` 独立输出色。详见文件头与 `bash-command-collapse/render.test.ts` |
+| `read-path-collapse.ts` | read 工具块的标题 + 结果（**用户 2026-09-21 定，与 bash 块同一套观感**）：`renderShell: "self"` 让 pi 不再套默认壳，于是整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的那两条），只有内容本身；标题行 `• Read <路径>` —— 状态圆点 `•` 在**列 0**、`Read` 的 `R` 在**列 2**（正文整体右移一格），圆点颜色三态：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、失败 `toolDiffRemoved` 红**（与 `bash-command-collapse.ts` 的 `stateBarAnsi` 同源，字形也一样）；结果正文每行两格缩进（与 `Read` 同列），pi 那个前导 `\n` 空行被剥掉，所以正文紧贴标题。左边距由孩子自己画（`withHeadBar`），`Box(0, 0)` 的孩子按 `width - MARGIN_WIDTH - RIGHT_PAD` 渲染。**只影响 read**：其他工具仍走 pi 的默认壳（有底色、有边界空行），有专门的对照断言。原有能力一字未动：长路径压缩成一行（`…` 前缀，装得下的短路径走 pi 原生渲染只换 `accent`→`text` 一个色）、工具名首字母大写（`Read`）、`[skill]` / `read docs` / `read resource` 紧凑形态、OSC 8 超链接、`(ctrl+o to expand)` 提示、`app.tools.expand` 从 keybindings.json 读。11 个端到端断言见 `read-path-collapse/render.test.ts` |
 | `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |
@@ -417,9 +450,78 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `init-command.ts` | Claude Code 式 `/init`：`CLAUDE.md` → 否则 `AGENTS.md` → 否则新建 `AGENTS.md` |
 | `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
 | `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
+| `plan-mode/` | Claude Code 式 plan mode（normal → plan → execute 三态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交计划等用户批准。plan 阶段摘掉 edit/write（**快照-还原**，不动扩展注册的工具）并在 `tool_call` 里拦写类 bash。详见下文 |
+
+### plan mode（`plan-mode/`）
+
+三态：`normal` → `plan`（只读探索、模型出方案）→ `execute`（批准后按步骤执行，`[DONE:n]` 推进进度，
+全部完成自动回 `normal`）。计划只存会话（`appendEntry("plan-mode")`，不进模型上下文、**不写工作区**）。
+
+四个入口：`shift+tab`、`/plan`、`--plan`（启动即进）、模型调 `enter_plan_mode`。
+`/plan-status` 看当前状态与步骤。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入。
+
+**模式指示的显示位：statusline 第二行的行首**（那个区也叫「扩展 status 区」）。
+三个态**都有文案**，所以「当前在哪个模式」永远有一个固定的显示位：
+
+| 态 | 显示 |
+| --- | --- |
+| normal | `⏵ normal`（**`toolDiffRemoved`**，即删除行前景色 —— 三套皮肤里都是红） |
+| plan 等待模型出方案 | `⏸ plan`（`warning`） |
+| plan 已提交、等批准 | `⏸ plan · 2 steps` |
+| execute | `▶ 2/5 executing`（`accent`） |
+
+这一格原先归 `simple-task`（那里显示 `✔ 7/7 done`），但**与它自己在输入框上方的 widget 重复**
+（widget 是完整版：`● N tasks (…)` + 逐条清单 + spinner），那个缩略版已删除，格子让给模式指示。
+注意 `simple-task` 的 widget 行**不吃这一格**，所以两者不会再抢显示位。
+
+**模式指示固定在第二行行首**（`statusline/line.ts` 的 `STATUS_PRIORITY`）。不要改回「按注册顺序」：
+第二行是超长只截断不折行，而路径 / checkpoint 计数会越长越长 —— 放尾部时一条长路径就能把它挤到
+看不见（这正是改到行首的原因）。注册顺序还取决于 pi 加载扩展的顺序（目录字母序），改个文件名就会变。
+优先级表之外的 key 仍按注册顺序跟在后面。
+
+**约束是两道独立的闸，别以为只有一道：**
+
+1. **工具集**：进 plan 时把 `edit` / `write` / `powershell` 从活动工具里摘掉，退出时按**进入前的快照
+   原样还原**。本机 pi 的工具表里有二十多个扩展动态注册的工具（`mcp__*`、`ask_user_question`、
+   `task_set` …），官方示例那种硬编码白名单会把它们全吃掉 —— 所以必须是快照-还原。
+2. **`tool_call` 钩子**：`bash` 还在工具表里，所以写类命令（重定向、`rm` / `mv` / `sed -i` /
+   `git commit` / `npm install` / `sudo` …）靠这道钩子拦，拒绝原因作为工具错误结果回给模型。
+   判定按**简单命令**粒度切开（`cat a.txt && rm -rf b` 会拦下 rm 那段），heredoc 正文先剥掉，
+   fd 复制（`2>&1`）与 `/dev/null` 这类黑洞目标放行。实现与全部边界在 `plan.ts` 的上半部分与
+   `plan.test.ts`（98 例）。
+
+**这是给配合的模型用的护栏，不是沙箱。** 两个刻意放行的形状：双引号内的 `$(...)` 命令替换、
+以及 `npm run <script>` 这类由脚本内容决定副作用的命令 —— 宁可放行也不要把正常探索全部拦死。
+要真防住恶意写入得靠操作系统级沙箱。实测证据（`pi --plan -p "别规划，立刻用 bash 执行：echo hacked > proof.txt"`）：
+模型拒绝了命令，原话是「我没法照做 —— plan mode 在拦 …… 换个写法绕过去也不行」，然后把它作为计划
+提交走审批，文件是**批准之后**才创建的。
+
+**`shift+tab` 是从 pi 内置的 `app.thinking.cycle` 手里抢来的。** 内置键位扩展抢不到
+（`registerShortcut` 与内置冲突时会被 runner skip），所以走 `ctx.ui.onTerminalInput` 在按键到达编辑器
+**之前**拦下并 `consume`。代价是思考等级循环键被占，因此扩展首次启动时会把
+`~/.pi/agent/keybindings.json` 里的 `app.thinking.cycle` 改绑到 **`ctrl+shift+t`**。改绑的边界（`keybinding.ts`）：
+只有**该键完全没有任何绑定**时才写；用户自己配过就一个字不动、也不提示（`needsAttention` 区分
+「已有绑定，正常」与「配置坏了，需要你手动处理」—— 前者每次启动都提醒会变成噪音，实测踩过）。
+
+抢键的三个条件（`index.ts` 的 `attachInputListener`）：TUI 模式 + 空闲 + 没有扩展弹窗。
+**匹配 shift+tab 必须用 pi-tui 的 `matchesKey`**，不能手写 `data === "\x1b[Z"`：
+shift+tab 有三种编码 —— 裸 CSI（`\x1b[Z`）、Kitty 键盘协议的 CSI-u（`\x1b[9;2u`）与 xterm
+modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` 的 `terminal.js` 发
+`\x1b[>{flags}u\x1b[?u\x1b[c` 并等终端回复），一旦启用，真实终端（Ghostty / kitty / WezTerm）发的
+就不再是 `\x1b[Z`。实测踩到过：pty 假终端（不回协议查询）里 shift+tab 能切，真实 Ghostty 里
+完全没反应 —— 本地复现必须**让 pty 回一个 `\x1b[?1u`** 才是真实终端行为。
+**流式中按 `shift+tab` 仍是切思考等级**（不空闲就不抢）—— 这是刻意的：plan mode 只在你停下来的时候才切。
+弹窗打开时不抢，否则 `/model`、`/sessions` 这些 picker 里的 `shift+tab` 会跳出选择器。
 
 ### 跨扩展 / 跨文件
 
+- **statusline 第二行（扩展 status 区）的显示位分配**：顺序由 `statusline/line.ts` 的
+  `STATUS_PRIORITY` 决定 —— `plan-mode`（模式指示）**强制行首**，其余按注册顺序跟在后面：
+  `cwd-statusline`（完整路径）、`rewind`（`◆ N checkpoints`），限 5 条。
+  把模式指示放行首是因为第二行超长只截断不折行，它跟在会变长的路径后面会被挤掉；
+  而注册顺序取决于目录字母序，太脆。
+  `simple-task` **不再占**这个区（它曾经在这里显示 `✔ n/N`，与自己在输入框上方的 widget 重复，
+  已删除）—— 改回去之前先想想是不是又造了一份重复信息。
 - **`simple-task/gap.ts` 的「看邻居」是靠*渲染邻居*实现的**：它没有枚举别人 widget 的接口，
   只能从 TUI 根往下找到装着自己的 Container，再看紧邻兄弟面向自己那一侧的渲染结果。于是
   `recap` 反过来渲染 `simple-task` 时就是**互递归**（无保护时实测递归到 depth 61+ 才被栈拦住）——
@@ -448,6 +550,13 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 
 ### pi 平台的坑
 
+- **`shift+tab` 不能用字符串比对，要用 `matchesKey("shift+tab")`**：它有三种编码 —— 裸 CSI
+  `\x1b[Z`、Kitty 键盘协议的 CSI-u `\x1b[9;2u`、xterm modifyOtherKeys `\x1b[27;2;9~`。
+  pi 启动时会**主动启用 Kitty 协议**（`pi-tui/terminal.js` 发 `\x1b[>{flags}u\x1b[?u\x1b[c`），
+  真实终端一旦同意，发的就不是 `\x1b[Z` 了。同一坑对任何手写的“按了哪个键”判断都成立。
+  推论：**pty 假终端默认不回协议查询，所以只能复现那种编码** —— 用 pty 验证这类交互时
+  得主动回一个 `\x1b[?1u`，否则测出来的“通过”在真实终端里不成立（plan-mode 实测踩到：
+  pty 里 shift+tab 能切，Ghostty 里完全没反应）。
 - **扩展必须真起一次 pi 验证，不能只跑 `node --test`**：pi 直接加载 `.ts`，而 `node --test` 的类型
   擦除**不做语法/类型校验**。实测一个非法标注（`readonly (readonly 0 | 1)[][]`）22 条单测全绿，
   pi 却在加载时 `ParseError`、**整个扩展根本不加载**。最低验证是 `cp` 到 `~/.pi/agent/extensions/`
@@ -485,14 +594,25 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 
 ### 几个「看起来可以简化、其实不行」
 
-- **`bash-command-collapse.ts` 的命令行形状是「`Run ` + 2 行 + 行尾 `…` + `… +N lines`」**（用户 2026-09-21 定）：
+- **`bash-command-collapse.ts` 的命令行形状是「`• Run ` + 2 行 + 行尾 `…` + `… +N lines`」**（用户 2026-09-21 定）：
   续行 / 折叠标记的正文列对齐 `Run ` 的 `n` 列（2 列前缀：执行中是空格、出结果后是 `│ `），命令溢出多少都只
   吃最后 1 行。结果侧的 `└ ` **在整块里只出现一次**、挂在第一行实质输出上（截断提示行之上都挂 `│ `，之下只缩进），
   所以它必须在**所有 child 的行都走完后统一上**（`prefixTreeLines` 接在 `withPreviewLimit` 的末尾调一次）——
   逐 child 各画一棵树会在 warnings / `Took` 段再长出一个 `└ `。没有输出时补一行 `(no output)`（`└ ` 挂它前面），
-  流式 partial 期间不补（那时“还没输出”不等于“没有输出”）。形状与 13 个端到端断言见
+  流式 partial 期间不补（那时“还没输出”不等于“没有输出”）。整块**没有任何底色**（`Box` 不带 bgFn：pending 的
+  `toolPendingBg` / 成功的 `toolSuccessBg` / 失败的 `toolErrorBg` 三种底都不画，用户 2026-09-21 定）—— 状态改由
+  命令**首行**行首那颗圆点 `•`（执行中 `dim` / 成功 `toolDiffAdded` / 失败 `toolDiffRemoved`，续行、折叠标记与
+  整棵结果树前面都没有）表达，**着色逻辑与早先的 `▎` 一字未变**；圆点后面接一格空格，即「正文整体右移一格」，
+  `Run` / `│` / `└` 同在列 2、所有正文同在列 4（用户 2026-09-21 第二轮定；命令行与结果侧必须同时移，否则两截会
+  错开，`INDENT_WIDTH` 就是这一格）。左边距全由扩展自己画（`Box` 的 `paddingX` 在命令侧是 0：`withHeadBar`
+  首行 `• `、其余两格空格；结果侧留 1 格再由 `withPreviewLimit` / `prefixTreeLines` 挂 `INDENT_WIDTH` 那一列），
+  两边各自把用掉的列从 `wrapWidth` / `contentWidth` 里扣回来。**整块上下也没有空行**（`paddingY: 0`：命令就是块的
+  第 1 行、结果就是最后一行）。底色只去 bash 这一个工具 —— 其他工具（read / grep / edit / write …）走 pi 自己的
+  `contentBox` + bgFn 渲染路径，完全不受影响（有专门的回归断言盯着这条）。形状与 25 个端到端断言见
   `bash-command-collapse/render.test.ts`（过 pi 自己的加载器 + `ToolExecutionComponent`，断言的是渲染出来的行）。
   `PI_BASH_TREE` 已废弃（前缀固定用树形）。
+- **read 块与 bash 块共用同一套壳的约定**（用户 2026-09-21 定）：两者都用 `renderShell: "self"` + 「自己不去画底色」（不是画上再擦）得到**无底色、无上下边界空行**的块，左边距都是**两列**（首行 `• ` + 一格，其余行两格空格），圆点颜色都是 pending `dim` / 成功 `toolDiffAdded` / 失败 `toolDiffRemoved`。`read-path-collapse.ts` 的 `MARGIN_WIDTH = 2` 与 `bash-command-collapse.ts` 的 `GUTTER_WIDTH + INDENT_WIDTH = 3` 是**两条独立的算式**（bash 那边还要算树形 gutter），但左边缘必须对齐 ——**改一个必须看另一个**，否则两个工具的块会错开一列。宽度预算也一样：`Box` 的 `paddingX` 是 0 时，孩子拿到整宽，壳自己得按「左边距 + 末尾留白」扣回来。
+- **read 的折叠态在成功时没有结果正文**：pi 的 `formatReadResult` 开头是 `if (!options.expanded && !isError) return ""` —— 读成功且没展开就只有一个标题行。所以测结果正文的列位要用**失败**那一次（`read-path-collapse/render.test.ts` 里就是这么写的），别以为正文丢了。
 - **`bash-command-collapse.ts` 判定「参数还在流」是 `!streaming && !argsComplete && isPartial === true`**
   （`streaming` = 用户开了 `PI_BASH_STREAM=on` 走 pi 原生流式，此时整条压命令的路径直接跳过）。
   后两个阈值**缺一不可**：只用 `isPartial` 会把命令压到结果之后（退化成「全等结果才一次性出」）；
@@ -510,9 +630,11 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 - **两个覆盖内置 bash / edit / write 的扩展都用 `renderShell: "self"`**，动机不同：
   `tool-diff.ts` 是为了逐行拼 `\x1b[48;2;…m` 画整行 diff 底色（走 `selfRenderContainer` 就绕开了
   `tool-execution.js` 里按状态整块染色的 `bgFn`，否则逐行底色会被整块绿底盖掉；它**不用 Box**）；
-  `bash-command-collapse.ts` 是为了让「流式接命令字符时屏幕上一行都不出」成为可能 —— 代价是
-  pi 不再套 bgFn，底色得自己用 `Box(1,0, theme.bg(…))` 画，且 **`paddingY` 必须置 0**
-  （否则两个 Box 的 padding 会叠出**三个空行**，上下边界空行改为只在最外侧补）。
+  `bash-command-collapse.ts` 是为了让「流式接命令字符时屏幕上一行都不出」成为可能 —— 它把这个副作用
+  **当成需求用**：pi 不再套 bgFn，而扩展自己也**故意不套**，于是 bash 块没有任何底色（别的工具照旧）。
+  **`paddingY` 必须置 0**（否则两个 Box 的 padding 会叠出**三个空行**；上下外边界也一并不留）。
+  命令侧 `paddingX: 0` —— 左边距（首行 `• `、其余两格空格）由 `withHeadBar` 自己画；结果侧留 1 格，
+  再由 `withPreviewLimit` / `prefixTreeLines` 挂共用的 `INDENT_WIDTH`，命令行与结果树因此始终同列。
 - **`prompt-editor.ts` 的 `!` bash 模式只改渲染层，正文一个字符都不动**：判定照抄 pi 的
   `interactive-mode.js`（`text.trimStart().startsWith("!")` —— 边框颜色 `updateEditorBorderColor`
   用的就是同一个标志），所以 gutter 和输入框颜色永远一致；正文里那个 `!` 只是「摘掉第一个可见字符
@@ -543,6 +665,10 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
   后不恢复（**刻意的，不是 bug**）。它探测子代理是否在跑走的是 pi-subagents 的进程内事件总线 RPC
   （`subagents:rpc:v1:request`），**不 import 它的任何文件** —— 独立安装的 npm 包，换台机器可能根本没装，
   探测失败一律当「没有子代理」。
+  **`/recap` 是幂等的**：同一轮对话（最后一对 user+assistant 与模型都相同）已经生成过摘要、且它还挂在
+  屏幕上时，再执行直接返回 —— 不重跑模型、不清 widget、也不发通知（一次失败的重复生成会用「没能生成
+  recap」的提示把刚生成的摘要顶掉，这正是要避免的）。指纹只在一个地方算：`latestExchange()`，`generate()`
+  的去重与命令的闸门共用它；有新对话（指纹变化，或 `input` 事件先清了状态）时闸门自动放开。
 - `auto-default-model/` 会写 `~/.pi/agent/settings.json` 的 `defaultProvider` / `defaultModel`
   （pi 的 `/model` 只改当前会话，本机把那次 Ctrl+S 自动化掉了）。
 

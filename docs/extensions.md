@@ -1,6 +1,6 @@
 # Extensions reference
 
-24 extensions load from this package. Twelve are single files in `extensions/`, twelve are directories whose entry point is `index.ts`. Four more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+25 extensions load from this package. Twelve are single files in `extensions/`, thirteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -17,6 +17,8 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
 | `/mcp reload` | `mcp` | — Re-read the config files, reconnect and re-register tools. |
 | `/mcp <server>` | `mcp` | — One server's details and its recent diagnostics. |
+| `/plan` | `plan-mode` | — Toggle plan mode (same as `shift+tab`). |
+| `/plan-status` | `plan-mode` | — Print the current phase and the plan's steps. |
 | `/recap` | `recap` | — Summarizes the conversation now. |
 | `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
 | `/tasks` | `simple-task` | `status` (default) \| `clear` \| `on` \| `off` |
@@ -28,9 +30,11 @@ pi registers one handler per tool name (first registration wins), so each of the
 
 ### `bash-command-collapse.ts` — the `bash` tool
 
-Collapses the command to **2 visual lines** behind a `Run ` prefix, with a trailing `…` on the last row and a `… +N lines` marker when source lines are left over; results hang off the same tree, and `└ ` appears **once**, on the first real output line. Command continuation rows and the truncation marker are indented to the `n` of `Run ` — two spaces while the command is starting, `│ ` once it has finished — and only the word `Run` is bold. `ctrl+o` expansion shows the command in full. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. Output preview lines default to 3 and the preview always keeps the command's status line. The extension also draws its own background box, tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
+Collapses the command to **2 visual lines** on a single tree: the first line is a status dot `• ` followed by `Run `, the last row ends in `…`, and a `… +N lines` marker follows when source lines are left over; results hang off the same tree, and `└ ` appears **once**, on the first real output line. Command continuation rows and the truncation marker are indented to the `n` of `Run ` — two spaces while the command is starting, `│ ` once it has finished — and only the word `Run` is bold. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. Output preview lines default to 3 and the preview always keeps the command's status line. The extension also tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
 
-A failed command is painted `error` rather than success — both the trailing status line and the exit-code footer. That decision reads `isError` **and** matches the status line's shape (`Command exited with code N`, `timed out after N seconds`, `aborted`), because shape alone would repaint a command that merely printed that text. The blank line `appendStatus` writes before the status is dropped instead of rendering as a gap in the tree, and the status line is exempt from preview trimming.
+The block deliberately carries **no background and no boundary blank lines**: the dot at the head of the command row is the only state marker, in `dim` while running, `toolDiffAdded` on success and `toolDiffRemoved` on failure (the logic is the same one the earlier `▎` bar used). The dot column and the result indentation share one constant, so `Run`, `│` and `└` all sit in column 2 and every body column starts at 4; the left margin is drawn by the extension itself, and both sides subtract it from their width budget. **Only bash loses its background** — every other tool keeps pi's default shell.
+
+A failed command is painted `error` rather than success — both the trailing status line and the exit-code footer. That decision reads `isError` **and** matches the status line's shape (`Command exited with code N`, `timed out after N seconds`, `aborted`), because shape alone would repaint a command that merely printed that text. The blank line `appendStatus` writes before the status is dropped instead of rendering as a gap in the tree, the status line is exempt from preview trimming, and blank lines **above** the `└ ` keep the `│ ` bar so the fence does not break.
 
 - `PI_BASH_MIN_TIME_MS` (default `2000`) — only show the elapsed-time footer above this duration.
 - `PI_BASH_HIGHLIGHT=off` — disable shell syntax highlighting.
@@ -40,9 +44,15 @@ Two details that look simplified but cannot be: it decides "arguments are still 
 
 ### `read-path-collapse.ts` — the `read` tool
 
-Keeps the `read` title row on exactly one line. Long paths lose their front and keep the informative tail — the file name and last directories — as `Read …@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:62-116`. No folding, no second row.
+Two changes: the title row stays on exactly one line, and the block is shelled like the bash block.
 
-- `PI_READ_COLLAPSE=off` — restore pi's builtin title row at startup. There is no `/read-collapse` command.
+**One-line titles.** Long paths lose their front and keep the informative tail — the file name and last directories — as `Read …@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:62-116`. No folding, no second row. Paths that already fit are left as pi rendered them, apart from one color: the path is painted `text` instead of pi's `accent`, so it does not merge with the `Read` label on themes where `accent` and `toolTitle` are the same palette color (`pi-coder-catppuccin`'s mauve).
+
+**The shell.** `renderShell: "self"` gives the block the same shape as the bash block: **no background** in any of the three states and **no boundary blank lines**, a `• ` dot at column 0 (dim while reading, `toolDiffAdded` on success, `toolDiffRemoved` on failure), `Read` at column 2, and the result body indented to the same column with pi's leading blank line stripped. Only `read` is affected; every other tool keeps pi's default shell, which the test suite asserts with a control case.
+
+`ctrl+o` expansion is handled by the same one-line rule, so the collapsed and expanded views wrap identically. The file name is never split; a path that does not fit even so is cut from the left per grapheme.
+
+- `PI_READ_COLLAPSE=off` — restore pi's builtin title row (the uppercase `Read`, the dot and the shell are unaffected). There is no `/read-collapse` command.
 
 ### `tool-diff.ts` — the `edit` and `write` tools
 
@@ -80,7 +90,7 @@ Replaces pi's footer with one status line and one status row:
 📁 /Users/you/project
 ```
 
-The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The branch icon is `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE — a glyph that happens to fork) — one column wide and East Asian Width Neutral, so a CJK-configured terminal cannot render it double-width, and deliberately **not** a Nerd Font glyph, so no patched font is needed. No font in the author's Ghostty stack covers U+15CC (`Lyth Mono Term`, `JetBrainsMonoNL Nerd Font Mono`, `Maple Mono SC NF`), so it is drawn through system fallback (`Euphemia UCAS`, `Noto Sans CanAborig` on macOS); two earlier icons were `⎇` (U+2387) and `⑂` (U+2442, OCR FORK). The second row renders whatever other extensions pass to `ctx.ui.setStatus()` (this is where `cwd-statusline`, `simple-task` and `rewind` write). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
+The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The branch icon is `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE — a glyph that happens to fork) — one column wide and East Asian Width Neutral, so a CJK-configured terminal cannot render it double-width, and deliberately **not** a Nerd Font glyph, so no patched font is needed. No font in the author's Ghostty stack covers U+15CC (`Lyth Mono Term`, `JetBrainsMonoNL Nerd Font Mono`, `Maple Mono SC NF`), so it is drawn through system fallback (`Euphemia UCAS`, `Noto Sans CanAborig` on macOS); two earlier icons were `⎇` (U+2387) and `⑂` (U+2442, OCR FORK). The second row renders whatever other extensions pass to `ctx.ui.setStatus()`, in the order given by `statusline/line.ts`'s `STATUS_PRIORITY`: `plan-mode`'s mode indicator **first**, then the rest in registration order (`cwd-statusline`'s path, `rewind`'s `◆ N checkpoints`), capped at 5 entries. The mode indicator wins the first slot on purpose: the second row truncates instead of wrapping, so an indicator that trails a growing path can be pushed out of sight, and registration order alone depends on directory names. `simple-task` is no longer one of these — see [below](#simple-task--task-list). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
 
 - `PI_STATUSLINE_FREEZE=off` — disable the footer freeze. On every session switch pi unconditionally restores its builtin footer and clears all `setStatus` values, and no extension hook runs before that frame. The guard replays the previous frame's lines instead, which removes a visible flash. Turning it off restores the flash.
 - `PI_STATUSLINE_BOOT_SUPPRESS=off` — disable boot-window suppression. pi's built-in footer exists before the first extension runs (measured on this setup: its first frame lands at ~480 ms, this statusline at ~1.2 s), so without it you see the default state line and then watch the statusline replace it. [`statusline/footer-suppress.ts`](../extensions/statusline/footer-suppress.ts) patches `FooterComponent.prototype.render` at **extension-factory time** — before pi's TUI is constructed — to return zero lines, and releases it the moment our footer is installed. A 30 s cap releases it anyway when the handoff never happens (an extension error, or a non-TUI mode), so the bottom is never left permanently empty. The two windows have independent switches because they need different remedies: this one has no previous frame to replay, the freeze above has one.
@@ -175,6 +185,8 @@ State is written with `pi.appendEntry()`, so it rides the session log and **noth
 
 `/tasks` with no argument or `status` prints the list, `clear` empties it, `on` / `off` toggle the widget.
 
+The widget is the whole feature: the packed `✔ n/N` status it used to also write into the statusline's second row was a duplicate of it, and that slot now belongs to `plan-mode`'s mode indicator. Do not add a second copy of the same information back.
+
 ### `recap/` — conversation summary
 
 `/recap` summarizes the conversation on demand; the same summary appears automatically above the editor after **10 seconds of idling** with no new input, and disappears as soon as you type.
@@ -182,6 +194,8 @@ State is written with `pi.appendEntry()`, so it rides the session log and **noth
 The delay is the point: the recap exists to tell you what a session was doing when you come back to the window, so it is idle-based rather than turn-based. The timer first asks whether any subagent is still running (an in-process RPC to `pi-subagents`, no file import — a missing package is treated as "no subagents") so a background delegation is never summarized as finished.
 
 Deliberately not implemented: no local storage, no session entry, no configuration. The summary lives in memory only, so `/new` or `/resume` does not restore it and it is never sent to the model as context. The summary text itself is **generated in Chinese** (the prompt is hardcoded), which is worth knowing if you do not read Chinese.
+
+`/recap` is **idempotent**: when a summary for the current exchange already exists and is on screen, running it again returns immediately — no model call, no widget reset, no notice. A second run would produce the same summary, and a *failed* second run would replace the summary you already have with a "could not generate" notice. The fingerprint is the last user+assistant pair plus the model, computed in one place (`latestExchange()`) and shared with the automatic path's de-duplication, so a new exchange re-opens the gate.
 
 ### `rewind/` — checkpoints and `/rewind`
 
@@ -208,7 +222,7 @@ Claude Code style repository memory file generation. Target selection looks only
 
 A one-step theme picker with live preview. Arrow keys preview, Enter persists, Esc cancels. `/theme <name>` switches and persists directly.
 
-The preview works because `ctx.ui.setTheme()` has two distinct paths: passing a **Theme object** only recolors the running UI (`setThemeInstance()`), while passing a **name** applies it and immediately writes `settings.json` (`setThemeName()`). So browsing never touches your settings, and only Enter does. In non-TUI modes the command notifies instead of silently failing.
+The preview works because `ctx.ui.setTheme()` has two distinct paths: passing a **Theme object** only recolors the running UI (`setThemeInstance()`), while passing a **name** applies it and immediately writes `settings.json` (`setThemeName()`). So browsing never touches your settings, and only Enter does. A `Spacer(1)` separates the theme list from the color swatches — both are multi-line blocks and read as one region when they touch. In non-TUI modes the command notifies instead of silently failing.
 
 ### `folder-history.ts` — cross-session command history
 
@@ -227,6 +241,26 @@ Typing `exit`, `quit` or `bye` as the entire prompt quits pi cleanly (sessions a
 - `PI_EXIT_WORDS="exit,quit"` — replace the words; `off` disables the interception.
 
 ## Model and tooling
+
+### `plan-mode/` — Claude Code style plan mode
+
+Three phases: `normal` → `plan` (read-only exploration, the model writes a plan) → `execute` (the approved steps run, `[DONE:n]` markers advance them, finishing returns to `normal`). The plan lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context and not in the working tree) and is shown as a step widget, so the repository gains no files.
+
+Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `enter_plan_mode` tool.
+
+**The mode indicator has a fixed slot**: the head of the statusline's second row, with text in all three phases — `⏵ normal` (painted `toolDiffRemoved`, i.e. the delete-line red, so "full permissions" is visible at a glance), `⏸ plan` / `⏸ plan · 4 steps` (`warning`) and `▶ 2/5 executing` (`accent`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
+
+**Two independent gates, not one:**
+
+1. **The tool set.** Entering plan mode removes `edit`, `write` and `powershell` from the active tools and restores the set **exactly as it was** on exit. The set is snapshotted rather than hardcoded because this environment has twenty-odd extension-registered tools (`mcp__*`, `ask_user_question`, `task_set` …) that a whitelist would silently drop.
+2. **A `tool_call` hook.** `bash` stays available, so write-shaped commands (redirection, `rm` / `mv` / `sed -i`, `git commit`, `npm install`, `sudo` …) are rejected there and the reason is returned to the model as a tool error. The judgement is made per simple command, so `cat a.txt && rm -rf b` still has its `rm` caught; heredoc bodies are stripped first, and fd duplications (`2>&1`) and `/dev/null` targets pass.
+
+**This is a guardrail for a cooperative model, not a sandbox.** Two shapes are deliberately allowed through: `$(...)` command substitution inside double quotes, and `npm run <script>`, whose side effects live in the script. Blocking those would block ordinary exploration; real protection needs an OS-level sandbox.
+
+`shift+tab` is taken from pi's built-in `app.thinking.cycle`. A conflicting `registerShortcut` is skipped by pi's runner, so the key is intercepted with `ctx.ui.onTerminalInput` **before** the editor sees it (only in TUI mode, while idle, and with no extension dialog open) and consumed. Because that displaces the thinking-level cycle, the extension rewrites `app.thinking.cycle` to `ctrl+shift+t` in `~/.pi/agent/keybindings.json` — and only when the key has no binding at all; a user-configured binding is left alone. Matching the key must go through pi-tui's `matchesKey`, not a string compare: `shift+tab` arrives as bare CSI (`\x1b[Z`), as the Kitty protocol's CSI-u (`\x1b[9;2u`) or as xterm's modifyOtherKeys, and pi turns the Kitty protocol on at startup, so a real terminal sends the second form. Pressing `shift+tab` while streaming still cycles the thinking level — plan mode only switches when you are stopped.
+
+- `PI_PLAN_MODE=off` — disable the extension entirely.
+- `PI_PLAN_MODE_AUTO=off` — keep `shift+tab` and `/plan`, drop the model's `enter_plan_mode` tool.
 
 ### `auto-default-model/` — persistent model switches
 
@@ -306,6 +340,8 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_FENCELESS_CODE=off` | on | `fenceless-code-block` | Keep Markdown code fences. |
 | `PI_FOLDER_HISTORY_INJECT` | `100` | `folder-history` | History entries injected from previous sessions. |
 | `PI_LOGO=off` | on | `startup-logo` | Do not install the startup header. |
+| `PI_PLAN_MODE=off` | on | `plan-mode` | Disable plan mode entirely. |
+| `PI_PLAN_MODE_AUTO=off` | on | `plan-mode` | Do not register the model's `enter_plan_mode` tool; `shift+tab` and `/plan` still work. |
 | `PI_READ_COLLAPSE=off` | on | `read-path-collapse` | Keep pi's built-in `read` title row. |
 | `PI_SPINNER_COLOR_HOLD` | `19` | `working-indicator` | Frames per color in the spinner cycle. |
 | `PI_SPINNER_RAINBOW=off` | on | `working-indicator` | Disable the rainbow spinner. |
@@ -313,7 +349,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
 | `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
 | `PI_USER_MESSAGE_BAR=off` | on | `user-message-bar` | Do not draw the `▎` bar into user message boxes. |
-| `PI_USER_MESSAGE_BAR_COLOR` | `accent` | `user-message-bar` | Theme slot the bar takes its color from; a background slot such as `selectedBg` is converted to a foreground. |
+| `PI_USER_MESSAGE_BAR_COLOR` | `accent` | `user-message-bar` | Theme slot the bar takes its color from (fallbacks `selectedBg` → `toolDiffAdded` → `text`); a background slot such as `selectedBg` is converted to a foreground. `PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded` restores the added-line green. |
 | `PI_WORKING_SUMMARY=off` | on | `working-indicator` | Disable the prompt summary line. |
 | `PI_WORKING_SUMMARY_GAP` | `1` | `working-indicator` | Minimum blank columns between the working label and the summary. |
 | `PI_WORKING_SUMMARY_LLM=off` | on | `working-indicator` | Truncate the summary instead of asking a model to compress it. |
@@ -324,6 +360,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 ## Extension interactions
 
 - **Esc Esc is shared.** `rewind` replaces pi's built-in double-Escape action and needs `doubleEscapeAction: "none"`; see above.
+- **`shift+tab` is shared.** `plan-mode` consumes it before the editor sees it and rebinds the thinking-level cycle to `ctrl+shift+t`; while a turn is streaming the key still reaches `app.thinking.cycle`.
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
@@ -338,6 +375,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `~/.pi/agent/rewind/<project-hash>/git` | `rewind` | Shadow git repository with pre-turn snapshots. Never touched by your repository. |
 | `~/.pi/folder-history/<path-with-dashes>.jsonl` | `folder-history` | Command history per working directory. |
 | Session log (via `appendEntry`) | `simple-task` | Task list state; discarded with the session, never written to the repo. |
+| Session log (via `appendEntry`) | `plan-mode` | Plan phase, steps and progress; same lifetime, never written to the repo. |
 | In memory only | `recap` | The current summary; lost on `/new` or `/resume` by design. |
 | In memory only | `mcp` | Per-server status, the registered tool table and a 20-line diagnostic ring buffer per server. Config files are read, never written. |
 | Nothing | everything else | The remaining extensions are pure display or event wiring. |

@@ -51,8 +51,9 @@ Expected visible results of a successful load:
 - The header is replaced by a logo with the version and the shortened working directory (`startup-logo`).
 - The footer is a single statusline line (`statusline`), plus a second line with the working directory (`cwd-statusline`).
 - The editor shows a `❯ ` prompt (`prompt-editor`).
-- A user message has a `▎ ` at the head of every line, including the blank lines above and below the text (`user-message-bar`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
+- A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ normal` / `⏸ plan` / `▶ n/N executing` (`plan-mode`).
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 

@@ -40,6 +40,30 @@
  * （`capitalizeReadVerb` / `capitalizeReadTitle`），读一个名字里带 `read` 的文件、或折到行首的
  * `read ` 片段都不会被误改。`PI_READ_COLLAPSE=off` 只关长路径压缩，工具名照样大写。
  *
+ * ## 整块的壳：`renderShell: "self"` + 自绘左边距 + 状态圆点（用户 2026-09-21 定）
+ *
+ * read 块与 `bash-command-collapse.ts` 的 bash 块**同一套观感**（那边是本节的原型）：
+ *
+ *   - `renderShell: "self"` —— 让 pi 不再给整块套 `contentBox`，于是
+ *     ① **没有底色**（pending 的 `toolPendingBg` / 成功的 `toolSuccessBg` / 失败的
+ *     `toolErrorBg` 三种底都不画；是"不去画"而不是"画上再擦"，与 bash 侧同一手法），
+ *     ② **没有上下两条边界空行**（默认壳是 `Box(1, 1)`，上/下各一行空行就是它画的）。
+ *     只有 read 这样改，其他工具照旧走 pi 的默认壳（有底色、有边界空行）。
+ *   - 左边距整体 **1 → 2 列**：首行是状态圆点 `•` + 一个空格，其余行两格空格（`withHeadBar`）。
+ *     于是圆点在列 0、`Read` 的 `R` 在列 2、结果正文也在列 2 —— 比改动前各多让出一列。
+ *   - 圆点颜色按状态走：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、
+ *     失败 `toolDiffRemoved` 红**（与 bash 侧 `stateBarAnsi` 同一份语义）。
+ *
+ * 实现方式：`renderCall` / `renderResult` 各自把 pi 的渲染结果包进壳里 —— 一个**不带 bgFn** 的
+ * `Box(0, 0)`，左边缘由孩子自己画（`withHeadBar`）。三个不能想当然的点：
+ *   ① **左边距挂在标题那个组件的第一行上**（首行圆点 `• `、其余行两格空格），结果正文往下
+ *      继续用两格缩进 —— 与 bash 的「命令 + 结果」是同一棵树的结构。
+ *   ② 宽度：`Box` 的 `paddingX` 是 0，孩子拿到整宽 —— 所以壳内部按
+ *      `width - MARGIN_WIDTH - RIGHT_PAD` 渲染（左边距 + 末尾那列留白），否则挂上前缀必超宽。
+ *   ③ **「读的时候」判的是 `context.isPartial === true`**（`tool_execution_start` 之后、结果
+ *      回来之前 pi 给的就是 partial），`isError` 必须从 `context` 读 —— pi 调 resultRenderer 时
+ *      传的是 `{ content, details }`，**没有 `isError` 字段**（bash 侧踩过同一个坑）。
+ *
  * ## 只在需要压缩时才接管渲染（不重写整个 renderCall）
  *
  * 做法是**后处理** pi 渲好的组件：先委托内置 `readRenderers.renderCall` 拿到那个 `Text`，
@@ -94,9 +118,9 @@
  *   PI_READ_COLLAPSE=off    启动时就关闭长路径压缩（回到 pi 的贪心折行，长路径占两行）
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { createReadToolDefinition, getReadmePath } from "@earendil-works/pi-coding-agent";
-import { hyperlink, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, hyperlink, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
@@ -381,25 +405,111 @@ function compressedCompactTitle(
 }
 
 /**
+ * 左边距总列数：**圆点 / 空格那一列 + 一格间距**（用户 2026-09-21 定：正文整体右移一格）。
+ *
+ * 首行是 `•` + 空格，其余行是两个空格；正文（标题与结果）都跟在它后面。与
+ * `bash-command-collapse.ts` 的 `INDENT_WIDTH`（gutter 之外多让出的那一列）是同一个观感：
+ * 两块左边缘对齐。**改这里必须同时改 bash 那边**，否则两个工具的块会错开一列。
+ */
+const MARGIN_WIDTH = 2;
+/**
+ * 正文右侧留白列数 —— 与 bash 块同一条约定：正文不顶着终端右边缘，末尾留 1 列。
+ * 所以孩子的正文预算是 `width - MARGIN_WIDTH - RIGHT_PAD`，挂上左边距后仍差 1 列到底。
+ */
+const RIGHT_PAD = 1;
+/** 非首行的左边距（全空格）。 */
+const MARGIN_BLANK = " ".repeat(MARGIN_WIDTH);
+
+/**
+ * 状态圆点 `•`（U+2022，1 列宽）+ 前景复位。
+ *
+ * 三个槽 pi 的 theme schema 都必需（`dim` / `toolDiffAdded` / `toolDiffRemoved`），取的是
+ * **前景** ANSI；末尾那个 `\x1b[39m` 保证颜色不会洇到后面的 `Read` 上 —— 与
+ * `bash-command-collapse.ts` 的 `stateBarAnsi` 完全同源（字形也一样是 `•`）。
+ *
+ * 「读的时候」= pending：`tool_execution_start` 之后、结果还没回来（pi 给的 partial 状态）。
+ */
+function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string {
+	const slot: ThemeColor = isPartial ? "dim" : isError ? "toolDiffRemoved" : "toolDiffAdded";
+	return `${theme.getFgAnsi(slot)}\u2022\u001b[39m`;
+}
+
+/**
+ * 给**首行**挂 `• `、其余行补两格空格 —— 与 `bash-command-collapse.ts` 的 `withHeadBar`
+ * 同一套（那边画在命令的首行上，这里画在 `Read <路径>` 那一行上）。
+ */
+function withHeadBar(lines: string[], bar: string): string[] {
+	return lines.map((line, index) => (index === 0 ? `${bar} ${line}` : MARGIN_BLANK + line));
+}
+
+/**
+ * 结果正文的每一行补两格左边距 —— 与标题行同一个左边距，于是 `Read <路径>` 里的路径列与
+ * 结果正文的列对齐。
+ *
+ * **前导空行一并剥掉**（`stripLeadingBlanks`）：pi 的 read 结果正文是
+ * `new Text("\n" + …)` 那段，那个 `\n` 会在标题与正文之间画出一整行空行。bash 侧同一个
+ * 前导空行是刻意剥掉的（那边不做就会变成三条空行），这里保持一致 —— 整块是「标题 + 紧贴的
+ * 正文」，没有上下边界空行，中间也不掺空行（用户 2026-09-21 定的观感）。
+ */
+function withBodyIndent(lines: string[]): string[] {
+	const out = lines.slice();
+	while (out.length > 0 && out[0]!.replace(/\x1b\[[0-9;]*m/g, "").trim() === "") out.shift();
+	return out.map((line) => (line === "" ? line : MARGIN_BLANK + line));
+}
+
+/**
+ * 把那块（标题 / 结果）包进**不带底色**的 `Box(0, 0)`。
+ *
+ * `Box` 只负责「整宽铺满 + 左右两列的右边界留白」，底色与上下空行都不给 —— 这就是用户要的
+ * 「read 块没有底色、没有上下边界空行」（见文件头「整块的壳」）。孩子自己画左边缘（2 列），
+ * 所以调用方传进来的 `render` 必须按 `width - 2` 渲染。
+ */
+function shellFor(render: (width: number) => string[]) {
+	const box = new Box(0, 0);
+	box.addChild({
+		render(width: number): string[] {
+			return render(Math.max(1, width - MARGIN_WIDTH - RIGHT_PAD));
+		},
+		invalidate() {},
+	});
+	return box;
+}
+
+/**
  * 包一层组件：pi 渲出来 ≤ 1 行就原样返回，> 1 行才换成压缩标题。
  * 压缩结果按宽度缓存 —— `render(width)` 每帧都调，终端 resize 时自动重算。
  */
 function createCollapsedCallComponent(
 	inner: any,
-	options: { args: any; theme: any; cwd: string; expanded: boolean; isEnabled: () => boolean },
+	options: {
+		args: any;
+		theme: any;
+		cwd: string;
+		expanded: boolean;
+		isEnabled: () => boolean;
+		/** 命令还在跑（`tool_execution_start` 之后、结果回来之前）→ 圆点用 `dim`。 */
+		isPartial: boolean;
+		/** 这块结果是错的（`context.isError`）→ 圆点用 `toolDiffRemoved`。 */
+		isError: boolean;
+	},
 ) {
+	// 缓存只存**未上左边距/未上色**的正文行，左边距（含颜色）每次 render 现拼 ——
+	// 缓存键里再带一个状态会容易忘记失效，而拼两格前缀的开销可以忽略。
 	const cache = new Map<number, string[]>();
+	// 左边距那两列由盒子的孩子自己画（`Box(0, 0)` 不扣），所以这里的 width 已经是
+	// 「扣掉左边距 + 一列右边界」之后的正文预算（见 `shellFor`）。
 	return {
 		render(width: number): string[] {
 			const lines: string[] = inner.render(width);
+			const body = (out: string[]) => withHeadBar(out, stateBarAnsi(options.theme, options.isPartial, options.isError));
 			// 关闭开关 → 回到 pi 的原生渲染（含路径颜色，见 `PI_READ_COLLAPSE=off`）；工具名照旧大写
-			if (!options.isEnabled()) return capitalizeReadTitle(lines);
+			if (!options.isEnabled()) return body(capitalizeReadTitle(lines));
 			// 没超宽（短路径，绝大多数 read）→ 只把路径的颜色换成 `text`，其余原样交给 pi
-			if (lines.length <= 1) return capitalizeReadTitle(lines.map((line) => recolorToolPath(line, options.theme)));
+			if (lines.length <= 1) return body(capitalizeReadTitle(lines.map((line) => recolorToolPath(line, options.theme))));
 			const fixedWidth = visibleWidth(`${options.theme.fg("toolTitle", options.theme.bold("Read"))} `) + visibleWidth(ELLIPSIS);
-			if (width - fixedWidth < 1) return capitalizeReadTitle(lines);
+			if (width - fixedWidth < 1) return body(capitalizeReadTitle(lines));
 			const hit = cache.get(width);
-			if (hit) return hit;
+			if (hit) return body(hit);
 			const hyperlinksEnabled = piTitleUsesHyperlink(inner, lines);
 			const classification = options.expanded ? undefined : getCompactClassification(options.args, options.cwd);
 			const line = classification
@@ -407,10 +517,10 @@ function createCollapsedCallComponent(
 				: compressedPathTitle(options.args, options.theme, options.cwd, width, hyperlinksEnabled);
 			// 极窄终端兜底：固定部分（前缀 + 行号区间，或紧凑形态的提示行）本身就比整行还宽时，
 			// 压缩后的标题仍然会超宽 —— 那时 pi 自己的折行渲染同样难看，没有更好的选择，直接交回去。
-			if (visibleWidth(line) > width) return capitalizeReadTitle(lines);
-			const out = [line];
-			cache.set(width, out);
-			return out;
+			if (visibleWidth(line) > width) return body(capitalizeReadTitle(lines));
+			// 缓存的是**未挂左边距**的正文行，左边距（含状态色）在 `body` 里现拼
+			cache.set(width, [line]);
+			return body([line]);
 		},
 		invalidate() {
 			cache.clear();
@@ -431,19 +541,39 @@ export default function (pi: ExtensionAPI) {
 		// `promptGuidelines` / `constrainedSampling` / `execute` 全部原样继承
 		// （prompt 元数据不会自动继承，必须显式带上）。
 		...base,
+		// `renderShell: "self"`：让 pi 不再套 `contentBox` —— 于是 read 块**没有底色**、
+		// 也没有默认壳那两条上下边界空行（见文件头「整块的壳」）。自己的左边距自己画
+		// （`withHeadBar`），与 bash 块同一套观感。**只影响 read**：其他工具仍走 pi 的默认壳。
+		renderShell: "self",
 		renderCall(args, theme, context) {
 			const state = context.state;
 			// 关键：传给内置实现的 lastComponent 必须是**内层** Text 而不是我们的 wrapper，
 			// 否则内置 `setText()` 抛异常、pi 静默退回只剩 `read` 的 fallback（见文件头）。
 			const inner = base.renderCall?.(args, theme, { ...context, lastComponent: state.innerText }) ?? new Text("", 0, 0);
 			state.innerText = inner;
-			return createCollapsedCallComponent(inner, {
-				args,
-				theme,
-				cwd: context.cwd,
-				expanded: context.expanded,
-				isEnabled: () => enabled,
-			});
+			return shellFor(
+				(logicalWidth) =>
+					createCollapsedCallComponent(inner, {
+						args,
+						theme,
+						cwd: context.cwd,
+						expanded: context.expanded,
+						isEnabled: () => enabled,
+						// 「读的时候」= partial（`tool_execution_start` 之后、结果回来之前）
+						isPartial: context.isPartial === true,
+						isError: context.isError === true,
+					}).render(logicalWidth),
+			);
+		},
+		// 结果侧同样进这个壳：``\n` + 正文` 的每一行补两格缩进，于是它与标题行的左边距一致；
+		// 底色 / 上下边界空行同样没有。`context.lastComponent` 也要传**内层** Text（同一处坑）。
+		renderResult(result, options, theme, context) {
+			const state = context.state;
+			const inner =
+				base.renderResult?.(result, options, theme, { ...context, lastComponent: state.innerResultText }) ??
+				new Text("", 0, 0);
+			state.innerResultText = inner;
+			return shellFor((logicalWidth) => withBodyIndent(inner.render(logicalWidth)));
 		},
 	});
 }

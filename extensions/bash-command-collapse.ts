@@ -213,19 +213,65 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
 `Unknown theme color: …`），所以内置主题与 pi-coder-summer-night / pi-coder-catppuccin 照旧走 `toolOutput`，
 目前只有 `pi-coder-ayu.json` 定义了这个 token。展开态（ctrl+o）同样是输出正文，一并生效。
 
-## 染色块的上下边界空行
+## 整块没有底色、没有 boundary 空行
  *
- * self 模式下 pi 不再套 `Box(1, 1, bgFn)`，所以底色块的上下内边距得自己画回来：
- * 命令行**上面**一行、最后一行（通常是 `Took Xs`）**下面**一行，两行都是染了底色的
- * 空行（Box.applyBg 会把每行补满到 width 再上色，空行也不例外），这样文字不会顶着
- * 染色区的上/下边缘。对齐 pi 默认 shell 的观感（`Box(1, 1)` 就是这个效果），
- * 但**中间**（命令与输出之间）仍然紧贴 —— 那是刻意去掉的，见 renderResult 里的注释。
+ * bash 块**完全不带底色**（用户 2026-09-21 定的）：pending 的 `toolPendingBg`、成功的
+ * `toolSuccessBg`、失败的 `toolErrorBg` 三种底都不画，块里就是普通正文，与周围的 transcript
+ * 连成一片。状态改由首行那颗圆点的颜色表达（见下节）—— 底色没了不等于状态信息丢了。
  *
- * 为什么不能直接给两个 Box 各设 `paddingY: 1`：命令与结果是两个独立的 Box，各自的
- * 垂直 padding 会叠加成「命令与输出之间三行空白」（实测过），所以只在最外侧补：
- * 上边界放在 call 组件的首行，下边界放在 result 组件的末行。命令已出、结果还没到的
- * 中间态（pending）由 call 组件自己补一行下边界，否则那几十毫秒~几十秒里块是
- * 「上留白、下触底」的歪样子。
+ * 实现上是**主动不去画**，不是画上再擦掉：`renderShell: "self"` 之下 pi 本来就不再给整块套
+ * bgFn（`selfRenderContainer` 是个纯 `Container`，只有默认 shell 那条路才套），所以只要我们
+ * 自己不套，块就是干净的。于是 `Box` 的 `bgFn` 传 `undefined`（`new Box(0, 0)`），
+ * `stateBgFn` 整个函数删掉 —— 它当初存在的唯一理由就是「把 pi 在默认 shell 下会套的那层
+ * 底色补回来」，现在不需要了。
+ *
+ * ★ **只去 bash 的**：其他工具（read / grep / edit / write / task_* …）走的是 pi 自己的渲染
+ * 路径，`contentBox` 与 bgFn 完全不受本扩展影响 —— 本扩展只注册 `bash` 这一个工具的渲染器，
+ * 改的也只是自己返回的那两个组件。
+ *
+ * 上下 boundary 空行同理一并去掉：底色的上下内边距本来是本扩展自己画回来的（命令行上面一行、
+ * 整块最后一行下面一行，两行都是染了底色的空行 —— `Box.applyBg` 会把每行补满到 width 再上色），
+ * 但 bash 调用连着来时那样会把屏幕撑得很稀。现在整块只剩「命令行 + 结果」本身：命令就是块的
+ * 第 1 行、结果就是最后一行，一行空白都不加。
+ *
+ * **中间本来就是紧贴的**（命令与输出之间不留空行）—— 那是更早一轮刻意去掉的（命令与结果
+ * 是两个独立 Box，各自的 `paddingY` 会叠成三行空白）。
+ *
+ * 命令行那格左内边距不再是空格，换成了状态圆点（见下节）。
+ *
+ * ## 命令行首行的状态圆点（`•`）
+ *
+ * 命令行**首行**的前面一颗圆点 `•`（U+2022，1 列宽），颜色按这次 bash 调用的状态走
+ *（用户 2026-09-21 定；最初是 `▎`，随后按观感换成 `•`，**着色逻辑一字未动**）：
+ *
+ * ```
+ * • Run ls …path…
+ *    python abc.py…
+ * ```
+ *
+ *   - **执行中（pending）** → `dim`（暗灰）
+ *   - **执行成功** → `toolDiffAdded`（diff 新增行的绿）
+ *   - **执行失败** → `toolDiffRemoved`（diff 删除行的红）
+ *
+ * **只有 `Run ` 这一行前面有**：续行（`│ ` / 两格缩进）、`… +N lines` 标记、以及整棵结果树
+ *（`└ ` / 两格缩进）前面都不画 —— 圆点是「这一次 bash 调用」的状态灯，不是整块的边框。
+ *
+ * 挂法：调用侧的 `Box` 用 `paddingX: 0`，左边距那两格**由扩展自己画**（`withHeadBar`）：
+ * 首行是 `•` + 一个空格，其余行是两个空格。于是圆点落在**列 0**、`Run` 在列 2、所有正文在
+ * 列 4，而续行 / 结果树的 `│` `└` 也在列 2 —— 与命令行同列，正文也彼此对齐。
+ *
+ * ★ **这两格整体是「正文右移一列」换来的**（用户 2026-09-21 第二轮定的观感：原来 `▎Run …`
+ * 里 `Run` 顶着状态符太挤，现在 `• Run …`）。同一次改动把**结果侧也一起右移了一列**
+ *（`withPreviewLimit` 里的 `contentWidth = width - GUTTER_WIDTH - 1`），否则命令行在列 2、
+ * 结果树在列 0，两截会错开。改左边距时**两边必须一起改**，`INDENT_WIDTH` 就是这两个 1。
+ *
+ * `Box` 的 `paddingX` 是 0，所以孩子拿到的是整宽，两边各自把用掉的列扣回去
+ *（`renderCall` 的 `width - 3`、`withPreviewLimit` 的 `width - 3`）。圆点只挂**首行**
+ *（`renderCall` 里按索引 0 处理），`invalid arg` / 空命令那条 `wrapTextWithAnsi` 分支同样。
+ *
+ * 三个槽位 pi 一直都有（`toolDiffAdded` / `toolDiffRemoved` / `dim` 都是 schema 里的必需
+ * token），所以不像 `bashOutput` 那样需要存在性探测；取的是**前景** ANSI（`getFgAnsi`），
+ * 后面补一个 `\x1b[39m`，颜色不会洇到后面的 `Run` 上。
  *
  * 用法：
  *   /bash-preview             查看输出预览行数
@@ -968,6 +1014,7 @@ function readShellOptions(): BashToolOptions {
  * 内置 bash 的 renderResult 会在输出前插一个前导空行（`new Text("\n" + styledOutput)`），
  * 在默认 shell 下那是“命令与输出之间的一行间距”；但本扩展走 self 模式，命令与输出是
  * 两个独立的块，这一行会叠上两个 Box 各自的 paddingY，变成三行空白（实测）。
+ * 用户 2026-09-21 定的形状里命令与输出要**紧贴**，所以这一行照旧剥掉。
  * 先判 ANSI 再 trim：行里可能带前景色转义序列，直接 trim() 不会为空。
  * 只剥**前导**空行：输出与 "Took" 之间那个空行（也是 `\n` 前缀）刻意保留，
  * 用来分隔正文与耗时页脚。
@@ -987,30 +1034,61 @@ function stripLeadingBlanks(inner: any) {
 }
 
 /**
- * 给染色块补一行**下边界**空行（染底色的空行，见文件头「染色块的上下边界空行」）。
- * 空行是作为子组件的行加进去的，所以会走 Box.applyBg —— 补满到 width 再上色，
- * 与 paddingY 画出来的边界行完全同色同宽。
+ * 给命令的每一行补上**块左边距**（`• ` + 一列，见文件头「命令行首行的状态圆点」）：首行是
+ * 状态圆点 `•` + 一个空格，其余行是两个空格。
+ *
+ * 为什么这几格得由扩展自己画、而不是让 `Box` 的 `paddingX` 去补：`Box` 补出来的空白是**每行
+ * 都一样**的，首行想要圆点就没地方画了。所以调用侧的 `Box` 用 `paddingX: 0`，左边距搬到这里
+ * —— 于是首行是 `• Run …`、续行是 ` │ …` / `   …`，`Run` 的 `R`（列 2）与续行 / 结果树的
+ * `│` `└`（也列 2）对齐，所有正文列（列 4）也对齐。
+ *
+ * 结果侧那条路径（`withPreviewLimit` / `prefixTreeLines`）挂的是同一份缩进，只是没有圆点 —— 用户 2026-09-21
+ * 第二轮定要把两侧一起右移一列，所以两边的宽度预算必须一起改（见 `INDENT_WIDTH`）。
+ *
+ * 搬进来之后孩子的渲染宽度比 `Box` 时宽，所以调用方要自己把用掉的列扣回去
+ *（`renderCall` / `withPreviewLimit` 里的 `width - GUTTER_WIDTH - INDENT_WIDTH`）。
  */
-function withBottomBlank(inner: any) {
-	return {
-		render(width: number): string[] {
-			return [...inner.render(width), ""];
-		},
-		invalidate() {
-			inner.invalidate?.();
-		},
-	};
+function withHeadBar(lines: string[], bar: string): string[] {
+	return lines.map((line, index) => (index === 0 ? `${bar} ${line}` : `  ${line}`));
+}
+
+/**
+ * 这条命令当前该用哪个槽的颜色画那颗状态圆点（用户 2026-09-21 定；字形从 `▎` 换成 `•`
+ * 时**着色逻辑一字未动**）：
+ *
+ *   - 执行中（`isPartial`）→ `dim`（暗灰）
+ *   - 执行完且成功 → `toolDiffAdded`（diff 新增行的绿）
+ *   - 执行完且失败 → `toolDiffRemoved`（diff 删除行的红）
+ *
+ * 三个槽 pi 的 theme schema 都**必需**（内置 dark / light 与三个自建皮肤都有），所以
+ * 不像 `bashOutput` 那样需要探测；取的是**前景** ANSI，后面补一个 `\x1b[39m` 收尾，
+ * 颜色不会洇到后面的 `Run` 上。
+ */
+function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string {
+	const slot: ThemeColor = isPartial ? "dim" : isError ? "toolDiffRemoved" : "toolDiffAdded";
+	return `${theme.getFgAnsi(slot)}\u2022\u001b[39m`;
 }
 
 /**
  * 树形 gutter 占的列数（`│ ` / `└ ` = 1 个 box-drawing 字符 + 1 个空格 = 2 列）。
- * 输出子组件必须按 `width - GUTTER_WIDTH` 渲染，否则加上前缀就超宽。
+ * 输出子组件必须按 `width - GUTTER_WIDTH - INDENT_WIDTH` 渲染，否则加上前缀就超宽。
  */
 const GUTTER_WIDTH = 2;
+/**
+ * 整块**左边距**里、gutter 之外多让出来的那一列（用户 2026-09-21 第二轮定的：
+ * 正文整体再右移一格，`• Run …` 而不是 `▎Run …`）。
+ *
+ * 命令侧与结果侧**用的是同一个值**：命令行首行是 `• `（圆点 + 空格）、结果树每行前面多这一格
+ *（命令行的续行前缀 `│ ` 已经自带一个空格，所以它只在 `COMMAND_PROMPT` 的左侧再加这一列）。
+ * 两边同宽才不会让命令与结果错开 —— 改一边必须改另一边。
+ */
+const INDENT_WIDTH = 1;
 /** 树里“还有下文”的行：命令续行、命令折叠标记、输出的截断提示。 */
 const GUTTER_PIPE = COMMAND_CHAIN;
-/** 树里“正文内容”的续行缩进（与 `└ ` 等宽，正文对齐）。 */
-const GUTTER_BODY = COMMAND_INDENT;
+/** 树里“正文内容”的续行缩进（与 `└ ` 等宽 + 块左边距，正文对齐）。 */
+const GUTTER_BODY = COMMAND_INDENT + " ".repeat(INDENT_WIDTH);
+/** 整块左边距里 gutter 之外的那一列（`INDENT_WIDTH` 个空格），挂在**每一行**结果前面。 */
+const INDENT = " ".repeat(INDENT_WIDTH);
 
 /**
  * 输出预览自己补的那条截断提示（`… (N earlier lines, <key> to expand)`）的形态。
@@ -1044,7 +1122,7 @@ function isFailureStatusLine(line: string): boolean {
  *
  * pi 写的是 `theme.fg("toolOutput", line)`（默认 gray）—— 那一行只有一个 SGR 前缀、末尾
  * 一个 `\u001b[39m`，所以直接拆掉重包一层 `error` 就行（不会丢内层样式：这一行本来就
- * 没有）。行尾补白原样接回去，于是宽度与上底色都不变。
+ * 没有）。行尾补白原样接回去，于是可见宽度不变。
  */
 function colorizeFailureStatus(line: string, theme: any): string {
 	if (!isFailureStatusLine(line)) return line;
@@ -1111,9 +1189,9 @@ function prefixTreeLines(lines: string[], theme: any, isError = false): string[]
 	// 再画竖线反而像树还没完（用户 2026-09-21 第二次反馈：`[Full output:` 上面那行不该有 `│`）。
 	const pipeBlank = (i: number) => i > first && i < start;
 	return lines.map((line, i) => {
-		if (isBlank(line)) return pipeBlank(i) ? theme.fg("muted", GUTTER_PIPE) + line : line;
-		if (i < start) return theme.fg("muted", GUTTER_PIPE) + line;
-		if (i === start) return theme.fg("muted", "└ ") + (isError ? colorizeFailureStatus(line, theme) : line);
+		if (isBlank(line)) return pipeBlank(i) ? INDENT + theme.fg("muted", GUTTER_PIPE) + line : line;
+		if (i < start) return INDENT + theme.fg("muted", GUTTER_PIPE) + line;
+		if (i === start) return INDENT + theme.fg("muted", "└ ") + (isError ? colorizeFailureStatus(line, theme) : line);
 		return GUTTER_BODY + (isError ? colorizeFailureStatus(line, theme) : line);
 	});
 }
@@ -1209,10 +1287,10 @@ function withPreviewLimit(
 		render(width: number): string[] {
 			const out: string[] = [];
 			let trimmed = false;
-			// gutter 占 2 列，所以**输出预览按 width - 2 渲染**：pi 的预览行是按传进去的
-			// 宽度折行 / 截断的（`truncateToVisualLines` 内部用 `Text.render(width)`），
-			// 按整宽渲染再加前缀就会超出终端宽度。
-			const contentWidth = Math.max(1, width - GUTTER_WIDTH);
+			// 前缀占 gutter + 左边距共 3 列，所以**输出预览按 width - 3 渲染**：pi 的预览行是按
+			// 传进去的宽度折行 / 截断的（`truncateToVisualLines` 内部用 `Text.render(width)`），
+			// 按整宽渲染再加前缀就会超出终端宽度（`Box.applyBg` 只会裁，内容就丢了）。
+			const contentWidth = Math.max(1, width - GUTTER_WIDTH - INDENT_WIDTH);
 			// 耗时页脚的判定放在 render 里而不是拿组件时就算死：流式模式下 pi 每秒
 			// `invalidate()` 一次（内置 renderResult 里那个 setInterval），跨过门槛的
 			// 那一刻页脚就能出现，不用等下一次 partial 结果。
@@ -1221,12 +1299,15 @@ function withPreviewLimit(
 				children = children.slice(0, -1);
 			}
 			// 展开态（ctrl+o）要的就是原样完整输出：不裁行、不挂 gutter。pi 那时用的是
-			// `new Text("\n" + styledOutput)`，一个 child 装全部输出，直接按原宽透传 ——
+			// `new Text("\n" + styledOutput)`，一个 child 装全部输出，直接透传 ——
 			// 只把失败状态那行染红（用户要的是提示见红，展开态也该红）。
+			// 左边距照挂（只挂 `INDENT_WIDTH` 那 1 列，没有 gutter）：展开态的输出正文列
+			// 与折叠态一样落在列 2 那一族里，切换 ctrl+o 时整块不会横跳。
 			if (expanded) {
+				const expandedWidth = Math.max(1, width - INDENT_WIDTH);
 				for (const child of children) {
-					const rendered = child.render(width) as string[];
-					out.push(...(isError ? rendered.map((line) => colorizeFailureStatus(line, theme)) : rendered));
+					const rendered = child.render(expandedWidth) as string[];
+					out.push(...(isError ? rendered.map((line) => colorizeFailureStatus(line, theme)) : rendered).map((line) => INDENT + line));
 				}
 				return out;
 			}
@@ -1346,18 +1427,6 @@ function isBlankResultLine(line: string): boolean {
 }
 
 /**
- * 按执行状态选整块底色，与 tool-execution.js `updateDisplay()` 里的 bgFn 一致
- * （pending / error / success）。默认 shell 下这个 bgFn 由 pi 套在整个 contentBox 上；
- * 切到 `renderShell: "self"` 后 pi 不再套（selfRenderContainer 是个纯 Container），
- * 所以得自己用 Box + theme.bg 把底色块画回来，否则 bash 输出会失去现在的背景块。
- */
-function stateBgFn(theme: any, isPartial: boolean, isError: boolean) {
-	if (isPartial) return (text: string) => theme.bg("toolPendingBg", text);
-	if (isError) return (text: string) => theme.bg("toolErrorBg", text);
-	return (text: string) => theme.bg("toolSuccessBg", text);
-}
-
-/**
  * 在**同步窗口**内把主题的 `toolOutput` 临时换成 `bashOutput`，让 pi 内置 bash 结果渲染器
  * 画出来的输出正文用上自己的颜色槽（详见文件头「输出正文的独立颜色」一节）。
  *
@@ -1443,11 +1512,13 @@ export default function (pi: ExtensionAPI) {
 		// 三个分支全都置 true，所以末尾 `if (… && !hasContent …) hideComponent = true` 永远不成立。
 		// self 模式下 render() 绕过 super.render()，只画 selfRenderContainer，于是那个 Spacer
 		// 根本不会被渲染；且开头有 `contentLines.length === 0 → return []` 守卫，
-		// 真正做到“空就什么都不出”。代价是 pi 不再给整块套 bgFn，所以 renderCall /
-		// renderResult 两边都自己包一层 Box 把底色块画回来（见 stateBgFn）。
+		// 真正做到“空就什么都不出”。顺带一个**刻意保留**的副作用：pi 不再给整块套 bgFn
+		//（默认 shell 下 contentBox 会套 toolPendingBg / toolSuccessBg / toolErrorBg），
+		// 而我们自己也不套 —— 于是 bash 块**没有任何底色**（用户 2026-09-21 定的，见文件头
+		// 「整块没有底色」）。其他工具走的不是这条路，它们的底色不受影响。
 		renderShell: "self",
 		// renderResult 委托内置 bash 的实现（输出预览 / 截断提示 / "Took Xs" 都是它画的），
-		// 只在外层包一个 Box 把底色块补回来，页脚那行则在 withPreviewLimit 里按门槛滤掉。
+		// 只在外层包一个**不带底色**的 Box 挂左边距，页脚那行则在 withPreviewLimit 里按门槛滤掉。
 		// 注意传给内置的 `lastComponent` 必须是
 		// **内层**组件而不是我们的 Box —— 内置实现会 `context.lastComponent ?? new
 		// BashResultRenderComponent()` 然后对它 clear() / addChild()，喂个 Box 进去会嵌套错乱。
@@ -1475,9 +1546,8 @@ export default function (pi: ExtensionAPI) {
 			// 第③行在默认 shell 下是“命令与输出之间的一行间距”（那时两者在同一个
 			// contentBox 里，只有这一行），但 self 模式下两者是两个独立的 Box，
 			// 各自的 paddingY 会叠加上去，所以这里把三者全部去掉，让输出紧贴命令。
-			// 整块的**下边界**空行则由 withBottomBlank 补回来（只补最外侧那一行，
-			// 不会落到命令与输出之间）—— 它也会经过树形 gutter 判定，从而在树里
-			// 收尾一根 `│ `（见 withPreviewLimit）。
+			// 整块外面也**不再补下边界空行**（用户 2026-09-21 定的：上下都不留白，
+			// 见文件头「整块没有底色、没有 boundary 空行」）。
 			// 耗时页脚门槛判据（见文件头「耗时页脚门槛」）：与 pi 画那行字用的是**同一个量**
 			// —— `state.endedAt ?? Date.now()` 减 `state.startedAt`（内置 renderResult 刚在上面
 			// 那次调用里补上了 endedAt）。做成**函数**、在 render 时才求值：流式模式下每秒
@@ -1485,12 +1555,14 @@ export default function (pi: ExtensionAPI) {
 			// startedAt 为空 = pi 根本没画页脚（`/resume` 恢复的历史块不调 markExecutionStarted），
 			// 这时返回 undefined，过滤逻辑一律不动手。
 			const elapsedMs = () => (state.startedAt === undefined ? undefined : (state.endedAt ?? Date.now()) - state.startedAt);
-			const box = new Box(1, 0, stateBgFn(theme, options.isPartial, context.isError === true));
+			// `new Box(1, 0)`：**只有 bgFn 去了**（bash 块不带底色 —— pending / 成功 / 失败三种底
+			// 都不画，见文件头「整块没有底色」），`paddingX: 1` 保持不变 —— 结果侧那格左内边距是
+			// 与命令行 `• ` 对齐用的（`withPreviewLimit` 再挂 `INDENT_WIDTH` 那一列），去掉整块会
+			// 比命令行少一列；`paddingY: 0` 则让上下不留空行。
+			const box = new Box(1, 0);
 			box.addChild(
-				withBottomBlank(
-					stripLeadingBlanks(
-						withPreviewLimit(inner, Math.max(1, Math.round(previewLines)), theme, options.expanded === true, () => options.isPartial === true, context.isError === true, elapsedMs, minTimeFooterMs),
-					),
+				stripLeadingBlanks(
+					withPreviewLimit(inner, Math.max(1, Math.round(previewLines)), theme, options.expanded === true, () => options.isPartial === true, context.isError === true, elapsedMs, minTimeFooterMs),
 				),
 			);
 			return box;
@@ -1530,7 +1602,7 @@ export default function (pi: ExtensionAPI) {
 			// argsComplete 在 assistant message_end 时置位（setArgsComplete），比
 			// tool_execution_start 早 ~60ms，正好是“命令收完”这个语义点。
 			// 返回零行组件是安全的：Box.render 开头有 `childLines.length === 0 → []` 守卫
-			// （paddingY 是在这之后才加的），所以不会画出空的带底色块。
+			// （paddingY 是在这之后才加的），所以不会画出空的块。
 			// （updateDisplay 每次都传全新的 context，getRenderContext 现拼对象，
 			// 所以 argsComplete 读得到实时值。）
 			//
@@ -1579,7 +1651,10 @@ export default function (pi: ExtensionAPI) {
 
 			const component = {
 				render(width: number): string[] {
-					const wrapWidth = Math.max(20, width || 80);
+					// `Box` 的 paddingX 是 0（左边距由 `withHeadBar` 画：首行 `• `、其余两格空格），
+					// 所以它给孩子的就是整宽 —— 这里把用掉的三列扣回去：gutter 2 + 左边距 1 + 右边界。
+					// 见文件头「命令行首行的状态圆点」。
+					const wrapWidth = Math.max(20, (width || 80) - GUTTER_WIDTH - INDENT_WIDTH);
 					const limit = DEFAULT_LINES;
 					// 缓存键要带上 expanded / resultSeen，否则 ctrl+o 切换或结果到达后已渲染的行不会刷新
 					const resultSeen = state.resultSeen === true;
@@ -1630,10 +1705,9 @@ export default function (pi: ExtensionAPI) {
 						//（error 色 / toolOutput 色），不用在硬折分支里重建
 						result = wrapTextWithAnsi(styledFull, wrapWidth);
 					} else {
-						// 展开态（ctrl+o）/ 关闭折叠：要的就是完整命令，**同样用 break-all
-						// 硬折行** —— 贪心词折行在这里一样会把长路径整块挪到下一行
-						// 再从中间断开（就是用户看到的 `Run ` 后面直接折行），展开态只是
-						// 不限行数，折行规则必须一致。
+						// 展开态（ctrl+o）：要的就是完整命令，**同样用 break-all 硬折行** —— 贪心词折行
+						// 在这里一样会把长路径整块挪到下一行再从中间断开（就是用户看到的 `Run ` 后面直接
+						// 折行），展开态只是不限行数，折行规则必须一致。
 						const commandLines = command.split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
@@ -1654,14 +1728,11 @@ export default function (pi: ExtensionAPI) {
 						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
 					}
 
-					// 染色块的上下边界空行（见文件头「染色块的上下边界空行」）：
-					// 上边界永远补；下边界只在结果还没到时补 —— 结果到了之后紧接着就是
-					// resultBox，那时补会在命令与输出之间多出一行空白。
-					// 判定用 state.resultSeen（renderResult 置位），不用 isPartial：
-					// 流式模式下 partial 结果也会调 renderResult，isPartial 仍是 true，
-					// 用它会在命令与输出之间留下空白。
-					result = ["", ...result, ...(resultSeen ? [] : [""])];
+					// 状态圆点 `•` + 左侧留白：只挂在首行（用户 2026-09-21 定，见文件头「命令行首行的
+					// 状态圆点」）。结果侧在 `withPreviewLimit` / `prefixTreeLines` 里挂同一份缩进，两边对齐。
+					result = withHeadBar(result, stateBarAnsi(theme, context.isPartial === true, context.isError === true));
 
+					// 行尾补白交给外层（`Box.render` 会把每行补满到它拿到的宽度），这里不用管。
 					cachedWidth = wrapWidth;
 					cachedExpanded = context.expanded;
 					cachedResultSeen = resultSeen;
@@ -1676,10 +1747,11 @@ export default function (pi: ExtensionAPI) {
 				},
 			};
 
-			// self 模式下 pi 不给整块套底色，自己包一层 Box 保持原有的背景块观感。
-			// paddingY 用 0：命令与结果是两个独立的 Box，各自的垂直 padding 会叠加成
-			// 命令与输出之间的多余空行（详见 renderResult 里那条注释）。
-			const box = new Box(1, 0, stateBgFn(theme, context.isPartial === true, context.isError === true));
+			// `new Box(0, 0)`：**没有 bgFn**（bash 块不带底色 —— pending / 成功 / 失败三种底都不画，
+			// 状态由首行那颗圆点的颜色表达，见文件头「整块没有底色」）；两维 padding 也都是 0：
+			// 整块上下不留空行，左边距由组件自己画 —— 首行是 `• `、其余行两格空格（`withHeadBar`），
+			// 所以孩子拿到的是整宽、组件内部再扣回去（`width - 3`）。
+			const box = new Box(0, 0);
 			box.addChild(component);
 			return box;
 		},

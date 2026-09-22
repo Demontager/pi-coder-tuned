@@ -19,9 +19,14 @@ import {
 	BRANCH_ICON,
 	composeFooterLines,
 	ELLIPSIS,
+	STATUS_PRIORITY,
 	formatExtensionStatuses,
 	formatMainLine,
 } from "./line.ts";
+// 跨目录相对 import：模式指示的 status key 住在 plan-mode 那边，这里只用它锁住
+// `STATUS_PRIORITY` 没写错字（两份字面量一旦漂移，排序会静默失效、没有任何报错）。
+// 与 `recap` → `simple-task/gap.ts` 同一套取舍：同仓库、同目录树、一起安装。
+import { STATUS_KEY as PLAN_MODE_STATUS_KEY } from "../plan-mode/render.ts";
 
 const plain: StatuslineTheme = { fg: (_color, text) => text };
 const painted: StatuslineTheme = { fg: (color, text) => `${color}(${text})` };
@@ -210,6 +215,17 @@ describe("formatMainLine", () => {
 	});
 });
 
+describe("STATUS_PRIORITY", () => {
+	it("pins the exact status keys it reorders", () => {
+		assert.deepEqual([...STATUS_PRIORITY], ["plan-mode"]);
+	});
+
+	it("matches the plan-mode extension's own status key", () => {
+		// 漂移会让「模式指示排行首」静默失效（排序不命中就当成普通 key）。
+		assert.equal(PLAN_MODE_STATUS_KEY, STATUS_PRIORITY[0]);
+	});
+});
+
 describe("formatExtensionStatuses", () => {
 	it("joins statuses set by other extensions", () => {
 		const statuses = new Map([
@@ -251,6 +267,52 @@ describe("formatExtensionStatuses", () => {
 		const rendered = formatExtensionStatuses(plain, gitOf("main", statuses));
 		assert.equal(rendered.split(" | ").length, 5);
 		assert.ok(rendered.endsWith("v4") && !rendered.includes("v5"), rendered);
+	});
+
+	it("puts the mode indicator first, regardless of registration order", () => {
+		// 注册顺序是 cwd → rewind → plan-mode（加载目录字母序），但模式指示要靠前：
+		// 它跟着会变长的路径 / 计数，而第二行超长只截断不折行，放尾部会被挤掉。
+		const statuses = new Map([
+			["cwd", " 📁 /Users/bachi/jaylli/litellm-any"],
+			["rewind", "◆ 3 checkpoints"],
+			["plan-mode", "⏵ normal"],
+		]);
+		assert.equal(
+			formatExtensionStatuses(plain, gitOf("main", statuses)),
+			"⏵ normal | 📁 /Users/bachi/jaylli/litellm-any | ◆ 3 checkpoints",
+		);
+	});
+
+	it("keeps the mode indicator first even when it was registered last", () => {
+		const statuses = new Map([
+			["cwd", " 📁 /tmp/repo"],
+			["plan-mode", "⏸ plan"],
+		]);
+		assert.equal(formatExtensionStatuses(plain, gitOf("main", statuses)), "⏸ plan | 📁 /tmp/repo");
+	});
+
+	it("priority ordering keeps non-priority keys in registration order", () => {
+		const statuses = new Map([
+			["zebra", "Z"],
+			["plan-mode", "⏵ normal"],
+			["alpha", "A"],
+		]);
+		assert.equal(formatExtensionStatuses(plain, gitOf("main", statuses)), "⏵ normal | Z | A");
+	});
+
+	it("a long cwd no longer pushes the mode indicator out of the five-item budget", () => {
+		// 回归：老实现里 plan-mode 排第三，一旦前面两项再加上别人就容易被截掉。
+		const statuses = new Map([
+			["cwd", " 📁 /very/long/path/that/goes/on"] as [string, string],
+			["rewind", "◆ 3 checkpoints"] as [string, string],
+			["a", "A"] as [string, string],
+			["b", "B"] as [string, string],
+			["c", "C"] as [string, string],
+			["plan-mode", "⏸ plan"] as [string, string],
+		]);
+		const rendered = formatExtensionStatuses(plain, gitOf("main", statuses));
+		assert.ok(rendered.startsWith("⏸ plan | "), rendered);
+		assert.equal(rendered.split(" | ").length, 5, "仍然限 5 条");
 	});
 });
 
