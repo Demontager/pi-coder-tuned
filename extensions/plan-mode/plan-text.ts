@@ -125,15 +125,33 @@ bash 里的写操作（重定向、rm / mv / sed -i / git commit / npm install �
 决定批准还是打回；用户批准前你不会拿到写权限，所以不要提前说"我已经改好了"。`;
 }
 
-/** execute 阶段每轮注入的剩余步骤（`display: false`）。 */
+/**
+ * execute 阶段每轮注入的剩余步骤（`display: false`）。
+ *
+ * 这里必须把「哪份清单是真的」写死：批准计划时步骤已经镜像进会话任务清单
+ * （simple-task 的 `#n`），那边与状态行是同一个进度源。模型若另建一份清单，
+ * 屏幕上就会出现两套数字（issue 里的实际问题）。`[DONE:n]` 仍作为等价别名保留：
+ * 它与 `task_update` 改的是同一份进度，习惯写标记的模型不会因此卡住。
+ *
+ * 「两步 task_update」的写法是刻意的：`pending → done` 一步到位会与全局 AGENTS.md 的
+ * `Never move an item straight from pending to done` 对撞，而实测跳步率 50%（76 次
+ * `→ done` 里有 38 次直接跳）—— 注入文本比全局规则更近，模型跟的是注入文本。写成
+ * 两步就把这处矛盾消掉，同时保住 spinner 的视觉反馈（只有 in_progress 才转）。
+ */
 export function buildExecuteContext(steps: readonly PlanStep[]): string {
 	const remaining = steps.filter((step) => !step.done);
 	const list = remaining.map((step) => `${step.step}. ${step.text}`).join("\n");
 	return `[EXECUTING PLAN]
 
-用户已批准这个计划，写权限已恢复。按顺序执行剩余步骤：
+用户已批准这个计划，写权限已恢复。步骤已同步到会话任务清单（id 就是下面的序号），
+**那是这次执行唯一的进度表**——不要另建一份任务清单（不要 task_set）。
+
+按顺序执行剩余步骤：
 
 ${list}
 
-每完成一步，在回复里带上 \`[DONE:n]\`（n 是上面每行开头的序号）；全部完成后正常收尾即可。`;
+每完成一步，用 \`task_update\` 分两次把它标掉：先 \`task_update #${remaining[0]?.step ?? 1} → in_progress\`
+（开始做之前），做完再 \`task_update #${remaining[0]?.step ?? 1} → done\`。
+或者按老习惯在回复里带上 \`[DONE:n]\`（n 是上面每行开头的序号）——它等价于直接标 done。
+全部完成后正常收尾即可。`;
 }

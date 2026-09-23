@@ -23,13 +23,13 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 839 tests, ~36 s
+npm test        # node --test — 953 tests, ~38 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 839 tests, ~36 s
+node --test --test-concurrency=4      # 953 tests, ~38 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
@@ -60,7 +60,7 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 25 loaded by reading the startup list:
+Then check that all 26 loaded by reading the startup list:
 
 ```
 [Extensions]

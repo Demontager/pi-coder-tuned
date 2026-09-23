@@ -1,6 +1,6 @@
 # Extensions reference
 
-25 extensions load from this package. Twelve are single files in `extensions/`, thirteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+26 extensions load from this package. Twelve are single files in `extensions/`, fourteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -12,6 +12,7 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/bash-preview` | `bash-command-collapse` | `off` \| `<1-50>` — Output preview lines; `off` restores pi's built-in preview. |
 | `/bash-timeout` | `bash-command-collapse` | — Prints the default, maximum and env-overridden bash timeout. |
 | `/clear` | `clear-command` | — Alias of `/new`. |
+| `/destructive-guard` | `destructive-guard` | — Prints the current mode and this session's counts (checked / blocked / confirmed / allowed / notified). |
 | `/exit` | `exit-command` | — Alias of `/quit` (the argument-free form of the quit words). |
 | `/init` | `init-command` | `[file.md] [extra instructions]` |
 | `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
@@ -183,9 +184,11 @@ A lightweight task list: `task_set`, `task_update`, `task_get` and `/tasks`. Thr
 
 State is written with `pi.appendEntry()`, so it rides the session log and **nothing is written into your repository** — no `.pi/tasks/*.json` to gitignore. Rebuilding reads `ctx.sessionManager.getBranch()`, not `getEntries()`, so branch navigation cannot resurrect a discarded branch's tasks.
 
+Since 2026-09-23 the list **doubles as plan mode's only progress table while a plan executes**: on approval `plan-mode` mirrors its steps in as entries with a `plan: n. ` prefix (the id is the step number), and the statusline's `▶ n/N` reads the mirrored state back. The contract lives in `plan-mirror.ts` — see [`plan-mode/`](#plan-mode--claude-code-style-plan-mode) for the rules.
+
 `/tasks` with no argument or `status` prints the list, `clear` empties it, `on` / `off` toggle the widget.
 
-The widget is the whole feature: the packed `✔ n/N` status it used to also write into the statusline's second row was a duplicate of it, and that slot now belongs to `plan-mode`'s mode indicator. Do not add a second copy of the same information back.
+The widget is the whole feature: the packed `✔ n/N` status it used to also write into the statusline's second row was a duplicate of it, and that slot now belongs to `plan-mode`'s mode indicator. Do not add a second copy of the same information back. One related rule: when the list contains mirrored plan entries the widget **omits its `● N tasks (…)` header** — the same totals are already in the statusline's `▶ n/N`, and a hand-built list keeps its header.
 
 ### `recap/` — conversation summary
 
@@ -244,9 +247,11 @@ Typing `exit`, `quit` or `bye` as the entire prompt quits pi cleanly (sessions a
 
 ### `plan-mode/` — Claude Code style plan mode
 
-Three phases: `normal` → `plan` (read-only exploration, the model writes a plan) → `execute` (the approved steps run, `[DONE:n]` markers advance them, finishing returns to `normal`). The plan lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context and not in the working tree) and is shown as a step widget, so the repository gains no files.
+Three phases: `normal` → `plan` (read-only exploration, the model writes a plan) → `execute` (the approved steps run, finishing returns to `normal`). The plan lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context and not in the working tree) and is shown as a step widget, so the repository gains no files.
 
 Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `enter_plan_mode` tool.
+
+**While executing, there is exactly one progress table, and it is `simple-task`'s.** On approval the steps are mirrored into the task list (id = step number, text prefixed `plan: n. `), plan-mode drops its own `plan-steps` widget, and the statusline's `▶ n/N` reads the mirrored state back. The model advances it with `task_update`; `[DONE:n]` in prose is kept as an **equivalent alias** that writes the same state. The reason is measured, not theoretical: in one real execution round the model called `task_update` 17 times and never wrote a single `[DONE:n]`, so a marker-only counter stayed at `▶ 0/10` forever. The contract lives in one file, `simple-task/plan-mirror.ts` (event names, prefix, rebuild rules), because two copies of a contract always drift — plan-mode statically imports it from `../simple-task/`, so **the two extensions must be installed together**. Four rules there are load-bearing: an empty snapshot means "clear the mirror", not "no change"; a mirrored entry's id is its step number and a hand-built task that collides with one is bumped above `nextAvailableId`; syncs are **full snapshots**, never deltas (both sides replay the session, and one lost delta misaligns them permanently); and the mirror persists inside simple-task's own session entries, so `/resume` does not depend on which extension's `session_start` runs first.
 
 **The mode indicator has a fixed slot**: the head of the statusline's second row, with text in all three phases — `⏵ normal` (painted `toolDiffRemoved`, i.e. the delete-line red, so "full permissions" is visible at a glance), `⏸ plan` / `⏸ plan · 4 steps` (`warning`) and `▶ 2/5 executing` (`accent`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
 
@@ -259,8 +264,28 @@ Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `en
 
 `shift+tab` is taken from pi's built-in `app.thinking.cycle`. A conflicting `registerShortcut` is skipped by pi's runner, so the key is intercepted with `ctx.ui.onTerminalInput` **before** the editor sees it (only in TUI mode, while idle, and with no extension dialog open) and consumed. Because that displaces the thinking-level cycle, the extension rewrites `app.thinking.cycle` to `ctrl+shift+t` in `~/.pi/agent/keybindings.json` — and only when the key has no binding at all; a user-configured binding is left alone. Matching the key must go through pi-tui's `matchesKey`, not a string compare: `shift+tab` arrives as bare CSI (`\x1b[Z`), as the Kitty protocol's CSI-u (`\x1b[9;2u`) or as xterm's modifyOtherKeys, and pi turns the Kitty protocol on at startup, so a real terminal sends the second form. Pressing `shift+tab` while streaming still cycles the thinking level — plan mode only switches when you are stopped.
 
+Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getEntries()`: the latter returns every entry in the file including branches discarded by `rewind` / fork / branch navigation, so a plan dropped on another branch would come back to life (observed: no plan on the active branch, yet the statusline showed `▶ 0/1 executing`).
+
 - `PI_PLAN_MODE=off` — disable the extension entirely.
 - `PI_PLAN_MODE_AUTO=off` — keep `shift+tab` and `/plan`, drop the model's `enter_plan_mode` tool.
+
+### `destructive-guard/` — pre-execution delete gate
+
+A `tool_call` hook that inspects arguments **before** the tool runs and rejects dangerous deletes. It exists because a one-line `fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true })` destroyed most of this machine's writable paths: the property did not exist, `??` substituted an innocuous-looking default, and `dirname("/tmp")` reduced it to `/`. The prose rules in `AGENTS.md` were already in place and did not help — they constrain what the model decides, not what a script it wrote earlier does at runtime.
+
+**Two gates:**
+
+1. **Delete-shaped commands** (`bash` / `powershell`). Targets are extracted from `rm` / `unlink` / `shred` / `truncate`, `find … -delete` and `find … -exec rm`, `git clean -fdx`, `rsync --delete` and PowerShell `Remove-Item`, then judged in three tiers: **block** (fewer than two path components, a protected root such as `/System`, `/Library`, `/Applications`, `/Users`, `/usr`, `/bin`, `/etc`, `/opt`, `$HOME`, or an ancestor of one), **confirm** (inside a system tree, a VCS store root like `.git`, a target carrying a fallback `??` / `||` / `${X:-y}`, or a target computed by `dirname()` / `$(…)` / a variable), and **ok** for everything else. `/Users/bachi/x/dist`, `/tmp/scratch` and `/usr/local/bin/tsc` all pass.
+2. **Delete code inside written content** (`write` / `edit` / `multiedit` / `apply_patch`). The dangerous line is often written into a file long before it runs, and the run itself looks harmless (`node verify.mjs`) — gate 1 cannot see it. This gate checks the content being written for the same shapes: a delete API with a fallback target, a target from path arithmetic, a bare root or `..` climb, a shell-variable target, a recursive PowerShell delete with a non-literal target. Comment lines do not count, since they do not execute.
+
+A `block` verdict is refused outright and the reason is returned to the model as a tool error. A `confirm` verdict asks once in the TUI and **fails closed without one** — a non-interactive environment refuses rather than proceeding.
+
+The judgement is lexical and deliberately does not follow symlinks or do dataflow analysis: it wants to be deterministic, testable and side-effect free. A target passed across functions (`const t = compute(); rmSync(t)`) is not caught, and that residue is what the `AGENTS.md` discipline covers. `targets.test.ts` treats the "must allow" cases as seriously as the "must block" ones — a guard that prompts constantly is a guard nobody keeps on.
+
+- `PI_DESTRUCTIVE_GUARD=block` — refuse the confirm tier too.
+- `PI_DESTRUCTIVE_GUARD=notify` — report what it would have caught without blocking; the recommended first day of use.
+- `PI_DESTRUCTIVE_GUARD=off` — disable the gate.
+- `/destructive-guard` — current mode plus this session's checked / blocked / confirmed / allowed / notified counts.
 
 ### `auto-default-model/` — persistent model switches
 
@@ -333,6 +358,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_BELOW_EDITOR_AFTER_STATUSLINE=off` | on | `below-editor-after-statusline` | Leave `belowEditor` widgets where pi puts them. |
 | `PI_CWD_ICON` | ` 📁` | `cwd-statusline` | Icon used by the cwd status line. |
 | `PI_CWD_STATUSLINE=off` | on | `cwd-statusline` | Do not print the cwd status line. |
+| `PI_DESTRUCTIVE_GUARD` | `on` | `destructive-guard` | `block` refuses the confirm tier too; `notify` reports what it would have caught without blocking; `off` disables the gate. |
 | `PI_EDITOR_AUTOCOMPLETE_GAP=off` | on | `prompt-editor` | Do not add the blank line under the autocomplete list. |
 | `PI_EDITOR_AUTOCOMPLETE_SHIFT` | `1` | `prompt-editor` | Columns to shift the autocomplete list left. |
 | `PI_EDITOR_PROMPT` | `❯` | `prompt-editor` | Editor prompt character. The bash-mode `!` is not affected. |
@@ -363,6 +389,8 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **`shift+tab` is shared.** `plan-mode` consumes it before the editor sees it and rebinds the thinking-level cycle to `ctrl+shift+t`; while a turn is streaming the key still reaches `app.thinking.cycle`.
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
+- **`plan-mode` imports `simple-task/plan-mirror.ts`.** The mirror contract (event names, the `plan: n. ` prefix, the rebuild rules) is one file on purpose, so the two must be installed together as well. They otherwise communicate only through `pi.events` — never by importing each other's state or invoking each other's commands — and `plan-mode/mirror.test.ts` loads both onto one bus to prove the chain end to end (`enter_plan_mode` → `exit_plan_mode` → `plan: 1. …` appears in the list → `task_update` → the statusline reads 1/2).
+- **Two `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by either.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
 - **MCP tool names are namespaced.** `mcp__<server>__<tool>` collides with neither the builtins nor the extensions' own tools; names past 64 characters are truncated with a hash suffix, which stays inside the tool-name limit the model APIs enforce while keeping truncated names distinguishable.
 - **Three extensions read theme tokens that pi's schema does not define** (`toolDiffAddedBg`, `toolDiffRemovedBg`, `bashOutput`) and degrade quietly when a theme omits them.

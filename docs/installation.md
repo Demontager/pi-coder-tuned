@@ -53,7 +53,8 @@ Expected visible results of a successful load:
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ normal` / `⏸ plan` / `▶ n/N executing` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts (`destructive-guard`).
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 

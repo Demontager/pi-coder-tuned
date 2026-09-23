@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **25 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **26 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -58,7 +58,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses. |
 | [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd, and prunes `[Context]`/`[Prompts]`/`[Themes]` from the startup list. |
 | [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time. |
-| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. |
+| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. Doubles as plan mode's only progress table while a plan executes: approved steps are mirrored in as `plan: n. …` entries and the statusline's `▶ n/N` reads them back. |
 | [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
 | [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. |
@@ -69,7 +69,8 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`below-editor-after-statusline.ts`](extensions/below-editor-after-statusline.ts) | Moves `belowEditor` widgets underneath the statusline. |
 | [`folder-history.ts`](extensions/folder-history.ts) | Persists command history per working directory and injects it into the editor's native ↑/↓. |
 | [`theme-command.ts`](extensions/theme-command.ts) | `/theme` with live preview: arrow keys preview, Enter persists, Esc cancels. |
-| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode (normal → plan → execute): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning, `exit_plan_mode` submits the plan for approval, `[DONE:n]` advances the steps. |
+| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode (normal → plan → execute): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning, `exit_plan_mode` submits the plan for approval. On approval the steps are mirrored into `simple-task`, which becomes the single progress table — `[DONE:n]` is kept as an equivalent alias for `task_update`. |
+| [`destructive-guard/`](extensions/destructive-guard/) | A `tool_call` safety gate that inspects arguments **before** execution: delete targets in `bash`/`powershell` are judged against the protected-root / ancestor / fallback / derived-path rules, and dangerous delete code inside `write`/`edit` content is caught too (the "write the script now, run it later" hole a command check cannot see). Block rejects outright, confirm asks once in the TUI and fails closed without one. `/destructive-guard` shows the mode and this session's counts. |
 | [`init-command.ts`](extensions/init-command.ts) | Claude Code style `/init`: update `CLAUDE.md`, else `AGENTS.md`, else create `AGENTS.md`. |
 | [`clear-command.ts`](extensions/clear-command.ts) | `/clear` as an alias of `/new`. |
 | [`exit-command.ts`](extensions/exit-command.ts) | `exit`, `quit` or `bye` on an otherwise empty prompt quits pi; `/exit` too. |
@@ -82,7 +83,7 @@ All three are laid out side by side in the [palette reference](https://raw.githa
 
 ### Commands
 
-`/ask` `/bash-preview` `/bash-timeout` `/clear` `/exit` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/tasks` `/theme`
+`/ask` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -94,6 +95,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | --- | --- | --- |
 | `PI_AUTO_DEFAULT_MODEL=off` | on | Do not persist model switches to `settings.json`. |
 | `PI_BASH_STREAM=on` | off | Use pi's native streaming for bash instead of the collapse path. |
+| `PI_DESTRUCTIVE_GUARD` | `on` | `block` rejects the confirm tier too, `notify` only reports what it would have caught, `off` disables the gate. |
 | `PI_FENCELESS_CODE=off` | on | Keep Markdown code fences. |
 | `PI_LOGO=off` | on | Do not install the startup header. |
 | `PI_PLAN_MODE=off` | on | Disable plan mode entirely (`PI_PLAN_MODE_AUTO=off` only disables the model's `enter_plan_mode` tool). |
@@ -135,16 +137,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 25 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 26 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 839 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 953 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 839 tests
+npm test        # node --test, 953 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

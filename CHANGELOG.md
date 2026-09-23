@@ -2,6 +2,33 @@
 
 All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
 
+## 2.1.1 — 2026-09-23
+
+Snapshot sync: a new **destructive-guard** extension gates deletes before any tool runs, plan mode stops drawing its own progress table and mirrors its steps into `simple-task` instead, and the global `AGENTS.md` gains the destructive-action and blast-radius discipline. The extension count moves 25 → 26 and the suite 839 → 953 tests.
+
+### Added
+
+- **`extensions/destructive-guard/`** — a `tool_call` hook that inspects arguments **before** execution and rejects dangerous deletes. Two gates: delete-shaped commands (`rm` / `unlink` / `shred` / `truncate`, `find … -delete`, `find … -exec rm`, `git clean -fdx`, `rsync --delete`, PowerShell `Remove-Item`) have their targets judged in three tiers — block (fewer than two path components, a protected root, an ancestor of one), confirm (system trees, VCS store roots, fallback-carried targets, computed targets) and ok; and the **content** of `write` / `edit` / `multiedit` / `apply_patch` is scanned for the same shapes, closing the "write the script now, run it later" hole a command check cannot see. `block` refuses outright, `confirm` asks once in the TUI and fails closed without one. `PI_DESTRUCTIVE_GUARD` offers `on` / `block` / `notify` / `off`, and `/destructive-guard` prints the mode plus this session's checked / blocked / confirmed / allowed / notified counts. It is the direct answer to the `rm -rf /` incident the upstream handbook describes. 81 assertions across three test files; `targets.ts` and `writes.ts` are pure logic with no pi imports.
+- **`extensions/simple-task/plan-mirror.ts`** — the single contract between plan-mode and simple-task: event names (`plan-mode:sync-tasks`, `simple-task:state`), the `plan: n. ` mirror prefix, and the rebuild rules. Both extensions take the contract from this one file; plan-mode statically imports it, so the two must be installed together. Covered by `plan-mirror.test.ts` (17 cases).
+- **`extensions/plan-mode/mirror.test.ts`** — an integration test that loads both extensions onto one event bus and runs the whole chain: `enter_plan_mode` → `exit_plan_mode` → `plan: 1. …` appears in the task list → `task_update` → the statusline reads 1/2 (7 cases).
+
+### Changed
+
+- **`extensions/plan-mode/`** — on plan approval the steps are **mirrored into simple-task** (id = step number) and plan-mode drops its own `plan-steps` widget; the statusline's `▶ n/N` reads the mirrored state back, and `[DONE:n]` in prose survives as an equivalent alias for `task_update`. The reason is measured: in one real execution round the model called `task_update` 17 times and never wrote a single `[DONE:n]`, so a marker-only counter stayed at `▶ 0/10` forever. Three follow-up fixes: state restore reads `getBranch()` rather than `getEntries()`, so a plan discarded on another branch no longer comes back to life; the mirror is re-pushed based on whether it still exists, and cleared on re-planning; and the execute-phase injection now teaches the two-step `task_update` (`pending → in_progress → done`) instead of colliding with the global "never straight to done" rule. The suite grows 165 → 181 assertions.
+- **`extensions/simple-task/`** — serves the mirror: it answers `plan-mode:sync-tasks` with full-state broadcasts, self-heals before serving (so a reopened session does not lose hand-built tasks), keeps mirror entries and hand-built tasks in separate id spaces (a colliding hand-built task is bumped above `nextAvailableId`), and omits the `● N tasks (…)` widget header when the list contains mirrored entries — the same totals are already in the statusline.
+- **`config/AGENTS.md`** — resynced from the snapshot: the `## Uncertainty` section (look before assuming, decide by reversibility, plan-mode entry), a rewritten `## Destructive actions` (never derive a delete target, never let a fallback reach a delete, a deny-list assertion, temp roots are for creating in), and a `## Blast radius` class table.
+- **`docs/handbook.zh.md`** — resynced verbatim from the snapshot README; it now documents the mirror contract's four load-bearing rules and the destructive-guard install line.
+- **English documentation** updated for every change above: [README](README.md) (extension table, commands, switches, counts), [docs/extensions.md](docs/extensions.md) (a new `destructive-guard` section, the plan-mode mirror rules, the simple-task mirror role, two new interaction bullets, the switch table), [docs/installation.md](docs/installation.md) (the `/destructive-guard` check) and [docs/development.md](docs/development.md) (counts).
+
+### Unchanged
+
+- No other extension, theme or config file moved: the snapshot diff was exactly the files listed above. `config/settings.json` still differs from the snapshot only in the three removed model-selection keys.
+
+### Notes
+
+- The suite grows from **839 to 953 tests**: 81 destructive-guard, 16 plan-mode (the 7-case mirror integration test plus 9 new index wiring cases) and 17 simple-task plan-mirror cases, ~38 s wall time.
+- `plan-mode` and `simple-task` must now be installed together (plan-mode statically imports the contract module); `recap` and `simple-task` already shared that requirement through `gap.ts`.
+
 ## 2.1.0 — 2026-09-22
 
 Snapshot sync: a Claude Code style **plan mode** arrives as a new extension, the bash and read blocks lose their backgrounds and gain a `• ` status dot, `pi-coder-summer-night` is replaced by `pi-coder-1337`, `/recap` becomes idempotent, and the two older themes drop the `vars` entries nothing references any more. The extension count moves 24 → 25 and the suite 651 → 839 tests. The sync also removed the stale `themes/pi-coder-summer-night.json` that a plain `cp -R` had been leaving behind since 2.0.0.

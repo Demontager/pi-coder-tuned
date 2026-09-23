@@ -64,6 +64,14 @@ import {
 } from "./plan-text.ts";
 import { STATUS_KEY, STEPS_WIDGET_KEY, formatPlanStatus, formatStepLines } from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
+import {
+	type PlanMirrorItem,
+	type TaskMirrorState,
+	SYNC_TASKS_EVENT,
+	TASK_STATE_EVENT,
+	hasMirrorItems,
+	mirroredDoneSteps,
+} from "../simple-task/plan-mirror.ts";
 
 /** 关掉整个扩展。 */
 const DISABLED = (process.env.PI_PLAN_MODE ?? "").trim().toLowerCase() === "off";
@@ -86,6 +94,14 @@ export default function planMode(pi: ExtensionAPI) {
 	if (DISABLED) return;
 
 	const state: PlanState = initialPlanState();
+	/**
+	 * simple-task 最近一次广播回来的状态（契约见 `../simple-task/plan-mirror.ts`）。
+	 *
+	 * 执行期的进度以它为准：批准计划时步骤被镜像进清单，之后模型用 `task_update` 推进，
+	 * 镜像回来的状态就是状态行的真相源。undefined 表示本会话里没装 simple-task ——
+	 * 那时退回自己的 `[DONE:n]` 计数（仍然比假装有进度强）。
+	 */
+	let mirrorState: TaskMirrorState | undefined;
 	/** 最近一次 ctx：onTerminalInput 回调拿不到 ctx，而 shift+tab 需要它。 */
 	let currentCtx: ExtensionContext | undefined;
 	/** 会话替换（/clear、/new、/resume）期间旧 ctx 会失效；渲染失败一律吞掉。 */
@@ -109,19 +125,103 @@ export default function planMode(pi: ExtensionAPI) {
 	function render(ctx: ExtensionContext | undefined): void {
 		if (!ctx?.hasUI) return;
 		try {
-			ctx.ui.setStatus(STATUS_KEY, formatPlanStatus(ctx.ui.theme, state));
-			ctx.ui.setWidget(STEPS_WIDGET_KEY, formatStepLines(ctx.ui.theme, state, visibleWidth));
+			ctx.ui.setStatus(STATUS_KEY, formatPlanStatus(ctx.ui.theme, statusSource()));
+			// 执行期**不画自己的步骤清单**：步骤已经镜像进 simple-task 的清单，
+			// 用户手里应该只有一份进度表（Claude Code 也是这个分工：计划批完，
+			// 留下来的只有任务列表）。plan 阶段仍画待批的步骤 —— 那时还没有清单。
+			ctx.ui.setWidget(
+				STEPS_WIDGET_KEY,
+				state.phase === "execute" ? undefined : formatStepLines(ctx.ui.theme, state, visibleWidth),
+			);
 		} catch {
 			// 会话替换窗口里 ctx 可能已被 pi 作废。渲染是尽力而为，绝不能让它打死进程
 			// （本机 user-message-bar 扩展踩过同一个坑，代价是 pi 直接退出）。
 		}
 	}
 
+	/**
+	 * 状态行与 widget 共用的视图：把镜像回来的完成情况合进自己的 steps。
+	 *
+	 * 不能直接改 `state.steps[].done` —— 那是 `[DONE:n]` 的记账（也是 `isPlanComplete`
+	 * 与持久化的依据）；用视图覆盖，两个信号源就不需要互相写对方的状态。
+	 */
+	function statusSource(): PlanState {
+		if (state.phase !== "execute" || mirrorState === undefined) return state;
+		const done = mirroredDoneSteps(mirrorState);
+		if (done.size === 0) return state;
+		return { ...state, steps: state.steps.map((step) => (done.has(step.step) ? { ...step, done: true } : step)) };
+	}
+
+	/** 当前完成步数（镜像优先，回退到自己的记账）。 */
+	function doneCount(): number {
+		return statusSource().steps.filter((step) => step.done).length;
+	}
+
+	// =========================================================================
+	// 与 simple-task 的镜像（契约见 simple-task/plan-mirror.ts）
+	// =========================================================================
+
+	/**
+	 * 把当前步骤全量发给 simple-task。**只在 execute 阶段发**：批准前用户手里只有待批
+	 * 的计划，还不该多出一份清单（Claude Code 也是批准后才建任务列表）。
+	 *
+	 * 清空走 `clearMirror()` —— 刻意不写「phase 不是 execute 就发空数组」：那样执行完毕
+	 * 回到 normal 时会顺手把清单抹掉，用户反而看不到刚跑完的 ✔ 列表。
+	 */
+	function syncMirror(): void {
+		if (state.phase !== "execute") return;
+		const items: PlanMirrorItem[] = state.steps.map((step) => ({
+			step: step.step,
+			text: step.text,
+			done: step.done,
+		}));
+		emitMirror(items);
+	}
+
+	/** 放弃计划（退出 plan / 打回重拟 / 重新进 plan）：把镜像从清单里清掉。 */
+	function clearMirror(): void {
+		emitMirror([]);
+	}
+
+	function emitMirror(items: PlanMirrorItem[]): void {
+		try {
+			pi.events.emit(SYNC_TASKS_EVENT, items);
+		} catch {
+			// 事件总线不可用不致命：镜像只是显示层的唯一进度表，不参与持久化
+		}
+	}
+
+	/**
+	 * 镜像状态回来：只要"完成了几步"真的变了就重绘并检查收尾。
+	 *
+	 * `persist()` 也跟上 —— `/resume` 后步骤仍是完成的，否则重开会话时状态行会回退
+	 * （镜像本身也会掉，因为 simple-task 的清单纯属显示层）。
+	 */
+	function applyMirrorState(incoming: TaskMirrorState): void {
+		const before = mirrorState;
+		mirrorState = incoming;
+		if (state.phase !== "execute") return;
+
+		const done = mirroredDoneSteps(incoming);
+		const beforeDone = mirroredDoneSteps(before);
+		const changed =
+			done.size !== beforeDone.size || [...done].some((step) => !beforeDone.has(step));
+		if (!changed) return;
+
+		// 镜像认下来了就写进自己的记账（否则 `[DONE:n]` 与镜像会各说各话，
+		// 而 `isPlanComplete` 只看 state.steps）。这条 persist **不回推镜像**：
+		// 变化本来就是镜像带回来的，回推只会多一条没人要的全量快照。
+		const marked = applyDoneSteps(state, [...done]);
+		if (marked > 0) persist({ syncMirror: false });
+		render(currentCtx);
+		if (isPlanComplete(state)) completePlan(currentCtx);
+	}
+
 	// =========================================================================
 	// 持久化（只在会话条目里，不碰工作区）
 	// =========================================================================
 
-	function persist(): void {
+	function persist(options: { syncMirror?: boolean } = {}): void {
 		const payload: PersistedState = {
 			phase: state.phase,
 			steps: state.steps,
@@ -129,10 +229,24 @@ export default function planMode(pi: ExtensionAPI) {
 			toolsBeforePlan: state.toolsBeforePlan,
 		};
 		pi.appendEntry(ENTRY_TYPE, payload);
+		// 持久化是唯一的状态变更出口：顺手把镜像同步一次，两边的"完成了几步"
+		// 就不会因为某条分支忘了发事件而漂移。
+		// 唯一的例外是镜像自己带回来的进度 —— 那次变化本来就是从镜像来的，回推只会
+		// 多一条没人要的全量快照（回调里传 `syncMirror: false`）。
+		if (options.syncMirror !== false) syncMirror();
 	}
 
+	/**
+	 * 只认当前分支上的最新记录。
+	 *
+	 * 用 getBranch() 而不是 getEntries()：后者返回**全量**条目（`session-manager.js` 的
+	 * `fileEntries.filter(...)`），包含 rewind / fork / 分支导航之后被丢弃的分支 —— 用它
+	 * 会让一条已经不上分支的计划在下次启动时复活（实测：活动分支上没有任何计划，状态行却
+	 * 显示 `▶ 0/1 executing`）。pi 的 docs/extensions.md 也要求用 getBranch() 重建
+	 * 分支敏感状态。
+	 */
 	function restore(ctx: ExtensionContext): void {
-		const entries = ctx.sessionManager.getEntries();
+		const entries = ctx.sessionManager.getBranch();
 		for (let index = entries.length - 1; index >= 0; index -= 1) {
 			const entry = entries[index] as { type?: string; customType?: string; data?: PersistedState };
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE || !entry.data) continue;
@@ -147,6 +261,10 @@ export default function planMode(pi: ExtensionAPI) {
 			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
 			pi.setActiveTools(planToolSet(state.toolsBeforePlan));
 		}
+		// execute 态恢复后重建镜像：simple-task 的清单是**进程内**状态，重开 pi 就没了，
+		// 而计划本身还在。它那边的 `reconstruct` 只在 session_start 跑，那时我们还没发；
+		// 所以这里主动推一次全量快照，之后它的广播会带回真实完成情况。
+		if (state.phase === "execute") syncMirror();
 	}
 
 	// =========================================================================
@@ -164,6 +282,10 @@ export default function planMode(pi: ExtensionAPI) {
 		const before = pi.getActiveTools();
 		Object.assign(state, enterPlan(state, before));
 		pi.setActiveTools(planToolSet(before));
+		// 执行期再次进 plan = 重新规划：旧计划的镜像条目必须一起清掉，否则屏幕上是
+		// 「状态行 ⏸ plan + 清单里的旧计划」，两个方案同屏。（`leave()` 也会清，
+		// 但它只覆盖退出路径。）
+		clearMirror();
 		persist();
 		render(ctx);
 		if (ctx?.hasUI) {
@@ -181,6 +303,9 @@ export default function planMode(pi: ExtensionAPI) {
 		Object.assign(state, cancelPlan(state));
 		state.toolsBeforePlan = undefined;
 		pi.setActiveTools(tools);
+		// 用户主动退出 = 放弃这个计划：清单里的镜像条目一起清掉
+		// （persist() 里的自动同步只认 execute，这里必须显式发）。
+		clearMirror();
 		persist();
 		render(ctx);
 		if (notify && ctx?.hasUI) ctx.ui.notify("已退出 plan mode，写权限恢复。", "info");
@@ -219,6 +344,13 @@ export default function planMode(pi: ExtensionAPI) {
 		currentCtx = undefined;
 		inputUnsubscribe?.();
 		inputUnsubscribe = null;
+	});
+
+	/** simple-task 广播回来的清单状态（进度真相源）。 */
+	pi.events.on(TASK_STATE_EVENT, (data) => {
+		const incoming = data as TaskMirrorState | undefined;
+		if (!incoming || !Array.isArray(incoming.items)) return;
+		applyMirrorState(incoming);
 	});
 
 	/**
@@ -384,13 +516,16 @@ export default function planMode(pi: ExtensionAPI) {
 			Object.assign(state, approvePlan(state));
 			state.toolsBeforePlan = undefined;
 			pi.setActiveTools(tools);
+			// persist() 里就会把步骤镜像给 simple-task（唯一进度表），
+			// 同时清掉自己上次广播的镜像状态 —— 接着靠它回传的真实状态算进度。
+			mirrorState = undefined;
 			persist();
 			render(ctx);
 			return {
 				content: [
 					{
 						type: "text",
-						text: `用户已批准计划，写权限已恢复。按顺序执行，每完成一步在回复里带上 \`[DONE:n]\`（n 是下面的序号）：\n\n${planList}`,
+						text: `用户已批准计划，写权限已恢复。步骤已同步到会话任务清单（#1..#${steps.length}），那是唯一的进度表：每步开始前 \`task_update #n → in_progress\`，做完再 \`task_update #n → done\`（或者按老习惯在回复里带 \`[DONE:n]\`，它等价于直接标 done）。\n\n${planList}`,
 					},
 				],
 				details: { accepted: true, steps: state.steps },
@@ -478,9 +613,25 @@ export default function planMode(pi: ExtensionAPI) {
 		return changed ? { message: { ...event.message, content: next } } : undefined;
 	});
 
+	/**
+	 * 每轮开始前按「镜像还在不在」重推一次。
+	 *
+	 * 判据必须看**清单里还有没有镜像条目**，不能看「自己有没有 done 步」：模型违规
+	 * `task_set` 或 `/tasks clear` 会整体冲掉镜像，而那时自己往往一个 done 步都没有 ——
+	 * 旧判据会让镜像永远回不来，状态行冻在 `▶ 0/N`。反过来，已有 done 步时旧判据把镜像
+	 * 塞回模型的新清单，同屏又是两段清单一份数字。
+	 *
+	 * `turn_start` 在上一轮的任务工具调用**之后**、本轮 LLM 请求之前，正好是重推点。
+	 */
+	pi.on("turn_start", async () => {
+		if (state.phase !== "execute") return;
+		if (mirrorState && hasMirrorItems(mirrorState.items)) return;
+		syncMirror();
+	});
+
 	/** 全部步骤完成：报一句、状态回 normal、工具表还原。 */
 	function completePlan(ctx: ExtensionContext | undefined): void {
-		const done = countDoneSteps(state);
+		const done = Math.max(countDoneSteps(state), doneCount());
 		const total = state.steps.length;
 		pi.sendMessage(
 			{ customType: "plan-complete", content: `**计划执行完毕** ✓ ${done}/${total} 步。`, display: true },
@@ -492,6 +643,7 @@ export default function planMode(pi: ExtensionAPI) {
 		state.pending = undefined;
 		state.toolsBeforePlan = undefined;
 		pi.setActiveTools(tools);
+		// 账清了就不再同步镜像（persist() 只认 execute）—— 列表留在屏幕上供用户回看。
 		persist();
 		render(ctx);
 	}

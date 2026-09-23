@@ -81,12 +81,17 @@ interface LoadedExtension {
 	/** 测试挂上去的：真实的活动工具数组（runtime.getActiveTools 读的就是它）。 */
 	__activeTools: string[];
 	__runtime: RuntimeLike;
+	/** 测试挂上去的：模拟 simple-task 广播一次状态快照。 */
+	__emitTaskState: (data: unknown) => void;
 }
 
 /** 默认活动工具：含 pi 的写工具与两个模拟的扩展/ MCP 工具。 */
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "ls", "task_set", "mcp__x__y"];
 
-function createTestBus(): { emit: (channel: string, data: unknown) => void; on: (channel: string, handler: (data: unknown) => void) => () => void } {
+function createTestBus(rec?: Recorder): {
+	emit: (channel: string, data: unknown) => void;
+	on: (channel: string, handler: (data: unknown) => void) => () => void;
+} {
 	const handlers = new Map<string, Set<(data: unknown) => void>>();
 	return {
 		on(channel, handler) {
@@ -98,6 +103,7 @@ function createTestBus(): { emit: (channel: string, data: unknown) => void; on: 
 			};
 		},
 		emit(channel, data) {
+			rec?.emits.push({ channel, data });
 			for (const handler of [...(handlers.get(channel) ?? [])]) handler(data);
 		},
 	};
@@ -125,11 +131,15 @@ async function loadExtension(
 	// 用 pi 自己的加载器把扩展装好，拿到它共用的那个 runtime，再把 action 方法接上。
 	// 于是测试走的是扩展真实会调用的那条路（`pi.setActiveTools()` 会打到我们接的录制器），
 	// 而不是另造一个假 pi 对象 —— 假的 pi 无法验证「扩展调的到底是不是 pi 的 API」。
-	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, createTestBus());
+	const bus = createTestBus(rec);
+	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, bus);
 	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
+	// 测试用：模拟 simple-task 广播状态快照（正式契约见 simple-task/plan-mirror.ts）。
+	(extension as unknown as { __emitTaskState: (data: unknown) => void }).__emitTaskState = (data) =>
+		bus.emit("simple-task:state", data);
 
 	const active: string[] = [...DEFAULT_TOOLS];
 	Object.assign(loaded.runtime, {
@@ -185,6 +195,8 @@ interface Recorder {
 	toolSets: string[][];
 	entries: Array<{ customType: string; data: unknown }>;
 	messages: Array<{ content: string }>;
+	/** 扩展广播出去的事件（plan-mode → simple-task 的镜像同步）。 */
+	emits: Array<{ channel: string; data: unknown }>;
 }
 
 interface ContextOptions {
@@ -194,7 +206,7 @@ interface ContextOptions {
 	confirmResult?: boolean;
 	/** 已经存在的活动工具（默认一份含扩展工具的清单）。 */
 	activeTools?: string[];
-	/** sessionManager.getEntries() 返回的条目。 */
+	/** sessionManager 返回的条目；`getBranch()` 与 `getEntries()` 都取它。 */
 	entries?: unknown[];
 	flagValues?: Map<string, unknown>;
 }
@@ -207,7 +219,10 @@ function makeContext(extension: LoadedExtension, recorder: Recorder, options: Co
 		hasUI: options.hasUI ?? true,
 		cwd: "/repo",
 		isIdle: () => options.idle ?? true,
-		sessionManager: { getEntries: () => options.entries ?? [] },
+		sessionManager: {
+			getEntries: () => options.entries ?? [],
+			getBranch: () => options.entries ?? [],
+		},
 		ui: {
 			theme: {
 				fg: (_color: string, text: string) => text,
@@ -265,7 +280,7 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 }
 
 function recorder(): Recorder {
-	return { statuses: [], widgets: [], notifies: [], toolSets: [], entries: [], messages: [] };
+	return { statuses: [], widgets: [], notifies: [], toolSets: [], entries: [], messages: [], emits: [] };
 }
 
 function handlerOf(extension: LoadedExtension, name: string): Handler {
@@ -660,6 +675,137 @@ test("[DONE:n] 推进进度、从助手消息里清掉；全部完成自动回�
 	}
 });
 
+// =============================================================================
+// 与 simple-task 的镜像（唯一进度表）
+// =============================================================================
+
+/** 取最后一次发往 simple-task 的镜像快照。 */
+function lastMirror(rec: Recorder): Array<{ step: number; text: string; done: boolean }> | undefined {
+	const hit = [...rec.emits].reverse().find((e) => e.channel === "plan-mode:sync-tasks");
+	return hit ? (hit.data as Array<{ step: number; text: string; done: boolean }>) : undefined;
+}
+
+/** 模拟 simple-task 广播回来的状态（带 `plan:` 前缀的镜像条目）。 */
+function taskState(items: Array<{ step: number; status: "pending" | "in_progress" | "done" }>) {
+	return {
+		items: items.map((item) => ({ id: item.step, text: `plan: ${item.step}. 步骤`, status: item.status })),
+	};
+}
+
+test("批准计划时把步骤镜像给 simple-task，且不再画自己的步骤 widget", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+
+		// plan 阶段待批时仍由自己画（enter 时还没有步骤，所以是 undefined；提交后才出现）
+		rec.widgets.length = 0;
+		rec.emits.length = 0;
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+
+		assert.deepEqual(
+			lastMirror(rec),
+			[
+				{ step: 1, text: "改 plan.ts", done: false },
+				{ step: 2, text: "补测试", done: false },
+			],
+			"批准后应把全量步骤镜像出去（simple-task 据此建 #1..#2）",
+		);
+		assert.ok(
+			rec.widgets.includes("plan-steps=2"),
+			`提交待批时应自己画步骤，实际 ${JSON.stringify(rec.widgets)}`,
+		);
+		assert.equal(
+			rec.widgets.at(-1),
+			"plan-steps=<undefined>",
+			`批准（execute）后不该再画自己的步骤清单（只有一份进度表），实际 ${JSON.stringify(rec.widgets)}`,
+		);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("task_update 的进度通过 simple-task 广播回来驱动状态行", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		assert.match(rec.statuses.at(-1) ?? "", /0\/2/, "刚批准时是 0/2");
+
+		// simple-task 广播「第 1 步完成」：状态行必须跟着走，且不需要模型写 [DONE:n]
+		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "in_progress" }]));
+		assert.match(rec.statuses.at(-1) ?? "", /1\/2/, `状态行应显示 1/2，实际 ${rec.statuses.at(-1)}`);
+
+		// 全部完成 → 自动收尾、回 normal、工具还原
+		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "done" }]));
+		assert.ok(rec.messages.some((m) => m.content.includes("执行完毕")), "全部完成应报一句");
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ normal/, "完成后回到 normal 模式指示");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("手建任务不推进计划进度（id 撞上步号也不算）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+
+		extension.__emitTaskState({ items: [{ id: 1, text: "手建的任务", status: "done" }] });
+		assert.match(rec.statuses.at(-1) ?? "", /0\/2/, `手建任务不该被当成计划的第 1 步，实际 ${rec.statuses.at(-1)}`);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("[DONE:n] 仍会推进，并把带标记的进度重新镜像出去", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		rec.emits.length = 0;
+
+		await messageEnd(
+			extension,
+			{ message: { role: "assistant", content: [{ type: "text", text: "好了 [DONE:1]" }] } },
+			harness.ctx,
+		);
+
+		assert.match(rec.statuses.at(-1) ?? "", /1\/2/, `[DONE:1] 应推进到 1/2，实际 ${rec.statuses.at(-1)}`);
+		assert.equal(lastMirror(rec)?.[0]?.done, true, "推进后要重发镜像，让任务清单同步");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("退出 plan 时清掉镜像（手建任务保留在 simple-task 那边）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		rec.emits.length = 0;
+
+		harness.ctx.__feedInput("\x1b[Z"); // 退出
+		assert.deepEqual(lastMirror(rec), [], "退出时应广播空快照清掉镜像");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
 test("没带标记的助手消息不改写、不推进", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
@@ -865,6 +1011,74 @@ test("上次改绑过（已绑到 fallback）时启动也静默", { skip, timeou
 		assert.deepEqual(rec.notifies, [], "已经是 fallback 绑定了，不该提示");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
+		workspace.cleanup();
+	}
+});
+
+test("执行期重新进 plan 时清掉镜像（状态行与清单不再各说各话）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		// 单扩展环境里没有 simple-task 的 task_update，用它的广播代替（等价于「第 1 步完成」）
+		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "pending" }]));
+		rec.emits.length = 0;
+
+		await callTool(extension, "enter_plan_mode", { reason: "重新规划" }, harness.ctx);
+
+		assert.deepEqual(lastMirror(rec), [], "重进 plan 时应广播空快照清掉旧镜像");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("模型违规 task_set 清掉镜像后，turn_start 会把镜像重新推回去", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		// 模拟模型重建了清单（镜像条目被冲掉），此时自己还没有任何 done 步
+		extension.__emitTaskState({ items: [{ id: 1, text: "模型自己写的", status: "pending" }] });
+		rec.emits.length = 0;
+
+		await handlerOf(extension, "turn_start")({}, harness.ctx);
+
+		assert.ok(
+			(lastMirror(rec)?.length ?? 0) > 0,
+			`镜像不在清单里时 turn_start 应重推（旧判据「自己没有 done 步就不推」会让状态行冻死在 0/N），实际 ${JSON.stringify(lastMirror(rec))}`,
+		);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("镜像驱动的推进不产生多余的全量快照（回声 persist 被跳过）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		rec.entries.length = 0;
+		rec.emits.length = 0;
+
+		// simple-task 广播「第 1 步完成」→ plan-mode 记账并回写，但不应再触发一次 syncMirror
+		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "pending" }]));
+
+		assert.equal(rec.entries.length, 1, `应只写 1 条 plan-mode 快照，实际 ${rec.entries.length}`);
+		assert.equal(
+			rec.emits.filter((e) => e.channel === "plan-mode:sync-tasks").length,
+			0,
+			"进度由镜像驱动时不该回推镜像（回声）",
+		);
+	} finally {
 		workspace.cleanup();
 	}
 });

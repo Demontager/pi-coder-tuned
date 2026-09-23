@@ -103,7 +103,7 @@ describe("注入上下文", () => {
 		assert.match(context, /ask_user_question/, "要告诉模型可以用它问用户");
 	});
 
-	it("execute 阶段只列剩余步骤", () => {
+	it("execute 阶段只列剩余步骤，并点名任务清单是唯一进度表", () => {
 		const context = buildExecuteContext([
 			{ step: 1, text: "第一步", done: true },
 			{ step: 2, text: "第二步", done: false },
@@ -112,6 +112,10 @@ describe("注入上下文", () => {
 		assert.ok(!context.includes("第一步"));
 		assert.match(context, /2\. 第二步/);
 		assert.match(context, /3\. 第三步/);
+		// 主路径是 task_update，`[DONE:n]` 作为等价别名保留
+		assert.match(context, /task_update/);
+		assert.match(context, /唯一/);
+		assert.match(context, /不要 task_set/);
 		assert.match(context, /\[DONE:n\]/);
 	});
 
@@ -122,5 +126,23 @@ describe("注入上下文", () => {
 		]);
 		assert.match(context, /^5\. 五$/m);
 		assert.match(context, /^9\. 九$/m);
+	});
+
+	it("execute 阶段示例里的步号取自剩余步骤的第一条，且是两步走（in_progress → done）", () => {
+		const context = buildExecuteContext([
+			{ step: 4, text: "四", done: true },
+			{ step: 7, text: "七", done: false },
+		]);
+		assert.match(context, /task_update #7 → in_progress/, "开始做之前先标 in_progress");
+		assert.match(context, /task_update #7 → done/, "做完再标 done");
+		// 全局 AGENTS.md 的 `Never move an item straight from pending to done`：
+		// 注入文本必须教两步，否则模型跟着更近的这条指令跳步（实测跳步率 50%）。
+		// 判据：每个 `task_update #n → X` 都必须有配对的 in_progress 在前。
+		const updates = [...context.matchAll(/task_update #(\d+) → (\w+)/g)].map((m) => [m[1], m[2]]);
+		assert.deepEqual(
+			updates,
+			[["7", "in_progress"], ["7", "done"]],
+			`注入文本应恰好教两步，实际 ${JSON.stringify(updates)}`,
+		);
 	});
 });

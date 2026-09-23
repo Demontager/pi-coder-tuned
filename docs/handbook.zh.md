@@ -1,7 +1,7 @@
 # Pi Coding Agent 全局配置模板
 
 pi（`@earendil-works/pi-coding-agent`）的全局配置与扩展脚本快照，作为本机 pi 环境的模板标准。
-本机装的是 pi **0.85.1** + `pi-web-access` **0.29.0** + `pi-subagents` **0.68.0**。
+本机装的是 pi **0.87.1** + `pi-web-access` **0.30.0** + `pi-subagents` **0.70.1**。
 
 pi 是接入本网关的第四个客户端：它走 `/v1/messages`（Anthropic Messages API），因此和 Claude Code
 一样绑定 **claude 路由**的模型。快照里只有一个自定义 provider `litellm-any`，指向本机 996 端口的
@@ -22,6 +22,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json`（**已失效的遗留配置**：旧 npm statusline 包专用，留着只为随时换回那个包） |
 | `extensions/*.ts` | `~/.pi/agent/extensions/` |
 | `extensions/<name>/` | 同上（子目录形式：`<目录>/index.ts` 作入口，pi 支持 `extensions/*/index.ts`） |
+| `extensions/destructive-guard/` | 同上（`tool_call` 安全闸，见其 `README.md`） |
 | `themes/*.json` | `~/.pi/agent/themes/`（pi 全局主题目录） |
 
 在仓库根目录执行：
@@ -36,7 +37,7 @@ cp clients/pi/config/web-search.json    ~/.pi/agent/web-search.json
 cp clients/pi/extensions/*.ts           ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/tool-diff          ~/.pi/agent/extensions/   # tool-diff.ts 的纯排版模块（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/prompt-editor     ~/.pi/agent/extensions/   # prompt-editor.ts 的纯逻辑模块（无 index.ts，不会被当成扩展）
-cp -R clients/pi/extensions/simple-task        ~/.pi/agent/extensions/
+cp -R clients/pi/extensions/simple-task        ~/.pi/agent/extensions/   # 兼作 plan-mode 执行期的进度表；plan-mode 静态 import ../simple-task/plan-mirror.ts，两者必须一起装
 cp -R clients/pi/extensions/recap              ~/.pi/agent/extensions/   # 依赖上一行的 gap.ts（跨目录相对 import）
 cp -R clients/pi/extensions/rewind             ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/statusline         ~/.pi/agent/extensions/
@@ -50,6 +51,7 @@ cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bas
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
+cp -R clients/pi/extensions/destructive-guard  ~/.pi/agent/extensions/   # 删除操作安全闸（tool_call 钩子，见 README）
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
@@ -450,11 +452,12 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `init-command.ts` | Claude Code 式 `/init`：`CLAUDE.md` → 否则 `AGENTS.md` → 否则新建 `AGENTS.md` |
 | `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
 | `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
+| `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。自 2026-09-23 起**兼作 plan-mode 执行期的唯一进度表**：批准计划时步骤被镜像成带 `plan: n. ` 前缀的条目，状态行的 `▶ n/N` 读的也是它（契约在 `plan-mirror.ts`）。详见上文 plan mode 一节 |
 | `plan-mode/` | Claude Code 式 plan mode（normal → plan → execute 三态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交计划等用户批准。plan 阶段摘掉 edit/write（**快照-还原**，不动扩展注册的工具）并在 `tool_call` 里拦写类 bash。详见下文 |
 
 ### plan mode（`plan-mode/`）
 
-三态：`normal` → `plan`（只读探索、模型出方案）→ `execute`（批准后按步骤执行，`[DONE:n]` 推进进度，
+三态：`normal` → `plan`（只读探索、模型出方案）→ `execute`（批准后按步骤执行，进度记在任务清单里，
 全部完成自动回 `normal`）。计划只存会话（`appendEntry("plan-mode")`，不进模型上下文、**不写工作区**）。
 
 四个入口：`shift+tab`、`/plan`、`--plan`（启动即进）、模型调 `enter_plan_mode`。
@@ -473,6 +476,29 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 这一格原先归 `simple-task`（那里显示 `✔ 7/7 done`），但**与它自己在输入框上方的 widget 重复**
 （widget 是完整版：`● N tasks (…)` + 逐条清单 + spinner），那个缩略版已删除，格子让给模式指示。
 注意 `simple-task` 的 widget 行**不吃这一格**，所以两者不会再抢显示位。
+
+**执行期只有一份清单，而且它是 simple-task 那份。**（2026-09-23 改，起因是两个真实问题：
+执行时状态行与 widget 各出一份清单；而 `▶ 0/10 executing` 从不更新。）现在的分工：
+
+| 阶段 | 清单在哪 | `▶ n/N` 的数字从哪来 |
+| --- | --- | --- |
+| plan（待批） | plan-mode 自己的 widget（`plan-steps`）—— 那时还没有任何任务清单 | `⏸ plan · N steps`，不报进度 |
+| execute（已批准） | **simple-task 的清单**（步骤镜像进去，id = 步号）；plan-mode 把 `plan-steps` 置 `undefined` | 镜像回来的状态（模型调 `task_update`，或写 `[DONE:n]`） |
+| 全部完成 | 清单留在屏幕上（用户要回看刚跑完的 ✔） | 模式回 `⏵ normal` |
+| 中途退出 / 重拟 | 清掉镜像条目，用户手建的任务保留 | 回 `normal` |
+
+镜像契约在 `simple-task/plan-mirror.ts`（两端共用的唯一一份）：plan-mode 发
+`plan-mode:sync-tasks`（全量 `{step,text,done}[]`，空数组 = 清掉），simple-task 回
+`simple-task:state`（全量 `{id,text,status}[]`）。镜像条目文案是 `` `plan: <步号>. <步骤>` ``，
+plan-mode 靠这个前缀认领条目 —— **别把前缀当成装饰改掉**，否则 `task_get` 里的 `#1` 会变成
+普通任务、状态行的数字会退回 0/N。为什么不再让 plan-mode 自己记进度：`[DONE:n]` 是模型往
+**散文里**写的标记，实测（本次会话日志）一轮 17 次 `task_update` 里 `[DONE:n]` 一次没写，
+状态行就永远停在 0；`task_update` 是结构化工具调用，漏不了。`[DONE:n]` 保留为**等价别名**
+（`plan-text.ts` 的 `extractDoneSteps`），两个入口改的是同一份状态。
+
+**镜像清单不画自己的头部。** `widget.ts` 检测到清单里有镜像条目时不输出
+`● N tasks (…)` 那一行 —— 同一段「共 N 个、完了几个」已经在 statusline 说了，一行屏幕里
+重复两遍只是噪音（手建清单仍照旧画头部）。
 
 **模式指示固定在第二行行首**（`statusline/line.ts` 的 `STATUS_PRIORITY`）。不要改回「按注册顺序」：
 第二行是超长只截断不折行，而路径 / checkpoint 计数会越长越长 —— 放尾部时一条长路径就能把它挤到
@@ -515,13 +541,27 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 
 ### 跨扩展 / 跨文件
 
+- **plan-mode ⇄ simple-task 的镜像契约只有一份：`simple-task/plan-mirror.ts`**（事件名、前缀、
+  `rebuildTasks` 重建规则都在那里）。两个扩展通过 `pi.events` 互通，**不互相 import、不互相调用
+  命令**（两者都能单独 `/reload`）—— 唯一例外是 plan-mode 从 `../simple-task/` import 了
+  这个契约模块，因为“两份契约”必然漂移。事件名/载荷对不上是这条链路最容易坏的地方，所以有一个
+  集成测试把两个扩展装进同一个总线跑完整链路：`plan-mode/mirror.test.ts`（`enter_plan_mode` →
+  `exit_plan_mode` → 清单里出现 `plan: 1. …` → `task_update` → 状态行变 1/2）。
+  四条不要改：① 空数组的契约是「清掉镜像」而不是「没变化」；② 镜像条目的 `id` 就是步号，
+  `rebuildTasks` 不会给它换号（换了就找不到对应关系）——**与步号撞号的手建任务会被顺延
+  到 nextAvailableId 之上**，这是保住「id = 步号」这条承诺的必要代价；③ 同步是**全量快照**，
+  不是增量 —— 两个扩展都会重放会话，增量丢一条就永久错位；④ **镜像快照随 simple-task 的
+  会话条目一起持久化**，`/resume` 不依赖两个扩展的 `session_start` 顺序（目录字母序里
+  plan-mode 在前，靠事件顺序会丢任务）。
 - **statusline 第二行（扩展 status 区）的显示位分配**：顺序由 `statusline/line.ts` 的
   `STATUS_PRIORITY` 决定 —— `plan-mode`（模式指示）**强制行首**，其余按注册顺序跟在后面：
   `cwd-statusline`（完整路径）、`rewind`（`◆ N checkpoints`），限 5 条。
   把模式指示放行首是因为第二行超长只截断不折行，它跟在会变长的路径后面会被挤掉；
   而注册顺序取决于目录字母序，太脆。
   `simple-task` **不再占**这个区（它曾经在这里显示 `✔ n/N`，与自己在输入框上方的 widget 重复，
-  已删除）—— 改回去之前先想想是不是又造了一份重复信息。
+  已删除）—— 改回去之前先想想是不是又造了一份重复信息。状态行里 `▶ n/N` 的 N 与数字来自
+  simple-task（见上文），所以这个区与那份清单是**两个不重复的口径**：一个说模式与进度比，
+  一个逐条列步骤。
 - **`simple-task/gap.ts` 的「看邻居」是靠*渲染邻居*实现的**：它没有枚举别人 widget 的接口，
   只能从 TUI 根往下找到装着自己的 Container，再看紧邻兄弟面向自己那一侧的渲染结果。于是
   `recap` 反过来渲染 `simple-task` 时就是**互递归**（无保护时实测递归到 depth 61+ 才被栈拦住）——
@@ -538,7 +578,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   30s 兜底（`mcp` 握手 20s 上限也在这个窗口里，因为 `Runner.emit()` 串行 await，字母序在前的 `mcp` 先跑）。
   ② **换会话窗口**由 `footer-guard.ts` 重放上一帧压住（有旧状态可留，比留白更好）。两个开关独立：
   `PI_STATUSLINE_BOOT_SUPPRESS=off` / `PI_STATUSLINE_FREEZE=off`。
-  补丁打的是包根导出的 `FooterComponent` —— 实测（0.85.1 bundle 形态，A/B pty 捕获，两次只差这一处）
+  补丁打的是包根导出的 `FooterComponent` —— 实测（0.87.1 bundle 形态，A/B pty 捕获，两次只差这一处）
   它**就是** pi 自己 `new` 出来那个类：临时改成返回 `["PROBE-FOOTER-MARKER"]` 时屏幕上真的出现这一行，
   关掉开关后内置 footer 照旧。
 - **`statusline/footer-guard.ts` 与 `startup-logo/header-guard.ts` 是同一套机制的两份**（接管容器的
@@ -709,10 +749,14 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
   `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，
   只有 `index.ts` 接线 —— 所以整条 MCP 链路（含真实 spawn 子进程）都能 `node --test` 覆盖。
-- **`AGENTS.md` 自设 8000 字符预算**（当前 **7996 字符** ≈ 1999 tokens，落在盘上是 8028 字节，余量仅 4 字符）：
-  pi 本身没有上限 —— 0.85.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
+- **`AGENTS.md` 自设 9600 字符预算**（当前 **9392 字符** ≈ 2348 tokens，落在盘上是 9438 字节，余量 208 字符）：
+  pi 本身没有上限 —— 0.87.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
   9500 字符处仍被模型逐字读回；7400 那条是自设的每请求固定开销预算，已为 skill 优先级与 shell 卫生
   三条规则放宽到 8000，随后又为 Communication 节的「失败/跳过/与预期不符须置于报告首句」一条占满。
+  9600 这一档是给新增的 `## Uncertainty` 节（issue #8：没有计划文档时的不确定性策略 —— 先查证、按
+  可逆性分三档、会分叉的任务先进 plan mode、两个选项先做判别实验）腾的地方，同时顺手删掉两条重复规则
+  （Persistence 的「good enough」与 Communication 的禁用词清单）；`## Task list` 后来又加了一句
+  「批准后的计划步骤就是当次任务清单」。
   下次再加规则前必须先压缩现有节或再抬上限。
   它是每个会话、每一轮请求都带的固定开销，改完要重开会话才生效（context files 只在 pi 启动时读一次）。
   它只装纯行为规则，刻意剔除全部
