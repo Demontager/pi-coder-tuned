@@ -1,7 +1,23 @@
 /**
  * pi-plan-mode — Claude Code 风格的 plan mode。
  *
- * 三态：normal → plan（只读探索，模型出方案）→ execute（批准后按步骤执行）。
+ * 两态：bypass → plan（只读探索，模型出方案）。与 Claude Code 对齐：
+ *
+ *   - `exit_plan_mode` 的参数是**一份完整方案文本**（cc 的 `ExitPlanMode(plan)` 同形），
+ *     不是一串结构化步骤。
+ *   - 批准后**没有 execute 态**：扩展把方案落成计划文档（`.pi/plans/`，模型自己 write），
+ *     写完即回 bypass、还原写权限，「按文档实施」是一次性交给模型的指令。进度也交还
+ *     模型 —— 它认为该建任务清单就自己 `task_set`，扩展不再镜像步骤、不再记进度。
+ *
+ * ## 审批对话框（三选一）
+ *
+ *   写计划文档并实施   模型把方案写成 .pi/plans/<日期>-<slug>.md，写完自动收尾进实施
+ *   只写计划文档       同上，但收尾指令是「报告路径就停，不要动手」
+ *   打回               留在 plan 态，等用户反馈后重新提交
+ *
+ * 两条批准路线都经过**写文档子态**（`docWriting`，phase 仍是 plan）：`write` 被单独放回
+ * 工具表，但 `tool_call` 钩子把它限死在计划文档那一个路径；`tool_result` 钩子看到这次
+ * write 成功就自动收尾（不需要模型再调一次 exit_plan_mode）。
  *
  * ## 入口
  *
@@ -12,7 +28,7 @@
  *                  ~/.pi/agent/keybindings.json 里的 app.thinking.cycle 改绑到 ctrl+shift+t
  *                  （只在该键仍是 pi 默认值时改；用户自己配过就尊重用户的选择）。
  *   /plan          手动切（等价于 shift+tab）
- *   /plan-status   看当前状态与步骤
+ *   /plan-status   看当前状态
  *   --plan         启动即进 plan mode
  *   自动进入       注册 enter_plan_mode 工具 —— 模型判断任务偏大时自己调用，
  *                  这就是 Claude Code 的机制（不是关键词启发式）
@@ -21,57 +37,50 @@
  *
  *   1. 工具集：进 plan 时把 edit / write / powershell 从活动工具里摘掉，退出时按
  *      进入前的快照**原样还原**。本机 pi 的工具表里有二十多个扩展动态注册的工具，
- *      硬编码白名单会把它们全吃掉，所以快照-还原是唯一安全的做法。
+ *      硬编码白名单会把它们全吃掉，所以快照-还原是唯一安全的做法。写文档子态单独
+ *      放回 write（`planModeToolSet(active, true)`）。
  *   2. tool_call 钩子：写类 bash（重定向 / rm / git commit / npm install …）不管在不在
- *      工具表里都被拦，拒绝原因作为工具错误结果回给模型。判定细节见 plan.ts。
+ *      工具表里都被拦；写文档子态里 write 只许写计划文档那一个路径。拒绝原因作为
+ *      工具错误结果回给模型。判定细节见 plan.ts。
  *
  * 这是给配合的模型用的护栏，不是沙箱 —— 见 plan.ts 文件头的取舍说明。
  *
  * ## 计划落地
  *
- * 全在会话里：计划经 `exit_plan_mode` 的工具参数进来，进度存 `pi.appendEntry("plan-mode")`
- * （不进模型上下文、不写工作区），状态行与步骤 widget 走 setStatus / setWidget。工作区里
- * 不会多出任何文件。
+ * 状态存 `pi.appendEntry("plan-mode")`（不进模型上下文）；计划文档写进工作区的
+ * `.pi/plans/`（被 .gitignore 排除 —— 计划是过程产物）。除此之外工作区不会多出任何东西。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
+	type PlanDocMode,
 	type PlanState,
-	type PlanStep,
-	applyDoneSteps,
-	approvePlan,
 	cancelPlan,
-	countDoneSteps,
+	completeDocWrite,
+	enterDocWriting,
 	enterPlan,
 	initialPlanState,
 	inspectBashCommand,
-	isPlanComplete,
 	planModeToolSet,
 	rejectPlan,
 	restoredToolSet,
 	submitPlan,
 } from "./plan.ts";
 import {
-	buildExecuteContext,
+	buildDocWriteContext,
+	buildDocWrittenMessage,
 	buildPlanModeContext,
-	extractDoneSteps,
-	stripDoneMarkers,
+	buildRejectedMessage,
+	truncatePlanForDialog,
 } from "./plan-text.ts";
-import { STATUS_KEY, STEPS_WIDGET_KEY, formatPlanStatus, formatStepLines } from "./render.ts";
+import { buildPlanDocPath } from "./plan-doc.ts";
+import { STATUS_KEY, formatPlanStatus } from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
-import {
-	type PlanMirrorItem,
-	type TaskMirrorState,
-	SYNC_TASKS_EVENT,
-	TASK_STATE_EVENT,
-	hasMirrorItems,
-	mirroredDoneSteps,
-} from "../simple-task/plan-mirror.ts";
 
 /** 关掉整个扩展。 */
 const DISABLED = (process.env.PI_PLAN_MODE ?? "").trim().toLowerCase() === "off";
@@ -83,25 +92,46 @@ const EXIT_TOOL = "exit_plan_mode";
 /** 会话里持久化状态的 custom entry 类型。 */
 const ENTRY_TYPE = "plan-mode";
 
+/** 审批对话框的三个选项（顺序即默认选中顺序：第一项是推荐路线）。 */
+const CHOICE_EXECUTE = "写计划文档并实施";
+const CHOICE_DOC_ONLY = "只写计划文档";
+const CHOICE_REJECT = "打回";
+
 interface PersistedState {
 	phase: PlanState["phase"];
-	steps: PlanStep[];
-	pending?: PlanStep[];
+	pending?: string;
 	toolsBeforePlan?: string[];
+	docMode?: PlanDocMode;
+	docWriting?: boolean;
+	pendingDocPath?: string;
+	planSummary?: string;
+}
+
+/**
+ * 把落盘条目里的 phase 收敛到当前联合类型，认不出的一律当 `"bypass"`。
+ *
+ * 白名单式判定兜住一切历史值：2026-09-23 的 `normal` → `bypass` 改名、2026-09-24 删掉
+ * 的 `execute` 态（旧会话恢复出来当 bypass —— 那次批准没有留下任何扩展持有的状态，
+ * 直接放行不会丢东西）。
+ */
+function normalizePhase(value: unknown): PlanState["phase"] {
+	return value === "plan" ? "plan" : "bypass";
+}
+
+/** 落盘条目里的 docMode 同样白名单式收敛：认不出的当没选过。 */
+function normalizeDocMode(value: unknown): PlanDocMode | undefined {
+	return value === "execute-with-doc" || value === "doc-only" ? value : undefined;
+}
+
+/** 落盘条目里的 pending：2026-09-24 之前是步骤数组，现在只认字符串（旧计划丢弃）。 */
+function normalizePending(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 export default function planMode(pi: ExtensionAPI) {
 	if (DISABLED) return;
 
 	const state: PlanState = initialPlanState();
-	/**
-	 * simple-task 最近一次广播回来的状态（契约见 `../simple-task/plan-mirror.ts`）。
-	 *
-	 * 执行期的进度以它为准：批准计划时步骤被镜像进清单，之后模型用 `task_update` 推进，
-	 * 镜像回来的状态就是状态行的真相源。undefined 表示本会话里没装 simple-task ——
-	 * 那时退回自己的 `[DONE:n]` 计数（仍然比假装有进度强）。
-	 */
-	let mirrorState: TaskMirrorState | undefined;
 	/** 最近一次 ctx：onTerminalInput 回调拿不到 ctx，而 shift+tab 需要它。 */
 	let currentCtx: ExtensionContext | undefined;
 	/** 会话替换（/clear、/new、/resume）期间旧 ctx 会失效；渲染失败一律吞掉。 */
@@ -125,115 +155,28 @@ export default function planMode(pi: ExtensionAPI) {
 	function render(ctx: ExtensionContext | undefined): void {
 		if (!ctx?.hasUI) return;
 		try {
-			ctx.ui.setStatus(STATUS_KEY, formatPlanStatus(ctx.ui.theme, statusSource()));
-			// 执行期**不画自己的步骤清单**：步骤已经镜像进 simple-task 的清单，
-			// 用户手里应该只有一份进度表（Claude Code 也是这个分工：计划批完，
-			// 留下来的只有任务列表）。plan 阶段仍画待批的步骤 —— 那时还没有清单。
-			ctx.ui.setWidget(
-				STEPS_WIDGET_KEY,
-				state.phase === "execute" ? undefined : formatStepLines(ctx.ui.theme, state, visibleWidth),
-			);
+			ctx.ui.setStatus(STATUS_KEY, formatPlanStatus(ctx.ui.theme, state));
 		} catch {
 			// 会话替换窗口里 ctx 可能已被 pi 作废。渲染是尽力而为，绝不能让它打死进程
 			// （本机 user-message-bar 扩展踩过同一个坑，代价是 pi 直接退出）。
 		}
 	}
 
-	/**
-	 * 状态行与 widget 共用的视图：把镜像回来的完成情况合进自己的 steps。
-	 *
-	 * 不能直接改 `state.steps[].done` —— 那是 `[DONE:n]` 的记账（也是 `isPlanComplete`
-	 * 与持久化的依据）；用视图覆盖，两个信号源就不需要互相写对方的状态。
-	 */
-	function statusSource(): PlanState {
-		if (state.phase !== "execute" || mirrorState === undefined) return state;
-		const done = mirroredDoneSteps(mirrorState);
-		if (done.size === 0) return state;
-		return { ...state, steps: state.steps.map((step) => (done.has(step.step) ? { ...step, done: true } : step)) };
-	}
-
-	/** 当前完成步数（镜像优先，回退到自己的记账）。 */
-	function doneCount(): number {
-		return statusSource().steps.filter((step) => step.done).length;
-	}
-
 	// =========================================================================
-	// 与 simple-task 的镜像（契约见 simple-task/plan-mirror.ts）
+	// 持久化（只在会话条目里）
 	// =========================================================================
 
-	/**
-	 * 把当前步骤全量发给 simple-task。**只在 execute 阶段发**：批准前用户手里只有待批
-	 * 的计划，还不该多出一份清单（Claude Code 也是批准后才建任务列表）。
-	 *
-	 * 清空走 `clearMirror()` —— 刻意不写「phase 不是 execute 就发空数组」：那样执行完毕
-	 * 回到 normal 时会顺手把清单抹掉，用户反而看不到刚跑完的 ✔ 列表。
-	 */
-	function syncMirror(): void {
-		if (state.phase !== "execute") return;
-		const items: PlanMirrorItem[] = state.steps.map((step) => ({
-			step: step.step,
-			text: step.text,
-			done: step.done,
-		}));
-		emitMirror(items);
-	}
-
-	/** 放弃计划（退出 plan / 打回重拟 / 重新进 plan）：把镜像从清单里清掉。 */
-	function clearMirror(): void {
-		emitMirror([]);
-	}
-
-	function emitMirror(items: PlanMirrorItem[]): void {
-		try {
-			pi.events.emit(SYNC_TASKS_EVENT, items);
-		} catch {
-			// 事件总线不可用不致命：镜像只是显示层的唯一进度表，不参与持久化
-		}
-	}
-
-	/**
-	 * 镜像状态回来：只要"完成了几步"真的变了就重绘并检查收尾。
-	 *
-	 * `persist()` 也跟上 —— `/resume` 后步骤仍是完成的，否则重开会话时状态行会回退
-	 * （镜像本身也会掉，因为 simple-task 的清单纯属显示层）。
-	 */
-	function applyMirrorState(incoming: TaskMirrorState): void {
-		const before = mirrorState;
-		mirrorState = incoming;
-		if (state.phase !== "execute") return;
-
-		const done = mirroredDoneSteps(incoming);
-		const beforeDone = mirroredDoneSteps(before);
-		const changed =
-			done.size !== beforeDone.size || [...done].some((step) => !beforeDone.has(step));
-		if (!changed) return;
-
-		// 镜像认下来了就写进自己的记账（否则 `[DONE:n]` 与镜像会各说各话，
-		// 而 `isPlanComplete` 只看 state.steps）。这条 persist **不回推镜像**：
-		// 变化本来就是镜像带回来的，回推只会多一条没人要的全量快照。
-		const marked = applyDoneSteps(state, [...done]);
-		if (marked > 0) persist({ syncMirror: false });
-		render(currentCtx);
-		if (isPlanComplete(state)) completePlan(currentCtx);
-	}
-
-	// =========================================================================
-	// 持久化（只在会话条目里，不碰工作区）
-	// =========================================================================
-
-	function persist(options: { syncMirror?: boolean } = {}): void {
+	function persist(): void {
 		const payload: PersistedState = {
 			phase: state.phase,
-			steps: state.steps,
 			pending: state.pending,
 			toolsBeforePlan: state.toolsBeforePlan,
+			docMode: state.docMode,
+			docWriting: state.docWriting,
+			pendingDocPath: state.pendingDocPath,
+			planSummary: state.planSummary,
 		};
 		pi.appendEntry(ENTRY_TYPE, payload);
-		// 持久化是唯一的状态变更出口：顺手把镜像同步一次，两边的"完成了几步"
-		// 就不会因为某条分支忘了发事件而漂移。
-		// 唯一的例外是镜像自己带回来的进度 —— 那次变化本来就是从镜像来的，回推只会
-		// 多一条没人要的全量快照（回调里传 `syncMirror: false`）。
-		if (options.syncMirror !== false) syncMirror();
 	}
 
 	/**
@@ -241,39 +184,41 @@ export default function planMode(pi: ExtensionAPI) {
 	 *
 	 * 用 getBranch() 而不是 getEntries()：后者返回**全量**条目（`session-manager.js` 的
 	 * `fileEntries.filter(...)`），包含 rewind / fork / 分支导航之后被丢弃的分支 —— 用它
-	 * 会让一条已经不上分支的计划在下次启动时复活（实测：活动分支上没有任何计划，状态行却
-	 * 显示 `▶ 0/1 executing`）。pi 的 docs/extensions.md 也要求用 getBranch() 重建
-	 * 分支敏感状态。
+	 * 会让一条已经不上分支的计划在下次启动时复活。pi 的 docs/extensions.md 也要求用
+	 * getBranch() 重建分支敏感状态。
 	 */
 	function restore(ctx: ExtensionContext): void {
 		const entries = ctx.sessionManager.getBranch();
 		for (let index = entries.length - 1; index >= 0; index -= 1) {
 			const entry = entries[index] as { type?: string; customType?: string; data?: PersistedState };
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE || !entry.data) continue;
-			state.phase = entry.data.phase ?? "normal";
-			state.steps = entry.data.steps ?? [];
-			state.pending = entry.data.pending;
+			state.phase = normalizePhase(entry.data.phase);
+			state.pending = normalizePending(entry.data.pending);
 			state.toolsBeforePlan = entry.data.toolsBeforePlan;
+			state.docMode = normalizeDocMode(entry.data.docMode);
+			state.docWriting = entry.data.docWriting === true ? true : undefined;
+			state.pendingDocPath = typeof entry.data.pendingDocPath === "string" ? entry.data.pendingDocPath : undefined;
+			state.planSummary = typeof entry.data.planSummary === "string" ? entry.data.planSummary : undefined;
 			break;
 		}
-		// plan 态恢复后工具表要跟着收回去（工具集本身不进会话条目，按当前表重算）
+		// plan 态恢复后工具表要跟着收回去（工具集本身不进会话条目，按当前表重算）。
+		// 写文档子态里 write 要在场。
 		if (state.phase === "plan") {
 			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
-			pi.setActiveTools(planToolSet(state.toolsBeforePlan));
+			pi.setActiveTools(planToolSet(state.toolsBeforePlan, state.docWriting === true));
 		}
-		// execute 态恢复后重建镜像：simple-task 的清单是**进程内**状态，重开 pi 就没了，
-		// 而计划本身还在。它那边的 `reconstruct` 只在 session_start 跑，那时我们还没发；
-		// 所以这里主动推一次全量快照，之后它的广播会带回真实完成情况。
-		if (state.phase === "execute") syncMirror();
 	}
 
 	// =========================================================================
 	// 状态迁移
 	// =========================================================================
 
-	/** plan 阶段的活动工具：pi 的写工具 + 已经没用的 enter_plan_mode 都摘掉。 */
-	function planToolSet(active: readonly string[]): string[] {
-		return planModeToolSet(active).filter((name) => name !== ENTER_TOOL);
+	/**
+	 * plan 阶段的活动工具：pi 的写工具 + 已经没用的 enter_plan_mode 都摘掉。
+	 * `allowWrite` 是写文档子态的开关：单独放回 write（路径仍被 tool_call 钩子限死）。
+	 */
+	function planToolSet(active: readonly string[], allowWrite = false): string[] {
+		return planModeToolSet(active, allowWrite).filter((name) => name !== ENTER_TOOL);
 	}
 
 	function enter(ctx: ExtensionContext | undefined, reason: "user" | "model"): void {
@@ -282,10 +227,6 @@ export default function planMode(pi: ExtensionAPI) {
 		const before = pi.getActiveTools();
 		Object.assign(state, enterPlan(state, before));
 		pi.setActiveTools(planToolSet(before));
-		// 执行期再次进 plan = 重新规划：旧计划的镜像条目必须一起清掉，否则屏幕上是
-		// 「状态行 ⏸ plan + 清单里的旧计划」，两个方案同屏。（`leave()` 也会清，
-		// 但它只覆盖退出路径。）
-		clearMirror();
 		persist();
 		render(ctx);
 		if (ctx?.hasUI) {
@@ -301,18 +242,14 @@ export default function planMode(pi: ExtensionAPI) {
 	function leave(ctx: ExtensionContext | undefined, notify = true): void {
 		const tools = restoredToolSet(state, pi.getActiveTools());
 		Object.assign(state, cancelPlan(state));
-		state.toolsBeforePlan = undefined;
 		pi.setActiveTools(tools);
-		// 用户主动退出 = 放弃这个计划：清单里的镜像条目一起清掉
-		// （persist() 里的自动同步只认 execute，这里必须显式发）。
-		clearMirror();
 		persist();
 		render(ctx);
 		if (notify && ctx?.hasUI) ctx.ui.notify("已退出 plan mode，写权限恢复。", "info");
 	}
 
 	function toggle(ctx: ExtensionContext | undefined): void {
-		if (state.phase === "normal") enter(ctx, "user");
+		if (state.phase === "bypass") enter(ctx, "user");
 		else leave(ctx);
 	}
 
@@ -344,13 +281,6 @@ export default function planMode(pi: ExtensionAPI) {
 		currentCtx = undefined;
 		inputUnsubscribe?.();
 		inputUnsubscribe = null;
-	});
-
-	/** simple-task 广播回来的清单状态（进度真相源）。 */
-	pi.events.on(TASK_STATE_EVENT, (data) => {
-		const incoming = data as TaskMirrorState | undefined;
-		if (!incoming || !Array.isArray(incoming.items)) return;
-		applyMirrorState(incoming);
 	});
 
 	/**
@@ -403,7 +333,7 @@ export default function planMode(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.registerCommand("plan", {
-		description: "切换 plan mode（只读探索 → 批准 → 执行）",
+		description: "切换 plan mode（只读探索 → 批准 → 写计划文档）",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
 			toggle(ctx);
@@ -411,18 +341,26 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan-status", {
-		description: "显示 plan mode 状态与步骤",
+		description: "显示 plan mode 状态",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
-			const phase =
-				state.phase === "normal" ? "normal（未启用）" : state.phase === "plan" ? "plan（只读探索）" : "execute（执行中）";
-			const steps = state.phase === "plan" ? state.pending ?? [] : state.steps;
-			if (steps.length === 0) {
-				ctx.ui.notify(`plan mode: ${phase}\n（还没有步骤）`, "info");
+			if (state.phase === "bypass") {
+				ctx.ui.notify("plan mode: bypass（未启用）", "info");
 				return;
 			}
-			const list = steps.map((step) => `${step.done ? "☑" : "☐"} ${step.step}. ${step.text}`).join("\n");
-			ctx.ui.notify(`plan mode: ${phase}\n${list}`, "info");
+			const lines: string[] = [];
+			if (state.docWriting) {
+				lines.push(`plan mode: plan（写文档子态）`);
+				lines.push(`目标文档：${state.pendingDocPath ?? "（路径丢失）"}`);
+			} else {
+				lines.push("plan mode: plan（只读探索）");
+			}
+			if (state.pending) {
+				const first = state.pending.split("\n").find((line) => line.trim() !== "") ?? "";
+				lines.push(`待批计划：${first.trim().slice(0, 60)}（共 ${state.pending.split("\n").length} 行）`);
+			}
+			if (state.planSummary) lines.push(`总结：${state.planSummary}`);
+			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 
@@ -435,7 +373,7 @@ export default function planMode(pi: ExtensionAPI) {
 			name: ENTER_TOOL,
 			label: "Enter Plan Mode",
 			description:
-				"进入 plan mode（只读探索）。当任务需要改动多个文件、涉及架构或接口选择、或者你还没弄清该怎么做时先调用它，把方案讲清楚再动手。用户也可以自己按 shift+tab 进入。",
+				"进入 plan mode（只读探索）。凡不是极简单的单文件小改，都先进 plan mode：改动多个文件、任何设计/结构/接口/数据形状取舍、重写或重构文档、方案未定——先调用它把方案讲清楚再动手。拿不准就进。用户也可以自己按 shift+tab 进入。",
 			parameters: Type.Object({
 				reason: Type.Optional(Type.String({ description: "为什么这个任务需要先规划（一句话）" })),
 			}),
@@ -463,9 +401,13 @@ export default function planMode(pi: ExtensionAPI) {
 		description:
 			"在 plan mode 里把方案提交给用户审批。调用前不要试图改动任何文件。提交后用户决定批准（进入执行）还是打回（继续规划）。",
 		parameters: Type.Object({
-			steps: Type.Array(Type.Object({ text: Type.String({ description: "这一步具体做什么（改哪个文件、加什么），一句话" }) }), {
-				description: "按顺序排列的计划步骤",
-				minItems: 1,
+			plan: Type.String({
+				description:
+					"给用户看的完整方案（markdown）：要解决什么问题、现状与约束、打算改哪些文件各改什么、怎么验证。不要只写一串步骤标题。",
+			}),
+			slug: Type.String({
+				description:
+					"计划文档的文件名短名：小写英文单词 + 数字 + 连字符，3~5 个词概括这次任务，例如 `m5-entity-runtime`、`plan-doc-english-slug`。不要用中文、空格或标点（会被清洗掉，纯中文会退化成 `plan`）。最终文档名是 `<日期>-<slug>.md`。",
 			}),
 			summary: Type.Optional(Type.String({ description: "方案的一句话总结" })),
 		}),
@@ -477,58 +419,78 @@ export default function planMode(pi: ExtensionAPI) {
 					details: { accepted: false, phase: state.phase },
 				};
 			}
-
-			const steps: PlanStep[] = params.steps
-				.map((step, index) => ({ step: index + 1, text: step.text.trim(), done: false }))
-				.filter((step) => step.text !== "");
-			if (steps.length === 0) {
-				return {
-					content: [{ type: "text", text: "计划是空的。请写出至少一个具体步骤（改哪个文件、做什么）再提交。" }],
-					details: { accepted: false, phase: state.phase },
-				};
-			}
-
-			Object.assign(state, submitPlan(state, steps));
-			persist();
-			render(ctx);
-
-			const planList = steps.map((step) => `${step.step}. ${step.text}`).join("\n");
-			// 非交互运行（`pi -p`）没有对话框可弹：自动批准比死锁好 —— 模型已经规划完，
-			// 卡在这里只会让整个运行白跑。
-			const approved = ctx.hasUI ? await ctx.ui.confirm("批准这个计划？", planList) : true;
-
-			if (!approved) {
-				Object.assign(state, rejectPlan(state));
-				persist();
-				render(ctx);
+			if (state.docWriting) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `用户没有批准这个计划，仍在 plan mode（只读）。请根据用户的下一条反馈调整方案；改好后再调用 ${EXIT_TOOL}。`,
+							text: `现在是写文档子态：请用 write 工具把计划文档写到 \`${state.pendingDocPath}\`。扩展看到这次 write 成功会自动收尾，不需要再调用 ${EXIT_TOOL}。`,
 						},
 					],
+					details: { accepted: false, phase: state.phase, docWriting: true },
+				};
+			}
+
+			const plan = typeof params.plan === "string" ? params.plan.trim() : "";
+			if (plan === "") {
+				return {
+					content: [{ type: "text", text: "计划是空的。请写出完整方案（要解决什么、改哪些文件、怎么验证）再提交。" }],
+					details: { accepted: false, phase: state.phase },
+				};
+			}
+			const summary = typeof params.summary === "string" && params.summary.trim() !== "" ? params.summary.trim() : undefined;
+			// slug 是文档名的来源；模型漏传时退回 summary（清洗后若全是中文仍会落到 `plan`）。
+			const slug = typeof params.slug === "string" && params.slug.trim() !== "" ? params.slug.trim() : summary;
+
+			Object.assign(state, submitPlan(state, plan, summary));
+			persist();
+			render(ctx);
+
+			// confirm/select 对话框是一个不可滚动的 Text，主屏渲染又把视口钉在底部 ——
+			// 长计划必然看不全。截到一屏放得下；被截掉的部分仍写进了终端缓冲区，用户
+			// 上翻可看全文（弹窗期间重绘已冻结）。
+			const dialogPlan = truncatePlanForDialog(
+				plan,
+				{
+					rows: process.stdout.rows || Number(process.env.LINES) || 24,
+					columns: process.stdout.columns || 80,
+				},
+				wrapTextWithAnsi,
+			);
+			// 非交互运行（`pi -p`）没有对话框可弹：自动按推荐路线（写文档并实施）走，
+			// 比死锁好 —— 模型已经规划完，卡在这里只会让整个运行白跑。
+			const choice = ctx.hasUI
+				? await ctx.ui.select(`批准这个计划？\n\n${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
+				: CHOICE_EXECUTE;
+
+			if (choice === undefined || choice === CHOICE_REJECT) {
+				Object.assign(state, rejectPlan(state));
+				persist();
+				render(ctx);
+				return {
+					content: [{ type: "text", text: buildRejectedMessage() }],
 					details: { accepted: false, phase: state.phase },
 				};
 			}
 
-			const tools = restoredToolSet(state, pi.getActiveTools());
-			Object.assign(state, approvePlan(state));
-			state.toolsBeforePlan = undefined;
-			pi.setActiveTools(tools);
-			// persist() 里就会把步骤镜像给 simple-task（唯一进度表），
-			// 同时清掉自己上次广播的镜像状态 —— 接着靠它回传的真实状态算进度。
-			mirrorState = undefined;
+			const docMode: PlanDocMode = choice === CHOICE_DOC_ONLY ? "doc-only" : "execute-with-doc";
+			// 路径在用户选路线的这一刻算好并钉死：撞名判定问的是文件系统，之后重算
+			// 可能得到不同的 -2 后缀，模型就会往另一个文件写。
+			const docPath = buildPlanDocPath({ cwd: ctx.cwd, slug, exists: existsSync });
+			Object.assign(state, enterDocWriting(state, docMode, docPath));
+			// 放回 write（其余写工具仍摘着）；write 的目标路径由 tool_call 钩子限死。
+			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
+			pi.setActiveTools(planToolSet(state.toolsBeforePlan, true));
 			persist();
 			render(ctx);
 			return {
 				content: [
 					{
 						type: "text",
-						text: `用户已批准计划，写权限已恢复。步骤已同步到会话任务清单（#1..#${steps.length}），那是唯一的进度表：每步开始前 \`task_update #n → in_progress\`，做完再 \`task_update #n → done\`（或者按老习惯在回复里带 \`[DONE:n]\`，它等价于直接标 done）。\n\n${planList}`,
+						text: `用户批准了计划，选择「${choice}」。请用 write 工具把计划文档写到 \`${docPath}\` —— 这是本阶段唯一允许写入的文件。扩展看到这次 write 成功会自动收尾并把下一步指令交给你；不需要再调用 ${EXIT_TOOL}。`,
 					},
 				],
-				details: { accepted: true, steps: state.steps },
+				details: { accepted: true, docMode, docPath },
 			};
 		},
 	});
@@ -539,37 +501,55 @@ export default function planMode(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (_event, ctx) => {
 		currentCtx = ctx;
-		if (state.phase === "plan") {
-			// 每轮重收一次：模型可能刚调过 enter_plan_mode，别的扩展也可能改过工具表
-			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
-			pi.setActiveTools(planToolSet(state.toolsBeforePlan));
+		if (state.phase !== "plan") return undefined;
+		// 每轮重收一次：模型可能刚调过 enter_plan_mode，别的扩展也可能改过工具表
+		if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
+		pi.setActiveTools(planToolSet(state.toolsBeforePlan, state.docWriting === true));
+		if (state.docWriting && state.pendingDocPath) {
 			return {
 				message: {
-					customType: "plan-mode-context",
-					content: buildPlanModeContext(ctx.cwd),
+					customType: "plan-doc-write-context",
+					content: buildDocWriteContext(state.pendingDocPath, state.pending ?? "", state.planSummary),
 					display: false,
 				},
 			};
 		}
-		if (state.phase === "execute" && state.steps.some((step) => !step.done)) {
-			return {
-				message: {
-					customType: "plan-execute-context",
-					content: buildExecuteContext(state.steps),
-					display: false,
-				},
-			};
-		}
-		return undefined;
+		return {
+			message: {
+				customType: "plan-mode-context",
+				content: buildPlanModeContext(ctx.cwd),
+				display: false,
+			},
+		};
 	});
 
 	/**
-	 * 第二道闸：写类 bash 一律拦。工具表里摘掉的是 edit / write，bash 还在，
+	 * 第二道闸：写类 bash 一律拦；写文档子态里 write 只许写计划文档那一个路径。
+	 * 工具表里摘掉的是 edit / write / powershell（子态放回 write），bash 还在，
 	 * 所以这道钩子才是拦住 `echo x > f` / `git commit` / `npm install` 的地方。
 	 * 拒绝原因作为工具错误结果回给模型 —— 这就是它能看到的反馈。
 	 */
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (state.phase !== "plan") return undefined;
+
+		if (event.toolName === "write") {
+			// 非子态时 write 根本不在工具表里，这里是双保险
+			if (!state.docWriting) {
+				return {
+					block: true,
+					reason: `plan 阶段不能写文件。先把方案写清楚并用 ${EXIT_TOOL} 提交，等用户批准。`,
+				};
+			}
+			const target = typeof event.input.path === "string" ? event.input.path : "";
+			if (resolve(ctx.cwd, target) !== state.pendingDocPath) {
+				return {
+					block: true,
+					reason: `写文档子态只允许写计划文档本身：目标是 \`${resolve(ctx.cwd, target)}\`，而计划文档的路径是 \`${state.pendingDocPath}\`。请用 write 写到后者；其余文件要等扩展收尾、写权限恢复之后才能动。`,
+				};
+			}
+			return undefined;
+		}
+
 		if (event.toolName !== "bash" && event.toolName !== "powershell") return undefined;
 		const command = typeof event.input.command === "string" ? event.input.command : "";
 		const verdict = inspectBashCommand(command);
@@ -581,96 +561,44 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	/**
-	 * 进度追踪 + 清掉给用户看的 `[DONE:n]` 标记。
+	 * 写文档子态的自动收尾：模型用 write 把计划文档写成功的那一刻，状态回 bypass、
+	 * 工具表还原，收尾指令（实施 / 只报告路径）**替换**掉 write 的普通成功文本 ——
+	 * 模型在同一轮里就能看到接下来该做什么，不需要再调任何工具。
 	 *
-	 * 两件事必须在同一个钩子里按顺序做完：先在**清理前**的原文里提标记，再把清理后的
-	 * 消息还给 pi。反过来（turn_end 里提）就不行了 —— message_end 已经把标记删掉了。
+	 * 判定严格三重：write 工具 + 成功 + 路径正是钉死的那个。write 失败（isError）
+	 * 不收尾，模型自己会看到错误并重试。
 	 */
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("tool_result", async (event, ctx) => {
 		currentCtx = ctx;
-		if (state.phase !== "execute") return undefined;
-		if (event.message.role !== "assistant") return undefined;
+		if (state.phase !== "plan" || !state.docWriting) return undefined;
+		if (event.toolName !== "write" || event.isError) return undefined;
+		const target = typeof event.input.path === "string" ? event.input.path : "";
+		if (resolve(ctx.cwd, target) !== state.pendingDocPath) return undefined;
 
-		const raw = messageText(event.message);
-		const marked = applyDoneSteps(state, extractDoneSteps(raw));
-		if (marked > 0) {
-			persist();
-			render(ctx);
-			if (isPlanComplete(state)) completePlan(ctx);
-		}
-
-		// 清理只影响用户看到与存进会话的文本；进度已经在上面记进状态了
-		const content = event.message.content;
-		if (!Array.isArray(content)) return undefined;
-		let changed = false;
-		const next = content.map((block) => {
-			if (block.type !== "text") return block;
-			const cleaned = stripDoneMarkers(block.text);
-			if (cleaned === block.text) return block;
-			changed = true;
-			return { ...block, text: cleaned };
-		});
-		return changed ? { message: { ...event.message, content: next } } : undefined;
-	});
-
-	/**
-	 * 每轮开始前按「镜像还在不在」重推一次。
-	 *
-	 * 判据必须看**清单里还有没有镜像条目**，不能看「自己有没有 done 步」：模型违规
-	 * `task_set` 或 `/tasks clear` 会整体冲掉镜像，而那时自己往往一个 done 步都没有 ——
-	 * 旧判据会让镜像永远回不来，状态行冻在 `▶ 0/N`。反过来，已有 done 步时旧判据把镜像
-	 * 塞回模型的新清单，同屏又是两段清单一份数字。
-	 *
-	 * `turn_start` 在上一轮的任务工具调用**之后**、本轮 LLM 请求之前，正好是重推点。
-	 */
-	pi.on("turn_start", async () => {
-		if (state.phase !== "execute") return;
-		if (mirrorState && hasMirrorItems(mirrorState.items)) return;
-		syncMirror();
-	});
-
-	/** 全部步骤完成：报一句、状态回 normal、工具表还原。 */
-	function completePlan(ctx: ExtensionContext | undefined): void {
-		const done = Math.max(countDoneSteps(state), doneCount());
-		const total = state.steps.length;
-		pi.sendMessage(
-			{ customType: "plan-complete", content: `**计划执行完毕** ✓ ${done}/${total} 步。`, display: true },
-			{ triggerTurn: false },
-		);
+		const outcome = completeDocWrite(state);
+		if (!outcome) return undefined;
+		// 还原要用旧状态里的快照 —— 必须在 Object.assign 之前取
 		const tools = restoredToolSet(state, pi.getActiveTools());
-		state.phase = "normal";
-		state.steps = [];
-		state.pending = undefined;
-		state.toolsBeforePlan = undefined;
+		Object.assign(state, outcome.state);
 		pi.setActiveTools(tools);
-		// 账清了就不再同步镜像（persist() 只认 execute）—— 列表留在屏幕上供用户回看。
 		persist();
 		render(ctx);
-	}
+		if (ctx.hasUI) ctx.ui.notify(`计划文档已写好：${outcome.docPath}`, "info");
+		return {
+			content: [{ type: "text", text: buildDocWrittenMessage(outcome.docMode, outcome.docPath) }],
+		};
+	});
 
-	// 回到 normal 之后，把陈旧的 plan 上下文从模型上下文里过滤掉（不该看到过期的指令）
+	// 回到 bypass 之后，把陈旧的 plan 上下文从模型上下文里过滤掉（不该看到过期的指令）
 	pi.on("context", async (event) => {
-		if (state.phase !== "normal") return undefined;
+		if (state.phase !== "bypass") return undefined;
 		return {
 			messages: event.messages.filter((message) => {
 				const type = (message as { customType?: string }).customType;
-				return type !== "plan-mode-context" && type !== "plan-execute-context";
+				return type !== "plan-mode-context" && type !== "plan-doc-write-context";
 			}),
 		};
 	});
-}
-
-// =============================================================================
-// 辅助
-// =============================================================================
-
-function messageText(message: unknown): string {
-	const content = (message as { content?: unknown })?.content;
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((block) => (block && typeof block === "object" && "text" in block && typeof block.text === "string" ? block.text : ""))
-		.join("\n");
 }
 
 // =============================================================================

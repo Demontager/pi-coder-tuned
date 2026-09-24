@@ -4,7 +4,7 @@
 
 - pi **0.85.1** or newer. The extensions hook into pi internals (extension UI containers, renderer signatures, `SettingsManager`), so a much older pi may load them and behave oddly.
 - Node **22.19+** (pi's own requirement).
-- macOS or Linux.
+- macOS or Linux. The delete boundary (`bash-command-collapse/sandbox.ts`, `sandbox-boundary/`) needs macOS's `sandbox-exec`; elsewhere it turns itself off with `PI_SANDBOX=off` semantics, and `destructive-guard` is the only remaining delete protection.
 
 ## Install the package
 
@@ -52,9 +52,10 @@ Expected visible results of a successful load:
 - The footer is a single statusline line (`statusline`), plus a second line with the working directory (`cwd-statusline`).
 - The editor shows a `❯ ` prompt (`prompt-editor`).
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
-- A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ normal` / `⏸ plan` / `▶ n/N executing` (`plan-mode`).
-- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
-- `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts (`destructive-guard`).
+- A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ bypass` / `⏸ plan · 4 steps` (`plan-mode`).
+- `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status`, `/sandbox-boundary`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
+- `/sandbox-boundary` prints the delete boundary (project directory, `/tmp`, `/var/folders`) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
+- `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts. That extension is **retired upstream** and shipped here as a reference implementation; it stays quiet unless it has something to say.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.
 
@@ -78,6 +79,7 @@ pi reads these from `~/.pi/agent/`, not from packages, so copy the ones you want
 PKG=~/.pi/agent/npm/node_modules/@bachi/pi-coder
 
 cp "$PKG/config/AGENTS.md"       ~/.pi/agent/AGENTS.md          # global working rules for the agent
+cp "$PKG/config/AGENTS.core.md"  ~/.pi/agent/AGENTS.core.md     # the distilled core `core-rules` re-injects; missing means the extension silently does nothing
 cp "$PKG/config/web-search.json" ~/.pi/agent/web-search.json    # required by pi-web-access
 mkdir -p ~/.pi/agent/themes
 cp "$PKG/themes/"*.json          ~/.pi/agent/themes/            # optional: themes are already loaded from the package
@@ -87,7 +89,7 @@ cp "$PKG/themes/"*.json          ~/.pi/agent/themes/            # optional: them
 
 `config/settings.json` also overwrites your settings wholesale — read [configuration.md](configuration.md) first, because it pins `pnpm` in `npmCommand` and disables pi's built-in double-Escape action.
 
-Then restart pi. Extensions are hot-reloadable in their auto-discovery directories (`/reload`), but `settings.json`, `AGENTS.md` and themes are read once at startup.
+Then restart pi. Extensions are hot-reloadable in their auto-discovery directories (`/reload`), but `settings.json`, `AGENTS.md` and themes are read once at startup. `AGENTS.core.md` is the exception: `core-rules` reads it on every prompt, so an edit takes effect on the next message.
 
 ## Companion packages
 

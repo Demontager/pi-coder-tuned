@@ -4,11 +4,24 @@
  * 不 import pi / pi-tui，所以 `node --test clients/pi/extensions/plan-mode/plan.test.ts`
  * 能直接跑到每个分支。
  *
- * ## 状态机
+ * ## 状态机（两态，与 Claude Code 对齐）
  *
- *   normal ──shift+tab / enter_plan_mode──▶ plan ──exit_plan_mode + 用户批准──▶ execute
- *     ▲                                     │                                    │
- *     └───────── 用户拒绝 / shift+tab ───────┘◀──── 步骤全部 [DONE:n] ────────────┘
+ *   bypass ──shift+tab / enter_plan_mode──▶ plan ──exit_plan_mode + 用户批准──▶ 写文档子态 ──▶ bypass
+ *     ▲                                     │                                        │
+ *     └──────────── 用户打回 / shift+tab ────┘◀───────────── 打回（留在 plan）─────────┘
+ *
+ * **没有 execute 态**：批准之后写权限恢复、状态直接回 bypass，「按计划文档实施」是一次性
+ * 交给模型的指令（工具结果里），不是扩展持有的一个阶段。进度也交还给模型 —— 它认为该建
+ * 任务清单就自己 `task_set`，扩展不再镜像步骤、不再记 `[DONE:n]`（2026-09-24 改，理由见
+ * README 的 plan mode 一节）。
+ *
+ * plan 态里有一个**写文档子态**（`docWriting`）：用户在审批框里选了带文档的路线时进入。
+ * 它刻意**不是第三个 phase** —— phase 仍是 `plan`，所以 bash 写拦截、工具收拢、
+ * `exit_plan_mode` 的入口判定全部照常生效；唯一的区别是每轮注入的上下文换成写文档指令，
+ * 而 `write` 工具被单独放回来（`planModeToolSet(active, true)`），并由 `tool_call` 钩子
+ * 限死只能写计划文档那一个路径。文档写出来（`tool_result` 钩子看到 write 成功）即收尾：
+ * 回 bypass、还原工具表，收尾指令按 `docMode` 分流 —— `execute-with-doc` 让模型接着实施，
+ * `doc-only` 让它只报告文档路径就停。
  *
  * plan 阶段进入时对 `pi.getActiveTools()` 做一次快照，退出时**原样还原**：本机 pi 的
  * 工具表里有二十多个扩展动态注册的工具（mcp / ask_user_question / task_set / task_update …），
@@ -42,9 +55,14 @@ export const WRITE_TOOLS = ["edit", "write", "powershell"] as const;
 /**
  * plan 阶段的活动工具：摘掉写工具，**其余原样保留**。
  * 顺序与去重都保持 pi 自己的口径，避免把动态注册的工具漏掉或重复。
+ *
+ * `allowWrite` 是写文档子态的开关：那时模型需要 `write` 把计划落成文件，但 `edit`
+ * （改现有代码）与 `powershell`（另一个写口子）仍然摘着。放开的那一个 `write` 由
+ * `tool_call` 钩子再限一道：只许写计划文档那个路径。
  */
-export function planModeToolSet(activeTools: readonly string[]): string[] {
+export function planModeToolSet(activeTools: readonly string[], allowWrite = false): string[] {
 	const hidden = new Set<string>(WRITE_TOOLS);
+	if (allowWrite) hidden.delete("write");
 	return [...new Set(activeTools.filter((name) => !hidden.has(name)))];
 }
 
@@ -52,93 +70,140 @@ export function planModeToolSet(activeTools: readonly string[]): string[] {
 // 状态机
 // =============================================================================
 
-export type PlanPhase = "normal" | "plan" | "execute";
+export type PlanPhase = "bypass" | "plan";
 
-export interface PlanStep {
-	/** 计划里的原序号，`[DONE:n]` 指的就是它。 */
-	step: number;
-	text: string;
-	done: boolean;
-}
+/**
+ * 用户在审批对话框里选的路线（两条都写文档，区别只在写完要不要接着实施）。
+ *   - execute-with-doc：写计划文档，然后按文档实施
+ *   - doc-only：只写计划文档，不实施
+ */
+export type PlanDocMode = "execute-with-doc" | "doc-only";
 
 export interface PlanState {
 	phase: PlanPhase;
 	/** plan 阶段：进入前的活动工具快照，退出时原样还原。 */
 	toolsBeforePlan?: string[];
-	/** execute 阶段：正在执行的步骤。 */
-	steps: PlanStep[];
-	/** plan 阶段：模型提交上来、等用户审批的步骤。 */
-	pending?: PlanStep[];
+	/**
+	 * plan 阶段：模型通过 `exit_plan_mode` 提交上来、等用户审批的计划全文（markdown）。
+	 * 与 Claude Code 的 `ExitPlanMode(plan)` 同形 —— 不再是一串结构化步骤：步骤化是
+	 * 「扩展持有进度」时代的产物，进度交还模型之后它只剩展示与生成文件名两个用途。
+	 */
+	pending?: string;
+	/** 用户选了哪条路线（文档写完前记住它，收尾指令据此分流）。 */
+	docMode?: PlanDocMode;
+	/**
+	 * 写文档子态：模型正在把计划落成文档。
+	 * phase 仍是 "plan"（bash 写拦截、工具收拢全部照常），这个布尔是唯一的区分信号：
+	 * 每轮注入的上下文从只读探索换成写文档指令，`write` 被单独放回来。
+	 */
+	docWriting?: boolean;
+	/**
+	 * 写文档子态的目标路径：用户选路线的那一刻算好并落盘。
+	 * 不能每次注入时重算 —— 撞名判定问的是文件系统，`/resume` 后重算可能得到不同的
+	 * `-2` 后缀，模型就会往另一个文件写。算一次、钉死在状态里才是对的。
+	 */
+	pendingDocPath?: string;
+	/**
+	 * 本次提交的 `summary`（模型给的一句话总结）。
+	 * 两个用途：写文档指令里的「方案总结」一行，以及模型漏传 `slug` 时的文档名兜底。
+	 * 跟着落盘：写文档子态里 `/resume` 之后还要靠它算出同一个路径。
+	 */
+	planSummary?: string;
 }
 
 export function initialPlanState(): PlanState {
-	return { phase: "normal", steps: [] };
+	return { phase: "bypass" };
 }
 
-/** 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照）。 */
+/**
+ * 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照）。
+ * 文档相关的字段一并清掉：上一次计划留下的 docMode / docWriting / pendingDocPath /
+ * pending 对新计划没有意义（docWriting 若残留，新一轮会直接注入写文档指令）。
+ */
 export function enterPlan(state: PlanState, activeTools: readonly string[]): PlanState {
 	if (state.phase === "plan") return state;
 	return {
 		phase: "plan",
 		toolsBeforePlan: [...activeTools],
-		steps: [],
 		pending: undefined,
+		docMode: undefined,
+		docWriting: undefined,
+		pendingDocPath: undefined,
+		planSummary: undefined,
 	};
 }
 
-/** 退出 plan 模式回到 normal，工具快照随之清空（还原动作由调用方执行）。 */
+/** 退出 plan 模式回到 bypass，工具快照随之清空（还原动作由调用方执行）。 */
 export function cancelPlan(state: PlanState): PlanState {
 	return {
-		phase: "normal",
-		steps: [],
-		pending: state.pending,
+		phase: "bypass",
+		toolsBeforePlan: undefined,
+		pending: undefined,
+		docMode: undefined,
+		docWriting: undefined,
+		pendingDocPath: undefined,
+		planSummary: undefined,
 	};
 }
 
-/** 模型通过 exit_plan_mode 提交计划，等用户审批。 */
-export function submitPlan(state: PlanState, steps: readonly PlanStep[]): PlanState {
+/** 模型通过 exit_plan_mode 提交计划全文，等用户审批。 */
+export function submitPlan(state: PlanState, plan: string, summary?: string): PlanState {
 	if (state.phase !== "plan") return state;
-	return { ...state, pending: [...steps] };
-}
-
-/** 用户批准：进 execute，待审批的步骤变成执行中的步骤。 */
-export function approvePlan(state: PlanState): PlanState {
-	if (state.phase !== "plan" || !state.pending || state.pending.length === 0) return state;
+	const trimmedSummary = typeof summary === "string" ? summary.trim() : "";
 	return {
-		phase: "execute",
-		steps: state.pending.map((step) => ({ ...step })),
-		pending: undefined,
+		...state,
+		pending: plan,
+		planSummary: trimmedSummary === "" ? undefined : trimmedSummary,
 	};
 }
 
 /**
- * 用户打回：**留在 plan**（不是回 normal），继续等模型改方案。
- * 工具快照与 pending 都留着 —— 下一轮 `exit_plan_mode` 覆盖 pending 即可。
+ * 用户打回：**留在 plan**（不是回 bypass），继续等模型改方案。
+ * 工具快照留着 —— 下一轮 `exit_plan_mode` 覆盖 pending 即可。
+ * 写文档子态的标记一并清掉：打回等于这次提交（含路线选择）作废。
  */
 export function rejectPlan(state: PlanState): PlanState {
 	if (state.phase !== "plan") return state;
-	return { ...state, pending: undefined };
+	return { ...state, pending: undefined, docMode: undefined, docWriting: undefined, pendingDocPath: undefined };
 }
 
-/** execute 阶段标记完成步骤；返回标记了几条（调用方据此决定要不要重绘）。 */
-export function applyDoneSteps(state: PlanState, doneSteps: readonly number[]): number {
-	if (state.phase !== "execute" || doneSteps.length === 0) return 0;
-	const wanted = new Set(doneSteps);
-	let marked = 0;
-	for (const item of state.steps) {
-		if (item.done || !wanted.has(item.step)) continue;
-		item.done = true;
-		marked += 1;
-	}
-	return marked;
+/**
+ * 进写文档子态：phase 留在 "plan"（bash 写拦截与工具收拢全靠它），只翻 docWriting
+ * 开关并记住用户选的路线与目标路径。pending 与工具快照原样保留 —— 文档写完后还要按
+ * 路线分流收尾。已在子态里则原样返回（幂等，不覆盖已钉死的路径）。
+ */
+export function enterDocWriting(state: PlanState, docMode: PlanDocMode, docPath: string): PlanState {
+	if (state.phase !== "plan") return state;
+	if (state.docWriting) return state;
+	return { ...state, docMode, docWriting: true, pendingDocPath: docPath };
 }
 
-export function isPlanComplete(state: PlanState): boolean {
-	return state.phase === "execute" && state.steps.length > 0 && state.steps.every((step) => step.done);
+export interface DocWriteOutcome {
+	/** 收尾后的状态：phase 回到 bypass，文档字段清空。 */
+	state: PlanState;
+	/** 用户选的路线，收尾指令据此分流。 */
+	docMode: PlanDocMode;
+	/** 计划文档的路径（收尾指令里要报给用户与模型）。 */
+	docPath: string;
 }
 
-export function countDoneSteps(state: PlanState): number {
-	return state.steps.filter((step) => step.done).length;
+/**
+ * 写文档子态收尾：计划文档已经落盘（由调用方验过），状态回 bypass。
+ *
+ * 不在子态里（docWriting 为假）返回 undefined —— 那不是收尾。
+ *
+ * **工具表的还原由调用方在拿到返回值之前做**：还原要用的是旧状态里的 `toolsBeforePlan`
+ * 快照，而返回的新状态已经把它清掉了（与 `cancelPlan` 同一条口径）。
+ */
+export function completeDocWrite(state: PlanState): DocWriteOutcome | undefined {
+	if (state.phase !== "plan" || !state.docWriting) return undefined;
+	const docPath = state.pendingDocPath;
+	if (typeof docPath !== "string" || docPath === "") return undefined;
+	return {
+		state: cancelPlan(state),
+		docMode: state.docMode ?? "execute-with-doc",
+		docPath,
+	};
 }
 
 /**

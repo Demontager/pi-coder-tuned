@@ -275,11 +275,11 @@ describe("formatExtensionStatuses", () => {
 		const statuses = new Map([
 			["cwd", " 📁 /Users/bachi/jaylli/litellm-any"],
 			["rewind", "◆ 3 checkpoints"],
-			["plan-mode", "⏵ normal"],
+			["plan-mode", "⏵ bypass"],
 		]);
 		assert.equal(
 			formatExtensionStatuses(plain, gitOf("main", statuses)),
-			"⏵ normal | 📁 /Users/bachi/jaylli/litellm-any | ◆ 3 checkpoints",
+			"⏵ bypass | 📁 /Users/bachi/jaylli/litellm-any | ◆ 3 checkpoints",
 		);
 	});
 
@@ -294,10 +294,10 @@ describe("formatExtensionStatuses", () => {
 	it("priority ordering keeps non-priority keys in registration order", () => {
 		const statuses = new Map([
 			["zebra", "Z"],
-			["plan-mode", "⏵ normal"],
+			["plan-mode", "⏵ bypass"],
 			["alpha", "A"],
 		]);
-		assert.equal(formatExtensionStatuses(plain, gitOf("main", statuses)), "⏵ normal | Z | A");
+		assert.equal(formatExtensionStatuses(plain, gitOf("main", statuses)), "⏵ bypass | Z | A");
 	});
 
 	it("a long cwd no longer pushes the mode indicator out of the five-item budget", () => {

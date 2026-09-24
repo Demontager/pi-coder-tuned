@@ -1,6 +1,6 @@
 # Extensions reference
 
-26 extensions load from this package. Twelve are single files in `extensions/`, fourteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+28 extensions load from this package. Twelve are single files in `extensions/`, sixteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -22,6 +22,7 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/plan-status` | `plan-mode` | — Print the current phase and the plan's steps. |
 | `/recap` | `recap` | — Summarizes the conversation now. |
 | `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
+| `/sandbox-boundary` | `sandbox-boundary` | `forget <path>` \| `clear` \| `allow <path>` — Prints the delete boundary and the persistent allowlist; default form lists both. |
 | `/tasks` | `simple-task` | `status` (default) \| `clear` \| `on` \| `off` |
 | `/theme` | `theme-command` | `[name]` — Without arguments: picker with live preview. |
 
@@ -31,7 +32,7 @@ pi registers one handler per tool name (first registration wins), so each of the
 
 ### `bash-command-collapse.ts` — the `bash` tool
 
-Collapses the command to **2 visual lines** on a single tree: the first line is a status dot `• ` followed by `Run `, the last row ends in `…`, and a `… +N lines` marker follows when source lines are left over; results hang off the same tree, and `└ ` appears **once**, on the first real output line. Command continuation rows and the truncation marker are indented to the `n` of `Run ` — two spaces while the command is starting, `│ ` once it has finished — and only the word `Run` is bold. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. Output preview lines default to 3 and the preview always keeps the command's status line. The extension also tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)).
+Collapses the command to **2 visual lines** on a single tree: the first line is a status dot `• ` followed by `Run `, the last row ends in `…`, and a `… +N lines` marker follows when source lines are left over; results hang off the same tree, and `└ ` appears **once**, on the first real output line. Command continuation rows and the truncation marker are indented to the `n` of `Run ` — two spaces while the command is starting, `│ ` once it has finished — and only the word `Run` is bold. The row hard-wraps at the column budget the way CSS `word-break: break-all` does rather than pre-wrapping whole words: a 78-column path fills the line completely and breaks at the edge. Output preview lines default to 3 and the preview always keeps the command's status line. The extension also tree-indents output, syntax-highlights the command line, and can give bash output its own color through the `bashOutput` theme token ([themes.md](themes.md#bashoutput-in-detail)). Since 2026-09-24 it also **wraps the command in a seatbelt profile** — see [`bash-command-collapse/sandbox.ts`](#bash-command-collapsesandboxts--the-seatbelt-delete-boundary) below; the renderer always shows your command, never the `sandbox-exec` prefix.
 
 The block deliberately carries **no background and no boundary blank lines**: the dot at the head of the command row is the only state marker, in `dim` while running, `toolDiffAdded` on success and `toolDiffRemoved` on failure (the logic is the same one the earlier `▎` bar used). The dot column and the result indentation share one constant, so `Run`, `│` and `└` all sit in column 2 and every body column starts at 4; the left margin is drawn by the extension itself, and both sides subtract it from their width budget. **Only bash loses its background** — every other tool keeps pi's default shell.
 
@@ -41,7 +42,7 @@ A failed command is painted `error` rather than success — both the trailing st
 - `PI_BASH_HIGHLIGHT=off` — disable shell syntax highlighting.
 - `PI_BASH_SPINNER=off` — disable the `●` on running rows (implemented in `working-indicator`).
 
-Two details that look simplified but cannot be: it decides "arguments are still streaming" from `!streaming && !argsComplete && isPartial === true` (both thresholds are required, or `/resume` replays lose the command line entirely), and `isError` must be read from `context`, not `result`, because pi's result renderer is called without that field. `PI_BASH_TREE` is gone: the prefix is a tree unconditionally. The shape and its 22 end-to-end assertions are in [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts), which renders through pi's own loader and `ToolExecutionComponent`.
+Two details that look simplified but cannot be: it decides "arguments are still streaming" from `!streaming && !argsComplete && isPartial === true` (both thresholds are required, or `/resume` replays lose the command line entirely), and `isError` must be read from `context`, not `result`, because pi's result renderer is called without that field. `PI_BASH_TREE` is gone: the prefix is a tree unconditionally. The shape and its 39 end-to-end assertions are in [`bash-command-collapse/render.test.ts`](../extensions/bash-command-collapse/render.test.ts), which renders through pi's own loader and `ToolExecutionComponent`; 9 of the 39 drive the real sandbox and report themselves as **skipped** when nested `sandbox-exec` is unavailable (which it is inside a pi session). There is no switch for the sandbox here — `PI_SANDBOX=off` turns it off for both routes at once.
 
 ### `read-path-collapse.ts` — the `read` tool
 
@@ -184,11 +185,9 @@ A lightweight task list: `task_set`, `task_update`, `task_get` and `/tasks`. Thr
 
 State is written with `pi.appendEntry()`, so it rides the session log and **nothing is written into your repository** — no `.pi/tasks/*.json` to gitignore. Rebuilding reads `ctx.sessionManager.getBranch()`, not `getEntries()`, so branch navigation cannot resurrect a discarded branch's tasks.
 
-Since 2026-09-23 the list **doubles as plan mode's only progress table while a plan executes**: on approval `plan-mode` mirrors its steps in as entries with a `plan: n. ` prefix (the id is the step number), and the statusline's `▶ n/N` reads the mirrored state back. The contract lives in `plan-mirror.ts` — see [`plan-mode/`](#plan-mode--claude-code-style-plan-mode) for the rules.
+Since 2026-09-24 the list is **independent of plan mode**: an approved plan is a document, progress is the model's own business, and the mirror contract, the separate id space and the header suppression that went with it have all been deleted. `/tasks` with no argument or `status` prints the list, `clear` empties it, `on` / `off` toggle the widget.
 
-`/tasks` with no argument or `status` prints the list, `clear` empties it, `on` / `off` toggle the widget.
-
-The widget is the whole feature: the packed `✔ n/N` status it used to also write into the statusline's second row was a duplicate of it, and that slot now belongs to `plan-mode`'s mode indicator. Do not add a second copy of the same information back. One related rule: when the list contains mirrored plan entries the widget **omits its `● N tasks (…)` header** — the same totals are already in the statusline's `▶ n/N`, and a hand-built list keeps its header.
+The widget is the whole feature: the packed `✔ n/N` status it used to also write into the statusline's second row was a duplicate of it, and that slot now belongs to `plan-mode`'s mode indicator. Do not add a second copy of the same information back.
 
 ### `recap/` — conversation summary
 
@@ -247,13 +246,17 @@ Typing `exit`, `quit` or `bye` as the entire prompt quits pi cleanly (sessions a
 
 ### `plan-mode/` — Claude Code style plan mode
 
-Three phases: `normal` → `plan` (read-only exploration, the model writes a plan) → `execute` (the approved steps run, finishing returns to `normal`). The plan lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context and not in the working tree) and is shown as a step widget, so the repository gains no files.
+Two phases: `bypass` → `plan` (read-only exploration, the model writes a plan). **There is no execute phase.** Approval restores write access and returns to `bypass`; "now implement what you just planned" is a one-shot instruction handed to the model, and progress is the model's own business — it builds a task list with `task_set` if it judges the work warrants one. Plan state lives in the session log (`pi.appendEntry("plan-mode")`, not in the model's context), and the plan document is written into `.pi/plans/` in the working directory.
+
+Until 2026-09-24 this was three phases (`bypass` → `plan` → `execute`), where approval mirrored the steps into `simple-task` and tracked `[DONE:n]` markers against them. That whole "the extension owns the progress" mechanism is gone — the mirror contract, the markers, the step widget and the per-turn injection with it — because Claude Code's own `ExitPlanMode(plan)` takes a complete plan text and leaves the task list to the model.
 
 Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `enter_plan_mode` tool.
 
-**While executing, there is exactly one progress table, and it is `simple-task`'s.** On approval the steps are mirrored into the task list (id = step number, text prefixed `plan: n. `), plan-mode drops its own `plan-steps` widget, and the statusline's `▶ n/N` reads the mirrored state back. The model advances it with `task_update`; `[DONE:n]` in prose is kept as an **equivalent alias** that writes the same state. The reason is measured, not theoretical: in one real execution round the model called `task_update` 17 times and never wrote a single `[DONE:n]`, so a marker-only counter stayed at `▶ 0/10` forever. The contract lives in one file, `simple-task/plan-mirror.ts` (event names, prefix, rebuild rules), because two copies of a contract always drift — plan-mode statically imports it from `../simple-task/`, so **the two extensions must be installed together**. Four rules there are load-bearing: an empty snapshot means "clear the mirror", not "no change"; a mirrored entry's id is its step number and a hand-built task that collides with one is bumped above `nextAvailableId`; syncs are **full snapshots**, never deltas (both sides replay the session, and one lost delta misaligns them permanently); and the mirror persists inside simple-task's own session entries, so `/resume` does not depend on which extension's `session_start` runs first.
+**Submitting and approving.** `exit_plan_mode` takes `plan` (the complete markdown for the user — this is what the approval dialog renders), a **required `slug`** (lowercase English plus digits and hyphens, 3–5 words, e.g. `m5-entity-runtime`; the document becomes `.pi/plans/<date>-<slug>.md`, so CJK and punctuation are folded away and a purely Chinese name falls back to `plan`), and an optional `summary` (one line, display only). The dialog offers three answers — **write the plan document and implement it**, **write the document only**, or **reject**. On the first two the model writes the file with the `write` tool while a `tool_call` hook pins that tool to the single approved path, so "plan mode" cannot be used to write anywhere else; a `tool_result` hook notices the successful write and closes the phase itself.
 
-**The mode indicator has a fixed slot**: the head of the statusline's second row, with text in all three phases — `⏵ normal` (painted `toolDiffRemoved`, i.e. the delete-line red, so "full permissions" is visible at a glance), `⏸ plan` / `⏸ plan · 4 steps` (`warning`) and `▶ 2/5 executing` (`accent`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
+The dialog is **truncated to one screen** (`truncatePlanForDialog`), and the height is computed with pi-tui's own `wrapTextWithAnsi`, so it matches the real render including CJK line-breaking; the overflow line reports how many steps are left and points at the terminal scrollback, while the plan text handed to the model is never truncated. This is not cosmetic: pi pins the viewport to the bottom on every repaint and the confirm dialog is a non-scrollable `Text`, so a long plan is guaranteed to be cut off and manually scrolling up is undone by the next repaint.
+
+**The mode indicator has a fixed slot**: the head of the statusline's second row, with text in both phases — `⏵ bypass` (painted `toolDiffRemoved`, i.e. the delete-line red, so "full permissions" is visible at a glance) and `⏸ plan` / `⏸ plan · 4 steps` (`warning`). See [`statusline/`](#statusline--the-footer) for why the slot is pinned.
 
 **Two independent gates, not one:**
 
@@ -264,28 +267,75 @@ Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `en
 
 `shift+tab` is taken from pi's built-in `app.thinking.cycle`. A conflicting `registerShortcut` is skipped by pi's runner, so the key is intercepted with `ctx.ui.onTerminalInput` **before** the editor sees it (only in TUI mode, while idle, and with no extension dialog open) and consumed. Because that displaces the thinking-level cycle, the extension rewrites `app.thinking.cycle` to `ctrl+shift+t` in `~/.pi/agent/keybindings.json` — and only when the key has no binding at all; a user-configured binding is left alone. Matching the key must go through pi-tui's `matchesKey`, not a string compare: `shift+tab` arrives as bare CSI (`\x1b[Z`), as the Kitty protocol's CSI-u (`\x1b[9;2u`) or as xterm's modifyOtherKeys, and pi turns the Kitty protocol on at startup, so a real terminal sends the second form. Pressing `shift+tab` while streaming still cycles the thinking level — plan mode only switches when you are stopped.
 
-Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getEntries()`: the latter returns every entry in the file including branches discarded by `rewind` / fork / branch navigation, so a plan dropped on another branch would come back to life (observed: no plan on the active branch, yet the statusline showed `▶ 0/1 executing`).
+Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getEntries()`: the latter returns every entry in the file including branches discarded by `rewind` / fork / branch navigation, so a plan dropped on another branch would come back to life (observed: no plan on the active branch, yet the statusline showed `▶ 0/1 executing`). A stored `normal` (the old name of `bypass`) is normalized through a whitelist, so an existing session's phase field cannot bring back a phase that no longer exists.
 
 - `PI_PLAN_MODE=off` — disable the extension entirely.
 - `PI_PLAN_MODE_AUTO=off` — keep `shift+tab` and `/plan`, drop the model's `enter_plan_mode` tool.
 
-### `destructive-guard/` — pre-execution delete gate
+### `destructive-guard/` — pre-execution delete gate (**retired**)
+
+> **Retired from the author's live environment on 2026-09-24**, replaced by the seatbelt capability boundary described below. The file, its README and its 109 assertions stay in the package as the reference implementation of the lexical route; nothing else here depends on it, and `PI_DESTRUCTIVE_GUARD=off` disables it if you do not want two delete gates answering at once.
 
 A `tool_call` hook that inspects arguments **before** the tool runs and rejects dangerous deletes. It exists because a one-line `fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true })` destroyed most of this machine's writable paths: the property did not exist, `??` substituted an innocuous-looking default, and `dirname("/tmp")` reduced it to `/`. The prose rules in `AGENTS.md` were already in place and did not help — they constrain what the model decides, not what a script it wrote earlier does at runtime.
 
-**Two gates:**
+**Three gates:**
 
-1. **Delete-shaped commands** (`bash` / `powershell`). Targets are extracted from `rm` / `unlink` / `shred` / `truncate`, `find … -delete` and `find … -exec rm`, `git clean -fdx`, `rsync --delete` and PowerShell `Remove-Item`, then judged in three tiers: **block** (fewer than two path components, a protected root such as `/System`, `/Library`, `/Applications`, `/Users`, `/usr`, `/bin`, `/etc`, `/opt`, `$HOME`, or an ancestor of one), **confirm** (inside a system tree, a VCS store root like `.git`, a target carrying a fallback `??` / `||` / `${X:-y}`, or a target computed by `dirname()` / `$(…)` / a variable), and **ok** for everything else. `/Users/bachi/x/dist`, `/tmp/scratch` and `/usr/local/bin/tsc` all pass.
+1. **Delete-shaped commands** (`bash` / `powershell`). Targets are extracted from `rm` / `unlink` / `shred` / `truncate`, `find … -delete` and `find … -exec rm`, `git clean -fdx`, `rsync --delete` and PowerShell `Remove-Item`, skipping command wrappers (`sudo`, `env`, `nice` …) and descending into inline code (`node -e …`, `sh -c …`, a heredoc fed to an interpreter), then judged in four tiers: **block** (fewer than two path components, a protected root such as `/System`, `/Library`, `/Applications`, `/Users`, `/usr`, `/bin`, `/etc`, `/opt`, `$HOME`, or an ancestor of one; plus the guard's own directory, `~/.pi/agent/AGENTS.md` and the `extensions` / `sessions` / `rewind` subtrees — `self-protection`), **confirm** (inside a system tree, a VCS store root like `.git`, a target carrying a fallback `??` / `||` / `${X:-y}`, a target computed by `dirname()` / `$(…)` / a variable, a target inside `$HOME` but outside the working directory — `outside-workdir`, the rule the second incident needed — and `git reset --hard` / `checkout --` / `restore` / `stash drop|clear` / `branch -D` — `vcs-history-loss`), and **ok** for everything else. `/Users/bachi/x/dist`, `/tmp/scratch` and `/usr/local/bin/tsc` all pass.
 2. **Delete code inside written content** (`write` / `edit` / `multiedit` / `apply_patch`). The dangerous line is often written into a file long before it runs, and the run itself looks harmless (`node verify.mjs`) — gate 1 cannot see it. This gate checks the content being written for the same shapes: a delete API with a fallback target, a target from path arithmetic, a bare root or `..` climb, a shell-variable target, a recursive PowerShell delete with a non-literal target. Comment lines do not count, since they do not execute.
+3. **Before running a script** (`node verify-a.mjs`, `bash deploy.sh`, `./x.mjs`), the **file is read** and put through the same checks. This is the only place that one-line incident could have been caught: "run a script" looks harmless from the command word alone.
 
-A `block` verdict is refused outright and the reason is returned to the model as a tool error. A `confirm` verdict asks once in the TUI and **fails closed without one** — a non-interactive environment refuses rather than proceeding.
+A `block` verdict is refused outright and the reason is returned to the model as a tool error. A `confirm` verdict asks once in the TUI (in plain language — fixed title, the resolved paths, the command it came from and why it was caught; targets past three fold into "and N more") and **fails closed without one** — a non-interactive environment refuses rather than proceeding. A third option asks the model to list the exact paths with a read-only command first.
 
-The judgement is lexical and deliberately does not follow symlinks or do dataflow analysis: it wants to be deterministic, testable and side-effect free. A target passed across functions (`const t = compute(); rmSync(t)`) is not caught, and that residue is what the `AGENTS.md` discipline covers. `targets.test.ts` treats the "must allow" cases as seriously as the "must block" ones — a guard that prompts constantly is a guard nobody keeps on.
+The judgement is lexical and deliberately does not follow symlinks or do dataflow analysis: it wants to be deterministic, testable and side-effect free. A target passed across functions (`const t = compute(); rmSync(t)`) is not caught, and that residue is what the `AGENTS.md` discipline covers — it is also the reason the live environment moved to an OS-enforced boundary. `targets.test.ts` treats the "must allow" cases as seriously as the "must block" ones: 23 everyday commands are regression cases, because a guard that prompts constantly is a guard nobody keeps on.
 
 - `PI_DESTRUCTIVE_GUARD=block` — refuse the confirm tier too.
 - `PI_DESTRUCTIVE_GUARD=notify` — report what it would have caught without blocking; the recommended first day of use.
 - `PI_DESTRUCTIVE_GUARD=off` — disable the gate.
 - `/destructive-guard` — current mode plus this session's checked / blocked / confirmed / allowed / notified counts.
+
+### `bash-command-collapse/sandbox.ts` — the seatbelt delete boundary
+
+The replacement for the lexical route. The insight is that **enumerating dangerous commands is the wrong shape**: the incident was one line in a generated script, and the space of ways to delete something is unbounded. So the boundary is drawn the other way round — the command runs inside `sandbox-exec` with a deny-default profile, and what is *allowed* is enumerated instead:
+
+- reads and network: unrestricted;
+- writes (`file-write*`): globally allowed — a write cannot make an inode disappear, and the reversibility of an overwrite belongs to git and the `AGENTS.md` discipline;
+- **deletes (`file-write-unlink`): denied first, then allowed for the delete roots only** — the project directory, `/tmp`, `/var/folders` and whatever `PI_SANDBOX_EXTRA_WRITE` lists.
+
+A delete outside those roots is refused by the **kernel** (`EPERM`), not by a pattern match, so no command shape escapes it: `rm`, a `node` script, `git clean`, a compiled binary — all hit the same wall. `rename` is covered too, because it unlinks the destination. One consequence is deliberate: a command that tries to delete outside the boundary **fails and has to be rerun**, which is why the extension only asks once per command per session and warns the model that a retry is coming. Non-interactive environments fail closed.
+
+`classifyOutsidePaths` is the one judgement both routes share. It sorts an outside-boundary target into four verdicts — covered by the persistent allowlist, covered by a session exemption, **dangerous**, or **ordinary**. Dangerous means a system root, a `bin` directory, an application install directory, a configuration file or directory, or anything containing a VCS store; dangerous paths are asked about **every time** and only a session-scoped exemption is offered. Ordinary paths are asked once, and "agree and remember" writes the directory range into the persistent allowlist.
+
+- `PI_SANDBOX=off` — disable both the profile and the `apply_patch` gate (also automatic off macOS, where there is no `sandbox-exec`).
+- `PI_SANDBOX_EXTRA_WRITE` — colon-separated extra delete roots, `~` expanded, like `PATH`.
+
+### `bash-command-collapse/allowlist.ts` — the persistent allowlist
+
+`~/.pi/agent/sandbox-allowlist.json` holds the directories the user has confirmed safe (`PI_SANDBOX_ALLOWLIST` moves the file). Remembering a directory means adding it to the profile's `file-write-unlink` allow list, so the delete simply succeeds inside the sandbox while the rest of the command stays supervised.
+
+The store is a `globalThis` singleton on purpose: the bash route and the `apply_patch` route share it, so remembering a directory on one side takes effect on the other in the same session, and the two can never drift into different boundaries. It is **global rather than per-project** — a directory approved in project A is approved in project B — which is the stated intent, not an oversight. Three defences keep it honest: `remember()` only accepts roots that pass `isSafeAllowlistRoot` (never `/`, `$HOME`, `~/.ssh` or anything containing `.git`), `memoryScopeFor` never stores a range shallower than `MIN_ALLOWLIST_DEPTH` (so one confirmation cannot hand over a whole home directory), and the file is filtered again on load, so a hand-edited `"/"` cannot get in. Writes are atomic (temp file + rename). A corrupt, unreadable or unknown-version file degrades to an empty allowlist and **never throws**: the failure direction of a gate whose job is to prompt less must be "ask once more".
+
+### `sandbox-boundary/` — the non-shell half of the boundary
+
+The same boundary for tools that never touch a shell. `write` / `edit` are direct `fs` calls inside the extension process, so no shell profile reaches them — but the only capability the seatbelt profile takes away is `file-write-unlink` outside the boundary, and `write` / `edit` cannot unlink anything. So the boundary only needs one thing here, and only one tool has it: `apply_patch`'s `*** Delete File:` lines. `Update File` and `Add File` are writes and pass.
+
+Two differences from the bash side matter. It runs on the `tool_call` hook, so it rejects **before** execution and knows every target path up front — there is no "run the command, fail, ask, rerun" cost, so "this time only" is simply a pass without remembering. And because it shares `classifyOutsidePaths`, the same allowlist and the same session exemptions with the bash side, remembering on either side covers both.
+
+When a target is already covered by the allowlist it passes silently but emits a `notify`, so "why did it not ask?" has an answer on screen.
+
+- `/sandbox-boundary` prints the delete boundary and the allowlist; `forget <path>` removes one entry, `clear` empties the list, `allow <path>` pre-authorizes a directory.
+- `PI_SANDBOX=off` disables it together with the bash profile, so there is never a state where one side is bounded and the other is not.
+
+### `core-rules/` — keeping the core rules in context
+
+`~/.pi/agent/AGENTS.md` is a **user-level** file that pi renders into `<project_context>` in the system prompt, after the preamble, tools, rules and docs — and in this setup it is followed by a 105 KB project `AGENTS.md`. It is sent on every request and never lost, but it sits in the middle of a giant blob at the very front, so its instruction-following strength decays as the conversation grows. Nothing about it fails; it just gets quieter.
+
+This extension pushes the distilled core back to the end. Codex solves the same problem in a different way, and the design is copied from there: `~/.pi/agent/AGENTS.core.md` is not part of the system prompt but a world-state section, injected as a user-role message, re-sent when it changes, re-injected after a compaction, and placed near the end. In pi the landing spot is even better: a message returned from `before_agent_start` is appended **after** the user message and persisted into the session, so it is the most recent thing in context — closer to the end than Codex's "before the last real user message".
+
+One decision (`decision.ts`) covers all three Codex triggers: scan the model-visible projection for this extension's own messages — absent means the session just started or compaction dropped it, present with a different hash means the content changed, same hash means skip. Nothing is sent when nothing changed. The file is read on every `before_agent_start`, so editing it takes effect on the next prompt — no `/reload`, no restart.
+
+The injected body is the distilled ~2.5 KB core, not the 19 KB file: the destructive-action rules, the blast-radius table, authorization, the plan gate, delegation and the git/shell bottom line. The full rules stay in the system prompt; this is the part that must not decay. **A missing `AGENTS.core.md` makes the extension skip silently** — it is an optional enhancement and should not make pi noisy at startup. It is shipped as [`config/AGENTS.core.md`](../config/AGENTS.core.md).
+
+- `PI_CORE_RULES=off` — disable the extension.
 
 ### `auto-default-model/` — persistent model switches
 
@@ -356,6 +406,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_BASH_STREAM=on` | off | `bash-command-collapse` | Use pi's native streaming for bash instead of the collapse path. |
 | `PI_BASH_TREE=off` | on | `bash-command-collapse` | Disable tree indentation (`│`/`└`) for bash output. **Retired** — the prefix is always a tree, the switch is no longer read. |
 | `PI_BELOW_EDITOR_AFTER_STATUSLINE=off` | on | `below-editor-after-statusline` | Leave `belowEditor` widgets where pi puts them. |
+| `PI_CORE_RULES=off` | on | `core-rules` | Do not re-inject the distilled global rules into the context. |
 | `PI_CWD_ICON` | ` 📁` | `cwd-statusline` | Icon used by the cwd status line. |
 | `PI_CWD_STATUSLINE=off` | on | `cwd-statusline` | Do not print the cwd status line. |
 | `PI_DESTRUCTIVE_GUARD` | `on` | `destructive-guard` | `block` refuses the confirm tier too; `notify` reports what it would have caught without blocking; `off` disables the gate. |
@@ -369,6 +420,9 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_PLAN_MODE=off` | on | `plan-mode` | Disable plan mode entirely. |
 | `PI_PLAN_MODE_AUTO=off` | on | `plan-mode` | Do not register the model's `enter_plan_mode` tool; `shift+tab` and `/plan` still work. |
 | `PI_READ_COLLAPSE=off` | on | `read-path-collapse` | Keep pi's built-in `read` title row. |
+| `PI_SANDBOX=off` | on | `bash-command-collapse`, `sandbox-boundary` | Disable the delete boundary: no seatbelt profile wraps `bash`, and `apply_patch` deletes are not checked. Also off automatically on platforms without `sandbox-exec`. |
+| `PI_SANDBOX_ALLOWLIST` | `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | Path of the persistent allowlist both sides share. |
+| `PI_SANDBOX_EXTRA_WRITE` | — | `bash-command-collapse` | Colon-separated extra delete roots, `~` expanded, like `PATH`. |
 | `PI_SPINNER_COLOR_HOLD` | `19` | `working-indicator` | Frames per color in the spinner cycle. |
 | `PI_SPINNER_RAINBOW=off` | on | `working-indicator` | Disable the rainbow spinner. |
 | `PI_STATUSLINE_BOOT_SUPPRESS=off` | on | `statusline` | Do not silence pi's built-in footer during the boot window, before this statusline is installed. |
@@ -389,8 +443,9 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **`shift+tab` is shared.** `plan-mode` consumes it before the editor sees it and rebinds the thinking-level cycle to `ctrl+shift+t`; while a turn is streaming the key still reaches `app.thinking.cycle`.
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
-- **`plan-mode` imports `simple-task/plan-mirror.ts`.** The mirror contract (event names, the `plan: n. ` prefix, the rebuild rules) is one file on purpose, so the two must be installed together as well. They otherwise communicate only through `pi.events` — never by importing each other's state or invoking each other's commands — and `plan-mode/mirror.test.ts` loads both onto one bus to prove the chain end to end (`enter_plan_mode` → `exit_plan_mode` → `plan: 1. …` appears in the list → `task_update` → the statusline reads 1/2).
-- **Two `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by either.
+- **`sandbox-boundary` imports `bash-command-collapse/sandbox.ts` and `allowlist.ts`.** The bash seatbelt profile and the `apply_patch` gate are two halves of one boundary and share one judgement plus one allowlist singleton, so those three must be installed together; installing `sandbox-boundary` alone would leave it with no boundary and no memory.
+- **`plan-mode` and `simple-task` are independent.** Until 2026-09-24 they shared the `plan-mirror.ts` contract and had to be installed together; an approved plan is now a document and progress is the model's own business, so nothing links them. `plan-mode` still writes the plan file with the `write` tool while its `tool_call` hook pins that path.
+- **Three `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning and pins the `write` tool to the approved plan path; `sandbox-boundary` checks `apply_patch` deletes; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by any of them. The lexical gate and the OS boundary overlap on purpose where they do — one is a pattern match that runs anywhere, the other only exists on macOS.
 - **The theme preview and the theme files are coupled.** `/theme` persists the name it previewed, and the name must match the `theme` field's expectations in [themes.md](themes.md).
 - **MCP tool names are namespaced.** `mcp__<server>__<tool>` collides with neither the builtins nor the extensions' own tools; names past 64 characters are truncated with a hash suffix, which stays inside the tool-name limit the model APIs enforce while keeping truncated names distinguishable.
 - **Three extensions read theme tokens that pi's schema does not define** (`toolDiffAddedBg`, `toolDiffRemovedBg`, `bashOutput`) and degrade quietly when a theme omits them.
@@ -403,7 +458,10 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `~/.pi/agent/rewind/<project-hash>/git` | `rewind` | Shadow git repository with pre-turn snapshots. Never touched by your repository. |
 | `~/.pi/folder-history/<path-with-dashes>.jsonl` | `folder-history` | Command history per working directory. |
 | Session log (via `appendEntry`) | `simple-task` | Task list state; discarded with the session, never written to the repo. |
-| Session log (via `appendEntry`) | `plan-mode` | Plan phase, steps and progress; same lifetime, never written to the repo. |
+| Session log (via `appendEntry`) | `plan-mode` | Plan phase and the plan text; same lifetime, never written to the repo. |
+| `.pi/plans/<date>-<slug>.md` | `plan-mode` | The approved plan document, written into the project by the model (pinned to that one path by a `tool_call` hook). Upstream adds `.pi/` to the project's `.gitignore` — a plan is a working artefact. |
+| `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | The persistent delete allowlist. Machine-local state, an authorization decision rather than configuration, so it is deliberately not in any snapshot. |
+| In memory only | `core-rules` | Nothing — the injected message goes into the session log, and the only in-memory state is the content hash scan. |
 | In memory only | `recap` | The current summary; lost on `/new` or `/resume` by design. |
 | In memory only | `mcp` | Per-server status, the registered tool table and a 20-line diagnostic ring buffer per server. Config files are read, never written. |
 | Nothing | everything else | The remaining extensions are pure display or event wiring. |
@@ -411,5 +469,5 @@ Every switch is an environment variable read at use time, not cached at load, so
 ## Adding, disabling and removing extensions
 
 - **Disable one** — `pi config` lists every resource from packages and local directories with an on/off toggle, in global or project scope. Or set the switch listed above when the extension has one.
-- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, and `simple-task/`, whose `gap.ts` is imported by `recap`.
+- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, plus `simple-task/` (whose `gap.ts` is imported by `recap`) and `bash-command-collapse/` (whose `sandbox.ts` and `allowlist.ts` are imported by `sandbox-boundary`).
 - **Edit one** — work in a checkout and run pi against it; see [development.md](development.md).

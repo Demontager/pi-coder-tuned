@@ -80,6 +80,21 @@ describe("stripQuotes / splitWords / splitSegments", () => {
 		assert.deepEqual(splitWords('rm -rf "/tmp/a b"'), ["rm", "-rf", '"/tmp/a b"']);
 	});
 
+	it("命令替换/变量展开整体算一个词，不被空格切碎", () => {
+		assert.deepEqual(splitWords('rm -rf $(dirname "$LOG")'), ["rm", "-rf", '$(dirname "$LOG")']);
+		assert.deepEqual(splitWords("rm -rf `pwd`/x"), ["rm", "-rf", "`pwd`/x"]);
+		assert.deepEqual(splitWords('rm -rf "${OUT:?}"/dist'), ["rm", "-rf", '"${OUT:?}"/dist']);
+		// 嵌套括号
+		assert.deepEqual(splitWords("rm -rf $(echo $(pwd)/x)"), ["rm", "-rf", "$(echo $(pwd)/x)"]);
+		// 替换内部带引号括号也不乱
+		assert.deepEqual(splitWords('rm -rf $(echo ")")'), ["rm", "-rf", '$(echo ")")']);
+	});
+
+	it("切不碎的命令替换不再产生碎片目标", () => {
+		const sites = extractDeleteSites('rm -rf $(dirname "$LOG")');
+		assert.deepEqual(sites[0]!.targets, ['$(dirname "$LOG")']);
+	});
+
 	it("按 shell 边界切片段且引号感知", () => {
 		assert.deepEqual(splitSegments("a && b || c ; d | e"), ["a", "b", "c", "d", "e"]);
 		assert.deepEqual(splitSegments('echo "a;b" ; ls'), ['echo "a;b"', "ls"]);
@@ -191,7 +206,6 @@ describe("evaluateTarget — 必放行（不误伤）", () => {
 		`${CWD}/node_modules`,
 		`${CWD}/adapter/coverage`,
 		"/tmp/va-abc123",
-		`${HOME}/.cache/nvim`,
 		"/usr/local/bin/tsc",
 	];
 
@@ -201,13 +215,82 @@ describe("evaluateTarget — 必放行（不误伤）", () => {
 		});
 	}
 
-	it("工作目录内的正常清理整条命令放行", () => {
+	it("工作目录内与临时目录的正常清理整条命令放行", () => {
 		assert.equal(caught(`rm -rf ${CWD}/dist`), false);
 		assert.equal(caught(`rm -rf ${CWD}/node_modules`), false);
 		assert.equal(caught("rm -f /tmp/scratch.log"), false);
-		assert.equal(caught(`rm -rf ${HOME}/.cache/nvim`), false);
+		assert.equal(caught("rm -rf /private/tmp/dg-abc123"), false);
 	});
 
+	it("工作目录外、但不在主目录里的具体文件放行（包管理器地盘）", () => {
+		assert.equal(evaluateTarget("/usr/local/bin/tsc", CWD, HOME), undefined);
+		assert.equal(evaluateTarget("/opt/homebrew/lib/x", CWD, HOME), undefined);
+	});
+});
+
+describe("evaluateTarget — 工作目录之外要确认（AGENTS.md 第三条断言）", () => {
+	it("主目录内、工作目录外的路径 → confirm", () => {
+		const finding = evaluateTarget(`${HOME}/.cache/nvim`, CWD, HOME);
+		assert.equal(finding?.verdict, "confirm");
+		assert.equal(finding?.rule, "outside-workdir");
+	});
+
+	it("本次事故的全部损失面都命中 outside-workdir", () => {
+		for (const target of [
+			`${HOME}/.zshrc`,
+			`${HOME}/.gitconfig`,
+			`${HOME}/.zprofile`,
+			`${HOME}/.pi/agent/npm`,
+		]) {
+			const finding = evaluateTarget(target, CWD, HOME);
+			assert.ok(finding, `${target} 应该命中`);
+			assert.equal(finding.rule, "outside-workdir", `${target} 应该是 outside-workdir`);
+		}
+	});
+
+	it("临时目录是“本会话创建”的近似，不弹窗", () => {
+		assert.equal(evaluateTarget("/var/folders/dh/x/T/dg-abc", CWD, HOME), undefined);
+		assert.equal(evaluateTarget(`${HOME}/.pi/agent/../../../tmp/x`, CWD, HOME), undefined);
+	});
+
+	it("工作目录内的路径不命中 outside-workdir", () => {
+		assert.equal(evaluateTarget(`${CWD}/dist`, CWD, HOME), undefined);
+	});
+});
+
+describe("evaluateTarget — 守卫自保护", () => {
+	it("删守卫自己的目录 → block", () => {
+		const finding = evaluateTarget(`${HOME}/.pi/agent/extensions/destructive-guard`, CWD, HOME);
+		assert.equal(finding?.verdict, "block");
+		assert.equal(finding?.rule, "self-protection");
+	});
+
+	it("删全局规则文件 AGENTS.md → block", () => {
+		const finding = evaluateTarget(`${HOME}/.pi/agent/AGENTS.md`, CWD, HOME);
+		assert.equal(finding?.verdict, "block");
+		assert.equal(finding?.rule, "self-protection");
+	});
+
+	it("删 agent 目录下的 extensions / sessions / rewind 子树 → block", () => {
+		for (const target of [
+			`${HOME}/.pi/agent/extensions`,
+			`${HOME}/.pi/agent/sessions`,
+			`${HOME}/.pi/agent/rewind`,
+		]) {
+			const finding = evaluateTarget(target, CWD, HOME);
+			assert.equal(finding?.verdict, "block", `${target} 应该 block`);
+			assert.equal(finding?.rule, "self-protection", `${target} 应该是 self-protection`);
+		}
+	});
+
+	it("仓库里的守卫副本同样受保护", () => {
+		const finding = evaluateTarget(`${CWD}/clients/pi/extensions/destructive-guard`, CWD, HOME);
+		assert.equal(finding?.verdict, "block");
+		assert.equal(finding?.rule, "self-protection");
+	});
+});
+
+describe("读命令不误伤", () => {
 	it("读命令放行", () => {
 		assert.equal(caught("ls -la /usr/local/bin"), false);
 		assert.equal(caught("cat /etc/hosts"), false);

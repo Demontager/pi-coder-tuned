@@ -5,6 +5,7 @@
 | In this package | Destination | Purpose |
 | --- | --- | --- |
 | `config/AGENTS.md` | `~/.pi/agent/AGENTS.md` | The agent's global working rules: persistence, authorization, destructive-action care, shell hygiene, editing and verification rules, communication style. |
+| `config/AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md` | The ~2.5 KB distilled core (`core-rules` re-injects it into the context mid-session). The extension **does nothing, silently**, when this file is missing. |
 | `config/settings.json` | `~/.pi/agent/settings.json` | Everything in the key table below. |
 | `config/web-search.json` | `~/.pi/agent/web-search.json` | `pi-web-access` configuration; one required key (see below). |
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json` | Legacy. See [pi-statusline.json](#pi-statuslinejson-is-legacy). |
@@ -69,7 +70,7 @@ Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and 
 
 ### `config/settings.json` and `config/AGENTS.md`
 
-`config/settings.json` holds the two machine-specific entries above; everything else in it is portable. `config/AGENTS.md` is the agent's global working rules and is not machine-specific at all.
+`config/settings.json` holds the two machine-specific entries above; everything else in it is portable. `config/AGENTS.md` is the agent's global working rules and is not machine-specific at all; `config/AGENTS.core.md` is its distilled core and equally portable, but remember it is **load-bearing**: `core-rules` injects it, and a missing file means that extension is silently absent from a session.
 
 `config/models.json` and `config/mcp.json` are **not** shipped: provider registrations point at a local gateway and the MCP file holds absolute paths of local server executables, so both belong to the machine that runs them. MCP servers are configured in `~/.pi/agent/mcp.json` or a project `.mcp.json`.
 

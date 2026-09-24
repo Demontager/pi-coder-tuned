@@ -357,11 +357,26 @@ theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 them
  */
 
 import type { BashToolOptions, ExtensionAPI, ThemeColor, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Box, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+	ESCALATION_TITLE,
+	boundaryFromEnv,
+	buildSeatbeltProfile,
+	classifyOutsidePaths,
+	extractDeniedPaths,
+	isSandboxEnabled,
+	looksLikeSandboxDenial,
+	memoryScopesFor,
+	sessionScopeFor,
+	wrapWithSandbox,
+	writableRoots,
+	type PathEnv,
+} from "./bash-command-collapse/sandbox.ts";
+import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
 
 /**
  * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
@@ -1487,6 +1502,47 @@ export default function (pi: ExtensionAPI) {
 	// 展开态（ctrl+o）与折叠态走同一套分词，所以开关对两边同时生效。
 	const highlightEnabled = process.env.PI_BASH_HIGHLIGHT?.trim().toLowerCase() !== "off";
 
+	// ## 能力边界（seatbelt 沙箱）开关
+	//
+	// PI_SANDBOX=off 整体关闭；非 darwin 平台自动关闭（没有 sandbox-exec，
+	// 宁可没有这层保护也不要让命令因为找不到二进制而全部失败）。
+	// 注册时读一次：这是个启动期开关，运行中改 env 不该让同一条命令忽而沙箱忽而不沙箱。
+	const sandboxOn = isSandboxEnabled();
+	// 沙箱内用哪个 shell 跑原命令。跟 readShellOptions() 保持一致：用户配了 shellPath 就用它，
+	// 否则 /bin/bash。注意这是**沙箱内**的 shell，与 pi 自己 spawn 的外层 shell 无关。
+	const sandboxShellPath = readShellOptions().shellPath || "/bin/bash";
+	// 本会话已批准在沙箱外重跑的命令。同一条命令不重复问 —— 否则一个循环里
+	// 每次迭代都弹一次框，那就比没有沙箱还烦。按命令原文做键，不跨会话持久化。
+	//
+	// 两层授权上线后这个集合只剩一个用途：**从失败输出里抽不出被拦路径时的兜底**
+	// （`extractDeniedPaths` 返回空 → 猜不出目标就不许进按目录的记忆逻辑，
+	// 退回旧的「按整条命令、会话级问一次、沙箱外重跑」）。能抽出路径的走新流程。
+	const sandboxApproved = new Set<string>();
+	// 持久白名单（`~/.pi/agent/sandbox-allowlist.json`，`PI_SANDBOX_ALLOWLIST` 可改位置）。
+	// 与 sandbox-boundary 扩展共用同一个 globalThis 单例，所以一边记住另一边立刻生效。
+	const allowlistPath = process.env.PI_SANDBOX_ALLOWLIST?.trim() || join(getAgentDir(), "sandbox-allowlist.json");
+	// 路径分类需要的 IO（realpath / isDirectory）由这里注入，sandbox.ts 保持纯逻辑。
+	const pathEnv: PathEnv = {
+		home: homedir(),
+		realpath: (p) => {
+			try {
+				return realpathSync(p);
+			} catch {
+				return undefined; // 目标不存在（已被删）：只做词法判定
+			}
+		},
+		isDirectory: (p) => {
+			try {
+				return statSync(p).isDirectory();
+			} catch {
+				return false;
+			}
+		},
+	};
+	const sessionScopes = getSessionScopes();
+	/** 取白名单 store。env 只在首次创建时用于加载过滤。 */
+	const allowlist = (): AllowlistStore => getAllowlistStore(allowlistPath, pathEnv);
+
 	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd）。
 	const base: ToolDefinition<any, any, any> = createBashToolDefinition(process.cwd(), readShellOptions());
 
@@ -1576,7 +1632,212 @@ export default function (pi: ExtensionAPI) {
 			// 一条不退出的命令会无限期挂着。注入只影响这次执行 —— session 里落盘的
 			// toolCall.arguments 是模型原样发来的那份，不会被改写。
 			const nextParams = { ...params, timeout: effectiveTimeoutSeconds(params?.timeout) };
-			return base.execute(toolCallId, nextParams, signal, streaming ? onUpdate : undefined, ctx);
+			const runOnUpdate = streaming ? onUpdate : undefined;
+
+			// ## 能力边界（seatbelt 沙箱）
+			//
+			// 强制点不是"枚举危险命令"，而是**操作系统**：命令在 sandbox-exec 里跑，
+			// 写入不限制，只有**删除**收窄到项目目录 + 临时目录 —— 边界外的 unlink
+			// 被内核直接 EPERM 拒绝（rename 也走 unlink，见 sandbox.ts 文件头）。
+			// 于是正常操作一次都不弹窗，越界删除先失败 —— 失败之后才问用户。
+			// 这是 Codex 的模型，也是唯一 fail-closed 的模型。
+			//
+			// 两层授权（用户 2026-09-24 定）：
+			// - **危险目录**（系统根 / bin / 应用安装目录 / 配置类）每次必问，只支持会话级豁免；
+			// - **普通目录**问一次，同意后把目录范围写进持久白名单，以后（含 headless）不再问。
+			// 记住一个目录 = 把它并进 profile 的 `(allow file-write-unlink …)`，删除在沙箱内
+			// 直接成功，命令的其余部分仍被沙箱管着 —— 所以常见路径零弹框零重跑。
+			//
+			// 包裹只发生在这个局部 params 副本上：session 落盘的仍是模型原样发来的命令，
+			// 渲染器显示的也是原命令（不是那串 sandbox-exec 前缀）。
+			const command = typeof params?.command === "string" ? params.command : "";
+			if (!sandboxOn || command.trim() === "") {
+				return base.execute(toolCallId, nextParams, signal, runOnUpdate, ctx);
+			}
+
+			const boundary = boundaryFromEnv(ctx?.cwd ?? process.cwd());
+			// profile 带上持久白名单 + 会话豁免：已授权的目录在命令执行前就进了放行名单，
+			// 删除在沙箱内直接成功，不弹框也不重跑。
+			const extraRoots = [...allowlist().roots(), ...sessionScopes.roots()];
+			const wrapped = wrapWithSandbox(command, buildSeatbeltProfile(boundary, extraRoots), sandboxShellPath);
+
+			let denialMessage: string | undefined;
+			try {
+				return await base.execute(toolCallId, { ...nextParams, command: wrapped }, signal, runOnUpdate, ctx);
+			} catch (err) {
+				// 内置 bash 在非零退出时 throw，输出正文就在 message 里 —— 那正是判定
+				// "是不是沙箱拦的" 的地方。只认 EPERM / Operation not permitted：
+				// `Permission denied` 是 EACCES（文件权限位），不是沙箱，拿它当升级信号
+				// 会把"这文件本来就没权限"误报成"沙箱拦的"。
+				const message = err instanceof Error ? err.message : String(err);
+				if (!looksLikeSandboxDenial(message)) throw err;
+				denialMessage = message;
+			}
+
+			// ---- 被沙箱拦下了：从失败输出里抽被拦路径，按目录走两层授权 ----
+			const deniedPaths = extractDeniedPaths(denialMessage ?? "");
+			if (deniedPaths.length === 0) {
+				// 抽不出路径 → 猜不出目标就不许进按目录的记忆逻辑（AGENTS.md
+				// 「Never derive a delete target」的同一口径）。退回旧行为：
+				// 按整条命令、会话级问一次，同意后沙箱外重跑。
+				if (!sandboxApproved.has(command)) {
+					// 非交互环境不升级：没有人在屏幕前，"默认同意"等于没有边界。
+					// 与 destructive-guard 的 fail-closed 同一口径。
+					if (!ctx?.hasUI) {
+						throw new Error(
+							`${denialMessage}\n\n[沙箱] 这条命令要删除可删边界之外的文件，非交互环境不予升级。` +
+								`可删边界：${writableRoots(boundary).join("、")}`,
+						);
+					}
+					const approved = await ctx.ui.confirm(
+						ESCALATION_TITLE,
+						[
+							`命令：${truncateToWidth(command, 160)}`,
+							`可删边界：${truncateToWidth(writableRoots(boundary).join("、"), 160)}`,
+							"",
+							"认不出具体被拦的路径，只能按整条命令问一次。",
+							"同意后这条命令在沙箱外重跑一次（本会话内同一条命令不再询问）。",
+						].join("\n"),
+					);
+					if (!approved) {
+						throw new Error(
+							`${denialMessage}\n\n[沙箱] 用户拒绝在沙箱外重跑。可删边界：${writableRoots(boundary).join("、")}`,
+						);
+					}
+					sandboxApproved.add(command);
+				}
+				return base.execute(toolCallId, nextParams, signal, runOnUpdate, ctx);
+			}
+
+			const classification = classifyOutsidePaths(deniedPaths, {
+				boundary,
+				allowedRoots: allowlist().roots(),
+				sessionRoots: sessionScopes.roots(),
+				env: pathEnv,
+			});
+
+			if (classification.dangerous.length === 0 && classification.ordinary.length === 0) {
+				// 全部已授权却仍被拦：白名单可能刚被另一侧（sandbox-boundary / 手动 allow）
+				// 更新过，而本次的 profile 是更新前构建的。带上最新名单重跑一次；
+				// 仍被拦就报错 —— 不循环，也不升级到沙箱外。
+				const retryRoots = [...allowlist().roots(), ...sessionScopes.roots()];
+				const retry = wrapWithSandbox(command, buildSeatbeltProfile(boundary, retryRoots), sandboxShellPath);
+				try {
+					return await base.execute(toolCallId, { ...nextParams, command: retry }, signal, runOnUpdate, ctx);
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					if (looksLikeSandboxDenial(message)) {
+						throw new Error(
+							`${message}\n\n[沙箱] 已按白名单加宽仍被拒绝，可能是路径识别有误。` +
+								`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+						);
+					}
+					throw err;
+				}
+			}
+
+			// 有未授权的路径：非交互环境 fail-closed（持久白名单在 headless 下生效，
+			// 能走到这里说明没有命中；危险目录与未授权的普通目录一律拒绝）。
+			if (!ctx?.hasUI) {
+				const denied = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
+				throw new Error(
+					`${denialMessage}\n\n[沙箱] 这条命令要删除可删边界之外且未授权的路径，非交互环境不予升级。\n` +
+						`目标：${denied.join("、")}\n` +
+						`可删边界：${writableRoots(boundary).join("、")}\n` +
+						`持久白名单：${allowlist().roots().length} 条（/sandbox-boundary 查看）`,
+				);
+			}
+
+			const hasDangerous = classification.dangerous.length > 0;
+			const foldPaths = (paths: readonly string[], limit = 3): string => {
+				const shown = paths.slice(0, limit).map((p) => `  ${p}`);
+				if (paths.length > limit) shown.push(`  …还有 ${paths.length - limit} 处`);
+				return shown.join("\n");
+			};
+			// 弹框前先算好「将记住的范围」，在弹框里明示 —— 用户批准的是这个范围，
+			// 不是无限授权。
+			const ordinaryScopes = memoryScopesFor(classification.ordinary, pathEnv, boundary.cwd);
+			const dangerousScopes = classification.dangerous.map((d) => sessionScopeFor(d.path, pathEnv, boundary.cwd));
+
+			let choice: string | undefined;
+			if (hasDangerous) {
+				// 危险目录在场：用更严的那套选项。普通路径一并列出，但只能随本次批准
+				// （要永久记住它们得在没有危险路径的命令里单独走普通弹框）。
+				// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
+				const lines = [
+					`⚠️ ${ESCALATION_TITLE}（危险目录）`,
+					"",
+					`命令：${truncateToWidth(command, 160)}`,
+					"",
+					"危险路径（每次删除都会问，只能会话级豁免）：",
+					foldPaths(classification.dangerous.map((d) => `${d.path}（${d.reason}）`)),
+				];
+				if (classification.ordinary.length > 0) {
+					lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
+				}
+				lines.push("", "同意后命令会重新执行一次（已执行过的部分会重复）。", "选“取消”不会删任何东西。");
+				choice = await ctx.ui.select(lines.join("\n"), ["取消", "只同意本次", "本会话不再询问"]);
+			} else {
+				const lines = [
+					`⚠️ ${ESCALATION_TITLE}`,
+					"",
+					`命令：${truncateToWidth(command, 160)}`,
+					"",
+					"要删（可删边界之外）：",
+					foldPaths(classification.ordinary),
+					"",
+					ordinaryScopes.length > 0
+						? `将记住：${ordinaryScopes.join("、")}（以后这些目录下的删除不再询问）`
+						: "这些路径算不出可安全记住的范围，只能逐次批准。",
+					"",
+					"同意后命令会重新执行一次（已执行过的部分会重复）。",
+					"选“取消”不会删任何东西。",
+				];
+				choice = await ctx.ui.select(lines.join("\n"), ["取消", "同意并记住（以后不再问）", "只同意本次"]);
+			}
+
+			if (choice === undefined || choice === "取消") {
+				throw new Error(
+					`${denialMessage}\n\n[沙箱] 用户拒绝删除可删边界之外的路径：` +
+						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join("、") +
+						`（可删边界：${writableRoots(boundary).join("、")}）`,
+				);
+			}
+
+			// 按选择落授权：
+			// - 「同意并记住」→ 普通路径的范围落盘（remember 内部还有安全闸，危险范围落不进去）
+			// - 「本会话不再询问」→ 危险路径的会话范围进会话集合，重启即失效
+			// - 「只同意本次」→ 只加宽这一次重跑的 profile，不进任何记忆
+			const onceRoots: string[] = [];
+			if (choice === "同意并记住（以后不再问）") {
+				const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
+				if (remembered.length > 0) ctx.ui.notify(`已记住 ${remembered.length} 个目录，以后其下的删除不再询问`, "info");
+				// 被安全闸挡掉的范围（算不出可记范围的）仍要放行这一次
+				onceRoots.push(...ordinaryScopes.filter((s) => !remembered.includes(s)));
+			} else if (choice === "本会话不再询问") {
+				sessionScopes.add(dangerousScopes);
+				onceRoots.push(...classification.ordinary.map((p) => sessionScopeFor(p, pathEnv, boundary.cwd)));
+			} else {
+				// 只同意本次
+				onceRoots.push(...ordinaryScopes, ...dangerousScopes);
+			}
+
+			// 带上刚批准的目录在沙箱内重跑（命令的其余部分仍被沙箱管着）。
+			// 仍被拦 → 报错，不循环、也不升级到沙箱外（手动 /sandbox-boundary allow 是出口）。
+			const widenedRoots = [...allowlist().roots(), ...sessionScopes.roots(), ...onceRoots];
+			const widened = wrapWithSandbox(command, buildSeatbeltProfile(boundary, widenedRoots), sandboxShellPath);
+			try {
+				return await base.execute(toolCallId, { ...nextParams, command: widened }, signal, runOnUpdate, ctx);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				if (looksLikeSandboxDenial(message)) {
+					throw new Error(
+						`${message}\n\n[沙箱] 已按批准的范围加宽仍被拒绝，可能还有别的路径被拦或路径识别有误。` +
+							`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+					);
+				}
+				throw err;
+			}
 		},
 
 		renderCall(args, theme, context) {

@@ -5,12 +5,13 @@
  *
  * pi 的扩展加载器真的加载 `index.ts`（所以 `./plan.ts` / `./plan-text.ts` / `./render.ts`
  * 的 import 与注册面都在覆盖范围内），假的是扩展外面的一切：ctx（录制 setStatus /
- * setWidget / notify / onTerminalInput / isIdle）、pi 的 API（录制 setActiveTools /
- * appendEntry / sendMessage）、以及会话条目。
+ * notify / select / onTerminalInput / isIdle）、pi 的 API（录制 setActiveTools /
+ * appendEntry）、以及会话条目。
  *
  * 覆盖的是**接线**而不是纯逻辑（纯逻辑在 plan.test.ts / plan-text.test.ts /
  * render.test.ts 里）。所以断言集中在：谁在什么时候改了活动工具、状态行写了什么、
- * swap 键什么时候被 consume、写命令什么时候被拦。渲染细节不在这里重复测。
+ * swap 键什么时候被 consume、写命令什么时候被拦、write 什么时候自动收尾。
+ * 渲染细节不在这里重复测。
  */
 
 import assert from "node:assert/strict";
@@ -24,6 +25,11 @@ import { THINKING_FALLBACK_KEY } from "./keybinding.ts";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+
+/** 审批对话框的三个选项（与 index.ts 里的常量同值）。 */
+const CHOICE_EXECUTE = "写计划文档并实施";
+const CHOICE_DOC_ONLY = "只写计划文档";
+const CHOICE_REJECT = "打回";
 
 /**
  * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
@@ -81,8 +87,6 @@ interface LoadedExtension {
 	/** 测试挂上去的：真实的活动工具数组（runtime.getActiveTools 读的就是它）。 */
 	__activeTools: string[];
 	__runtime: RuntimeLike;
-	/** 测试挂上去的：模拟 simple-task 广播一次状态快照。 */
-	__emitTaskState: (data: unknown) => void;
 }
 
 /** 默认活动工具：含 pi 的写工具与两个模拟的扩展/ MCP 工具。 */
@@ -137,9 +141,6 @@ async function loadExtension(
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
-	// 测试用：模拟 simple-task 广播状态快照（正式契约见 simple-task/plan-mirror.ts）。
-	(extension as unknown as { __emitTaskState: (data: unknown) => void }).__emitTaskState = (data) =>
-		bus.emit("simple-task:state", data);
 
 	const active: string[] = [...DEFAULT_TOOLS];
 	Object.assign(loaded.runtime, {
@@ -184,26 +185,26 @@ interface RuntimeLike {
 	setActiveTools?: (names: string[]) => void;
 }
 
-
 interface Recorder {
 	/** 每次 setStatus 记一条 `key=值`（undefined 记为 `key=<undefined>`）。 */
 	statuses: string[];
-	/** 每次 setWidget 记一条 `key=行数`（undefined 记为 `<undefined>`）。 */
-	widgets: string[];
 	notifies: string[];
 	/** 录制的工具集变更，按发生顺序。 */
 	toolSets: string[][];
 	entries: Array<{ customType: string; data: unknown }>;
 	messages: Array<{ content: string }>;
-	/** 扩展广播出去的事件（plan-mode → simple-task 的镜像同步）。 */
+	/** 扩展广播出去的事件（现在只剩注册时的一次性动作，不再有镜像同步）。 */
 	emits: Array<{ channel: string; data: unknown }>;
+	/** select 对话框收到的标题（含计划正文）。 */
+	selectTitles: string[];
 }
 
 interface ContextOptions {
 	hasUI?: boolean;
 	mode?: string;
 	idle?: boolean;
-	confirmResult?: boolean;
+	/** select 对话框的返回值（默认选推荐路线「写计划文档并实施」；undefined = 用户按了 esc）。 */
+	selectResult?: string;
 	/** 已经存在的活动工具（默认一份含扩展工具的清单）。 */
 	activeTools?: string[];
 	/** sessionManager 返回的条目；`getBranch()` 与 `getEntries()` 都取它。 */
@@ -232,13 +233,15 @@ function makeContext(extension: LoadedExtension, recorder: Recorder, options: Co
 			setStatus: (key: string, value: string | undefined) => {
 				recorder.statuses.push(`${key}=${value === undefined ? "<undefined>" : value}`);
 			},
-			setWidget: (key: string, content: string[] | undefined) => {
-				recorder.widgets.push(`${key}=${content === undefined ? "<undefined>" : content.length}`);
-			},
 			notify: (message: string) => {
 				recorder.notifies.push(message);
 			},
-			confirm: async () => options.confirmResult ?? true,
+			select: async (title: string, _choices: string[]) => {
+				recorder.selectTitles.push(title);
+				// 显式传 undefined = 用户按了 esc（select 返回 undefined）；
+				// 没传这个字段才走默认推荐路线。
+				return "selectResult" in options ? options.selectResult : CHOICE_EXECUTE;
+			},
 			onTerminalInput: (handler: InputHandler) => {
 				inputHandlers.push(handler);
 				return () => {
@@ -280,7 +283,7 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 }
 
 function recorder(): Recorder {
-	return { statuses: [], widgets: [], notifies: [], toolSets: [], entries: [], messages: [], emits: [] };
+	return { statuses: [], notifies: [], toolSets: [], entries: [], messages: [], emits: [], selectTitles: [] };
 }
 
 function handlerOf(extension: LoadedExtension, name: string): Handler {
@@ -315,15 +318,18 @@ function callTool(
 	name: string,
 	params: unknown,
 	ctx: unknown,
-): Promise<{ content: Array<{ text: string }> }> {
+): Promise<{ content: Array<{ text: string }>; details?: unknown }> {
 	const tool = toolOf(extension, name);
-	return tool.definition.execute("call-1", params, undefined, undefined, ctx) as Promise<{ content: Array<{ text: string }> }>;
+	return tool.definition.execute("call-1", params, undefined, undefined, ctx) as Promise<{
+		content: Array<{ text: string }>;
+		details?: unknown;
+	}>;
 }
 
 const sessionStart = (extension: LoadedExtension, ...args: Parameters<Handler>) => handlerOf(extension, "session_start")(...args);
 const beforeAgentStart = (extension: LoadedExtension, ...args: Parameters<Handler>) => handlerOf(extension, "before_agent_start")(...args);
 const toolCall = (extension: LoadedExtension, ...args: Parameters<Handler>) => handlerOf(extension, "tool_call")(...args);
-const messageEnd = (extension: LoadedExtension, ...args: Parameters<Handler>) => handlerOf(extension, "message_end")(...args);
+const toolResult = (extension: LoadedExtension, ...args: Parameters<Handler>) => handlerOf(extension, "tool_result")(...args);
 
 /** 启动一个会话（session_start + before_agent_start，模拟一次完整回合的前半段）。 */
 async function startSession(
@@ -348,6 +354,30 @@ function setActiveToolsOf(extension: LoadedExtension, tools: string[]): void {
 	extension.__runtime.setActiveTools?.(tools);
 }
 
+/** 从 exit_plan_mode 的工具结果里取出钉死的文档路径（第一个反引号对）。 */
+function docPathFrom(result: { content: Array<{ text: string }> }): string {
+	const match = /`([^`]+)`/.exec(result.content[0]!.text);
+	assert.ok(match, `工具结果里应带文档路径，实际：${result.content[0]!.text}`);
+	return match[1]!;
+}
+
+const PLAN = "# 方案\n\n改 plan.ts 与 render.ts。";
+
+/** 进 plan 并提交一份计划，返回审批后的工具结果。 */
+async function submitPlan(
+	extension: LoadedExtension,
+	harness: SessionHarness,
+	options: { summary?: string; slug?: string } = {},
+): Promise<{ content: Array<{ text: string }>; details?: unknown }> {
+	harness.ctx.__feedInput("\x1b[Z");
+	return callTool(
+		extension,
+		"exit_plan_mode",
+		{ plan: PLAN, slug: options.slug ?? "fix-two-files", summary: options.summary ?? "改两个文件" },
+		harness.ctx,
+	);
+}
+
 // =============================================================================
 // 加载与注册面
 // =============================================================================
@@ -361,6 +391,7 @@ test("扩展能被 pi 的加载器加载，并注册两个工具与一条命令"
 		assert.ok(extension.tools.has("exit_plan_mode"), "应注册 exit_plan_mode");
 		assert.equal(extension.shortcuts.size, 0, "shift+tab 走原始输入拦截，不该注册快捷键");
 		assert.ok(extension.flags.has("plan"), "应注册 --plan flag");
+		assert.ok(extension.handlers.has("tool_result"), "应注册 tool_result 钩子（写文档自动收尾）");
 	} finally {
 		workspace.cleanup();
 	}
@@ -378,6 +409,7 @@ test("shift+tab 在空闲时切进 plan 并 consume；写工具被摘掉、扩�
 		const harness = await startSession(extension, rec);
 
 		const result = harness.ctx.__feedInput("\x1b[Z");
+
 		assert.deepEqual(result, { consume: true }, "shift+tab 必须被吃掉，否则会落到编辑器上");
 		assert.deepEqual(harness.getActiveTools(), ["read", "bash", "grep", "ls", "task_set", "mcp__x__y"]);
 		assert.ok(rec.statuses.at(-1)?.includes("plan"), `状态行应显示 plan，实际 ${rec.statuses.at(-1)}`);
@@ -423,7 +455,7 @@ test("再按一次 shift+tab 退出，活动工具原样还原", { skip, timeout
 		harness.ctx.__feedInput("\x1b[Z");
 
 		assert.deepEqual(harness.getActiveTools(), before, "退出后必须逐字还原（含扩展工具）");
-		assert.match(rec.statuses.at(-1) ?? "", /⏵ normal/, "退出后回到 normal 模式指示");
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "退出后回到 bypass 模式指示");
 	} finally {
 		workspace.cleanup();
 	}
@@ -445,7 +477,7 @@ test("重复 session_start 不叠加监听器（一次 shift+tab 只切一次）
 		const count = (harness.ctx as unknown as { __listenerCount: () => number }).__listenerCount();
 		assert.equal(count, 1, `监听器不该叠加，实际在册 ${count} 个`);
 
-		// 一次 shift+tab 只切一次 → 进 plan（而不是切两次回到 normal）。
+		// 一次 shift+tab 只切一次 → 进 plan（而不是切两次回到 bypass）。
 		const result = harness.ctx.__feedInput("\x1b[Z");
 		assert.deepEqual(result, { consume: true });
 		assert.ok(!harness.getActiveTools().includes("write"), "一次按键应该只切一次：应停在 plan 态");
@@ -514,43 +546,105 @@ test("--plan flag 让会话启动就进 plan", { skip, timeout: 30_000 }, async 
 });
 
 // =============================================================================
-// exit_plan_mode：批准 / 打回
+// exit_plan_mode：三选一
 // =============================================================================
 
-const PLAN_STEPS = [{ text: "改 plan.ts" }, { text: "补测试" }];
-
-test("提交计划并被批准：进 execute、工具还原、状态行显示进度", { skip, timeout: 30_000 }, async () => {
+test("提交计划：对话框是 select 三选一，标题里带计划全文", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
 		const harness = await startSession(extension, rec);
-		const before = harness.getActiveTools();
 
-		harness.ctx.__feedInput("\x1b[Z");
-		const result = await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		await submitPlan(extension, harness);
 
-		assert.match(result.content[0]!.text, /已批准/);
-		assert.deepEqual(harness.getActiveTools(), before, "批准后写权限必须回来");
-		const status = rec.statuses.at(-1) ?? "";
-		assert.ok(status.includes("0/2") || status.includes("execute"), `状态行应显示执行进度，实际 ${status}`);
+		assert.equal(rec.selectTitles.length, 1, "应弹一次审批对话框");
+		assert.match(rec.selectTitles[0]!, /批准这个计划/, "标题要问批不批");
+		assert.ok(rec.selectTitles[0]!.includes(PLAN), "对话框里要能看到计划全文");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("用户打回：留在 plan（只读），并要求模型改方案", { skip, timeout: 30_000 }, async () => {
+test("选「写计划文档并实施」：进写文档子态，write 放回、edit 仍摘着，路径钉死", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec, { confirmResult: false });
+		const harness = await startSession(extension, rec);
 
-		harness.ctx.__feedInput("\x1b[Z");
-		const result = await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		const result = await submitPlan(extension, harness, { slug: "fix-two-files" });
 
-		assert.match(result.content[0]!.text, /没有批准/);
-		assert.ok(!harness.getActiveTools().includes("write"), "打回后仍然是只读");
+		const docPath = docPathFrom(result);
+		assert.match(docPath, /\/repo\/\.pi\/plans\/\d{4}-\d{2}-\d{2}-fix-two-files\.md$/, "路径由 cwd + 日期 + 英文 slug 组成");
+		assert.match(result.content[0]!.text, /批准/);
+		assert.match(result.content[0]!.text, /write 工具/, "要教模型用 write 落盘");
+
+		const tools = harness.getActiveTools();
+		assert.ok(tools.includes("write"), "子态要放回 write");
+		assert.ok(!tools.includes("edit"), "edit 仍摘着");
+		assert.ok(!tools.includes("powershell"), "powershell 仍摘着");
+		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行应显示写文档子态");
+
+		// 落盘条目里钉死了路径与路线（/resume 后不能重算）
+		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
+		assert.equal(last.docWriting, true);
+		assert.equal(last.docMode, "execute-with-doc");
+		assert.equal(last.pendingDocPath, docPath);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("选「只写计划文档」：路线记成 doc-only", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, { selectResult: CHOICE_DOC_ONLY });
+
+		await submitPlan(extension, harness);
+
+		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
+		assert.equal(last.docMode, "doc-only");
+		assert.equal(last.docWriting, true);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("选「打回」或按 esc：留在 plan（只读），并要求模型改方案", { skip, timeout: 30_000 }, async () => {
+	for (const selectResult of [CHOICE_REJECT, undefined]) {
+		const workspace = makeWorkspace();
+		try {
+			const rec = recorder();
+			const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+			const harness = await startSession(extension, rec, { selectResult });
+
+			const result = await submitPlan(extension, harness);
+
+			assert.match(result.content[0]!.text, /没有批准/);
+			assert.ok(!harness.getActiveTools().includes("write"), "打回后仍然是只读");
+			assert.match(rec.statuses.at(-1) ?? "", /plan/, "仍停在 plan 态");
+		} finally {
+			workspace.cleanup();
+		}
+	}
+});
+
+test("非交互运行（pi -p）自动按推荐路线走，不死锁", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, { hasUI: false });
+
+		const result = await submitPlan(extension, harness);
+
+		assert.equal(rec.selectTitles.length, 0, "没有 UI 就不该弹对话框");
+		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
+		assert.equal(last.docMode, "execute-with-doc", "自动选推荐路线");
+		assert.ok(docPathFrom(result).includes(".pi/plans/"));
 	} finally {
 		workspace.cleanup();
 	}
@@ -563,8 +657,9 @@ test("不在 plan 时调 exit_plan_mode：明确拒绝，不改变状态", { ski
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
 		const harness = await startSession(extension, rec);
 
-		const result = await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
+		const result = await callTool(extension, "exit_plan_mode", { plan: PLAN }, harness.ctx);
 		assert.match(result.content[0]!.text, /不在 plan mode/);
+		assert.equal(rec.selectTitles.length, 0, "不该弹审批框");
 	} finally {
 		workspace.cleanup();
 	}
@@ -578,15 +673,206 @@ test("空计划被拒绝", { skip, timeout: 30_000 }, async () => {
 		const harness = await startSession(extension, rec);
 		harness.ctx.__feedInput("\x1b[Z");
 
-		const result = await callTool(extension, "exit_plan_mode", { steps: [{ text: "   " }] }, harness.ctx);
+		const result = await callTool(extension, "exit_plan_mode", { plan: "   " }, harness.ctx);
 		assert.match(result.content[0]!.text, /空的/);
+		assert.equal(rec.selectTitles.length, 0);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("写文档子态里再调 exit_plan_mode：提醒去写文件，不再弹框", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		await submitPlan(extension, harness);
+		rec.selectTitles.length = 0;
+
+		const result = await callTool(extension, "exit_plan_mode", { plan: PLAN }, harness.ctx);
+
+		assert.match(result.content[0]!.text, /写文档子态/);
+		assert.match(result.content[0]!.text, /不需要再调用/);
+		assert.equal(rec.selectTitles.length, 0, "子态里不该再弹审批框");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
 // =============================================================================
-// 写操作拦截
+// 写文档子态的 write 闸
+// =============================================================================
+
+test("写文档子态：write 只许写钉死的那个路径", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		const approved = await submitPlan(extension, harness);
+		const docPath = docPathFrom(approved);
+
+		const allowed = await toolCall(
+			extension,
+			{ toolName: "write", toolCallId: "w1", input: { path: docPath, content: "# 计划" } },
+			harness.ctx,
+		);
+		assert.equal(allowed, undefined, "写计划文档本身必须放行");
+
+		const blocked = (await toolCall(
+			extension,
+			{ toolName: "write", toolCallId: "w2", input: { path: "/repo/src/index.ts", content: "x" } },
+			harness.ctx,
+		)) as { block?: boolean; reason?: string };
+		assert.equal(blocked.block, true, "写别的文件必须拦下");
+		assert.match(blocked.reason ?? "", /只允许写计划文档/);
+		assert.ok((blocked.reason ?? "").includes(docPath), "拒绝原因里要给出正确路径");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("普通 plan 态（非子态）：write 被双保险拦下", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
+
+		const blocked = (await toolCall(
+			extension,
+			{ toolName: "write", toolCallId: "w3", input: { path: "/repo/a.txt", content: "x" } },
+			harness.ctx,
+		)) as { block?: boolean; reason?: string };
+		assert.equal(blocked.block, true, "工具表已摘掉 write，钩子再拦一道");
+		assert.match(blocked.reason ?? "", /plan 阶段不能写文件/);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+// =============================================================================
+// tool_result 自动收尾
+// =============================================================================
+
+test("write 成功且路径匹配：自动收尾回 bypass、还原工具表，收尾指令替换工具结果", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		const before = harness.getActiveTools();
+		const approved = await submitPlan(extension, harness);
+		const docPath = docPathFrom(approved);
+
+		const replaced = (await toolResult(
+			extension,
+			{
+				toolName: "write",
+				toolCallId: "w1",
+				input: { path: docPath, content: "# 计划" },
+				content: [{ type: "text", text: "Successfully wrote 5 bytes" }],
+				isError: false,
+			},
+			harness.ctx,
+		)) as { content: Array<{ text: string }> } | undefined;
+
+		assert.ok(replaced, "应替换 write 的普通成功文本");
+		const text = replaced.content[0]!.text;
+		assert.ok(text.includes(docPath), "收尾指令要报文档路径");
+		assert.match(text, /按这份文档实施/, "execute-with-doc 路线要让模型接着干");
+		assert.match(text, /task_set/, "建不建清单由模型自己判断，但要提到这个工具");
+
+		assert.deepEqual(harness.getActiveTools(), before, "收尾后工具表回到进入前的样子");
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "状态回 bypass");
+		assert.ok(rec.notifies.some((message) => message.includes(docPath)), "notify 要报路径");
+
+		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
+		assert.equal(last.phase, "bypass");
+		assert.equal(last.docWriting, undefined);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("doc-only 路线收尾：指令是「停下来」，不是「实施」", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, { selectResult: CHOICE_DOC_ONLY });
+		const approved = await submitPlan(extension, harness);
+		const docPath = docPathFrom(approved);
+
+		const replaced = (await toolResult(
+			extension,
+			{
+				toolName: "write",
+				toolCallId: "w1",
+				input: { path: docPath, content: "# 计划" },
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+			},
+			harness.ctx,
+		)) as { content: Array<{ text: string }> };
+
+		const text = replaced.content[0]!.text;
+		assert.match(text, /现在就停下来/);
+		assert.match(text, /不要开始改任何代码/);
+		assert.ok(!text.includes("按这份文档实施"), "两条路线的指令不能串");
+		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "doc-only 也回 bypass");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("write 失败 / 路径不对 / 不是 write：都不收尾", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		const approved = await submitPlan(extension, harness);
+		const docPath = docPathFrom(approved);
+
+		const cases = [
+			["write 失败", { toolName: "write", toolCallId: "w1", input: { path: docPath }, content: [], isError: true }],
+			["路径不对", { toolName: "write", toolCallId: "w2", input: { path: "/repo/other.md" }, content: [], isError: false }],
+			["不是 write", { toolName: "bash", toolCallId: "w3", input: { command: "ls" }, content: [], isError: false }],
+		] as const;
+		for (const [label, event] of cases) {
+			const result = await toolResult(extension, event, harness.ctx);
+			assert.equal(result, undefined, `${label}不该触发收尾`);
+			assert.ok(!harness.getActiveTools().includes("edit"), `${label}后仍是只读`);
+		}
+		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行仍是写文档子态");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("bypass 态的 write 结果不触发任何钩子动作", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		const result = await toolResult(
+			extension,
+			{ toolName: "write", toolCallId: "w1", input: { path: "/repo/a.md" }, content: [], isError: false },
+			harness.ctx,
+		);
+		assert.equal(result, undefined);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+// =============================================================================
+// 写操作拦截（bash）
 // =============================================================================
 
 test("plan 阶段写类 bash 被拦下并把原因回给模型；只读命令放行", { skip, timeout: 30_000 }, async () => {
@@ -612,19 +898,31 @@ test("plan 阶段写类 bash 被拦下并把原因回给模型；只读命令放
 			harness.ctx,
 		);
 		assert.equal(allowed, undefined, "只读命令不该被拦");
-
-		const writeTool = await toolCall(
-			extension,
-			{ toolName: "write", toolCallId: "t3", input: { path: "/repo/a.txt", content: "x" } },
-			harness.ctx,
-		);
-		assert.equal(writeTool, undefined, "工具表已摘掉 write；这里不重复拦（避免双重报错）");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("normal 态不拦写命令", { skip, timeout: 30_000 }, async () => {
+test("写文档子态里 bash 写操作照旧被拦（放开的只有 write 那一个工具）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+		await submitPlan(extension, harness);
+
+		const blocked = (await toolCall(
+			extension,
+			{ toolName: "bash", toolCallId: "t3", input: { command: "echo x > /repo/.pi/plans/a.md" } },
+			harness.ctx,
+		)) as { block?: boolean };
+		assert.equal(blocked.block, true, "重定向写文档也不行 —— 只认 write 工具");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("bypass 态不拦写命令", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
@@ -637,255 +935,104 @@ test("normal 态不拦写命令", { skip, timeout: 30_000 }, async () => {
 });
 
 // =============================================================================
-// 进度追踪
+// 会话恢复
 // =============================================================================
 
-test("[DONE:n] 推进进度、从助手消息里清掉；全部完成自动回到 normal", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		const before = harness.getActiveTools();
-
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-
-		// 第一步完成
-		const first = (await messageEnd(
-			extension,
-			{ message: { role: "assistant", content: [{ type: "text", text: "第一步好了 [DONE:1]" }] } },
-			harness.ctx,
-		)) as { message?: { content: Array<{ text: string }> } } | undefined;
-		assert.ok(first?.message, "带标记的消息应被改写");
-		assert.ok(!first.message.content[0]!.text.includes("[DONE:1]"), "标记不该留在用户看到的文本里");
-		assert.ok(!rec.messages.some((message) => message.content.includes("执行完毕")), "还没做完不该报名");
-
-		// 第二步完成 → 自动收尾
-		await messageEnd(
-			extension,
-			{ message: { role: "assistant", content: [{ type: "text", text: "第二步好了 [DONE:2]" }] } },
-			harness.ctx,
-		);
-		assert.ok(rec.messages.some((message) => message.content.includes("执行完毕")), "全部完成应报一句");
-		assert.match(rec.statuses.at(-1) ?? "", /⏵ normal/, "完成后回到 normal 模式指示");
-		assert.deepEqual(harness.getActiveTools(), before, "完成后工具表回到进入前的样子");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-// =============================================================================
-// 与 simple-task 的镜像（唯一进度表）
-// =============================================================================
-
-/** 取最后一次发往 simple-task 的镜像快照。 */
-function lastMirror(rec: Recorder): Array<{ step: number; text: string; done: boolean }> | undefined {
-	const hit = [...rec.emits].reverse().find((e) => e.channel === "plan-mode:sync-tasks");
-	return hit ? (hit.data as Array<{ step: number; text: string; done: boolean }>) : undefined;
+function planEntry(data: Record<string, unknown>) {
+	return { type: "custom", customType: "plan-mode", data };
 }
 
-/** 模拟 simple-task 广播回来的状态（带 `plan:` 前缀的镜像条目）。 */
-function taskState(items: Array<{ step: number; status: "pending" | "in_progress" | "done" }>) {
-	return {
-		items: items.map((item) => ({ id: item.step, text: `plan: ${item.step}. 步骤`, status: item.status })),
-	};
-}
-
-test("批准计划时把步骤镜像给 simple-task，且不再画自己的步骤 widget", { skip, timeout: 30_000 }, async () => {
+test("会话恢复：plan 态从会话条目还原，工具表跟着收回", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-
-		// plan 阶段待批时仍由自己画（enter 时还没有步骤，所以是 undefined；提交后才出现）
-		rec.widgets.length = 0;
-		rec.emits.length = 0;
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-
-		assert.deepEqual(
-			lastMirror(rec),
-			[
-				{ step: 1, text: "改 plan.ts", done: false },
-				{ step: 2, text: "补测试", done: false },
-			],
-			"批准后应把全量步骤镜像出去（simple-task 据此建 #1..#2）",
-		);
-		assert.ok(
-			rec.widgets.includes("plan-steps=2"),
-			`提交待批时应自己画步骤，实际 ${JSON.stringify(rec.widgets)}`,
-		);
-		assert.equal(
-			rec.widgets.at(-1),
-			"plan-steps=<undefined>",
-			`批准（execute）后不该再画自己的步骤清单（只有一份进度表），实际 ${JSON.stringify(rec.widgets)}`,
-		);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("task_update 的进度通过 simple-task 广播回来驱动状态行", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		assert.match(rec.statuses.at(-1) ?? "", /0\/2/, "刚批准时是 0/2");
-
-		// simple-task 广播「第 1 步完成」：状态行必须跟着走，且不需要模型写 [DONE:n]
-		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "in_progress" }]));
-		assert.match(rec.statuses.at(-1) ?? "", /1\/2/, `状态行应显示 1/2，实际 ${rec.statuses.at(-1)}`);
-
-		// 全部完成 → 自动收尾、回 normal、工具还原
-		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "done" }]));
-		assert.ok(rec.messages.some((m) => m.content.includes("执行完毕")), "全部完成应报一句");
-		assert.match(rec.statuses.at(-1) ?? "", /⏵ normal/, "完成后回到 normal 模式指示");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("手建任务不推进计划进度（id 撞上步号也不算）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-
-		extension.__emitTaskState({ items: [{ id: 1, text: "手建的任务", status: "done" }] });
-		assert.match(rec.statuses.at(-1) ?? "", /0\/2/, `手建任务不该被当成计划的第 1 步，实际 ${rec.statuses.at(-1)}`);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("[DONE:n] 仍会推进，并把带标记的进度重新镜像出去", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		rec.emits.length = 0;
-
-		await messageEnd(
-			extension,
-			{ message: { role: "assistant", content: [{ type: "text", text: "好了 [DONE:1]" }] } },
-			harness.ctx,
-		);
-
-		assert.match(rec.statuses.at(-1) ?? "", /1\/2/, `[DONE:1] 应推进到 1/2，实际 ${rec.statuses.at(-1)}`);
-		assert.equal(lastMirror(rec)?.[0]?.done, true, "推进后要重发镜像，让任务清单同步");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("退出 plan 时清掉镜像（手建任务保留在 simple-task 那边）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		rec.emits.length = 0;
-
-		harness.ctx.__feedInput("\x1b[Z"); // 退出
-		assert.deepEqual(lastMirror(rec), [], "退出时应广播空快照清掉镜像");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("没带标记的助手消息不改写、不推进", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-
-		const untouched = await messageEnd(
-			extension,
-			{ message: { role: "assistant", content: [{ type: "text", text: "普通回复" }] } },
-			harness.ctx,
-		);
-		assert.equal(untouched, undefined, "没有标记就不该改写消息");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-// =============================================================================
-// 状态恢复（/resume）
-// =============================================================================
-
-test("会话恢复：plan 态与步骤从会话条目还原，工具表跟着收回", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const entries = [
-			{
-				type: "custom",
-				customType: "plan-mode",
-				data: {
-					phase: "plan",
-					steps: [],
-					pending: [{ step: 1, text: "恢复出来的步骤", done: false }],
-					toolsBeforePlan: ["read", "bash", "edit", "write", "grep"],
-				},
-			},
-		];
 		const harness = makeContext(extension, rec, {
-			entries,
+			entries: [planEntry({ phase: "plan", pending: PLAN, toolsBeforePlan: DEFAULT_TOOLS })],
 		});
 
-		await sessionStart(extension, { reason: "resume" }, harness.ctx);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		assert.ok(!harness.getActiveTools().includes("edit"), "恢复后写工具必须仍被摘掉");
-		assert.ok(!harness.getActiveTools().includes("write"));
-		const status = rec.statuses.at(-1) ?? "";
-		assert.ok(status.includes("plan"), `状态行应回到 plan，实际 ${status}`);
+		assert.ok(!harness.getActiveTools().includes("write"), "恢复出 plan 态就该收工具");
+		assert.match(rec.statuses.at(-1) ?? "", /plan/);
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("会话恢复：execute 态还原步骤进度", { skip, timeout: 30_000 }, async () => {
+test("会话恢复：写文档子态还原（write 在场、edit 不在），下一轮注入写文档指令", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const entries = [
-			{
-				type: "custom",
-				customType: "plan-mode",
-				data: {
-					phase: "execute",
-					steps: [
-						{ step: 1, text: "已完成", done: true },
-						{ step: 2, text: "未完成", done: false },
-					],
-				},
-			},
-		];
-		const harness = makeContext(extension, rec, { entries });
+		const docPath = "/repo/.pi/plans/2026-09-24-恢复.md";
+		const harness = makeContext(extension, rec, {
+			entries: [
+				planEntry({
+					phase: "plan",
+					pending: PLAN,
+					toolsBeforePlan: DEFAULT_TOOLS,
+					docMode: "execute-with-doc",
+					docWriting: true,
+					pendingDocPath: docPath,
+					planSummary: "恢复",
+				}),
+			],
+		});
 
-		await sessionStart(extension, { reason: "resume" }, harness.ctx);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		const status = rec.statuses.at(-1) ?? "";
-		assert.ok(status.includes("1/2"), `状态行应显示 1/2，实际 ${status}`);
+		const tools = harness.getActiveTools();
+		assert.ok(tools.includes("write"), "子态恢复后 write 要在场");
+		assert.ok(!tools.includes("edit"), "edit 仍摘着");
+
+		const injected = (await beforeAgentStart(
+			extension,
+			{ prompt: "继续", systemPrompt: "", systemPromptOptions: {} },
+			harness.ctx,
+		)) as { message?: { customType: string; content: string } } | undefined;
+		assert.equal(injected?.message?.customType, "plan-doc-write-context");
+		assert.ok((injected?.message?.content ?? "").includes(docPath), "写文档指令要带钉死的路径");
+		assert.ok((injected?.message?.content ?? "").includes(PLAN), "写文档指令要带计划全文");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("会话恢复：旧条目里的 phase \"normal\" / \"execute\" 都映射成 bypass", { skip, timeout: 30_000 }, async () => {
+	// `normal` 是 2026-09-23 改名前的值；`execute` 是 2026-09-24 删掉的态。
+	// 两者恢复出来都当 bypass：白名单式判定兜住一切历史值。
+	for (const phase of ["normal", "execute"]) {
+		const workspace = makeWorkspace();
+		try {
+			const rec = recorder();
+			const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+			const harness = makeContext(extension, rec, {
+				entries: [planEntry({ phase, steps: [{ step: 1, text: "旧步骤", done: false }] })],
+			});
+
+			await sessionStart(extension, { reason: "startup" }, harness.ctx);
+
+			assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, `phase=${phase} 应恢复成 bypass`);
+			assert.deepEqual(harness.getActiveTools(), DEFAULT_TOOLS, "不该收工具");
+		} finally {
+			workspace.cleanup();
+		}
+	}
+});
+
+test("会话恢复：旧条目里的步骤数组型 pending 被丢弃（只认字符串计划）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec, {
+			entries: [planEntry({ phase: "plan", pending: [{ step: 1, text: "旧步骤" }], toolsBeforePlan: DEFAULT_TOOLS })],
+		});
+
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
+
+		assert.match(rec.statuses.at(-1) ?? "", /⏸ plan$/, "没有 pending，不该显示「待批准」");
 	} finally {
 		workspace.cleanup();
 	}
@@ -895,46 +1042,45 @@ test("会话恢复：execute 态还原步骤进度", { skip, timeout: 30_000 }, 
 // 上下文注入与过滤
 // =============================================================================
 
-test("plan 态注入只读上下文（display: false），normal 态把它过滤掉", { skip, timeout: 30_000 }, async () => {
+test("plan 态注入只读上下文（display: false），bypass 态把它过滤掉", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
 		const harness = await startSession(extension, rec);
+		harness.ctx.__feedInput("\x1b[Z");
 
-		// normal：没有注入
-		const normal = (await beforeAgentStart(
+		const injected = (await beforeAgentStart(
 			extension,
 			{ prompt: "hi", systemPrompt: "", systemPromptOptions: {} },
 			harness.ctx,
-		)) as { message?: { customType: string; display: boolean; content: string } } | undefined;
-		assert.equal(normal, undefined, "normal 态不该注入");
+		)) as { message?: { customType: string; content: string; display: boolean } } | undefined;
+		assert.equal(injected?.message?.customType, "plan-mode-context");
+		assert.equal(injected?.message?.display, false, "用户看不到，模型看得到");
+		assert.match(injected?.message?.content ?? "", /\[PLAN MODE\]/);
 
-		// 进 plan 后注入
+		// 退出后这些注入消息要从上下文里过滤掉（模型不该看到过期指令）
 		harness.ctx.__feedInput("\x1b[Z");
-		const inPlan = (await beforeAgentStart(
-			extension,
-			{ prompt: "hi", systemPrompt: "", systemPromptOptions: {} },
+		const contextHandler = handlerOf(extension, "context");
+		const filtered = (await contextHandler(
+			{
+				messages: [
+					{ customType: "plan-mode-context", content: "x" },
+					{ customType: "plan-doc-write-context", content: "y" },
+					{ role: "user", content: "hi" },
+				],
+			},
 			harness.ctx,
-		)) as { message?: { customType: string; display: boolean; content: string } } | undefined;
-		assert.ok(inPlan?.message, "plan 态应注入上下文");
-		assert.equal(inPlan.message.display, false, "注入内容不该出现在用户界面上");
-		assert.match(inPlan.message.content, /PLAN MODE/);
-
-		// normal 态过滤
-		harness.ctx.__feedInput("\x1b[Z");
-		const context = (await handlerOf(extension, "context")(
-			{ messages: [{ customType: "plan-mode-context" }, { role: "user", content: "hi" }] },
-			harness.ctx,
-		)) as { messages: unknown[] } | undefined;
-		assert.equal(context?.messages.length, 1, "旧的 plan 上下文应被过滤掉");
+		)) as { messages: Array<{ customType?: string; role?: string }> };
+		assert.equal(filtered.messages.length, 1, "两类 plan 注入都该被过滤");
+		assert.equal(filtered.messages[0]!.role, "user");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
 // =============================================================================
-// 思考键改绑的接线（纯逻辑在 keybinding.test.ts 里覆盖）
+// 思考等级键改绑
 // =============================================================================
 
 test("启动时把 thinking cycle 改绑到 fallback 键（写进 agentDir 的 keybindings.json）", { skip, timeout: 30_000 }, async () => {
@@ -947,10 +1093,11 @@ test("启动时把 thinking cycle 改绑到 fallback 键（写进 agentDir 的 k
 
 		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		const written = fs.readFileSync(path.join(workspace.agentDir, "keybindings.json"), "utf8");
-		const parsed = JSON.parse(written) as Record<string, string>;
-		assert.equal(parsed["app.thinking.cycle"], THINKING_FALLBACK_KEY);
-		assert.ok(rec.notifies.some((message) => message.includes(THINKING_FALLBACK_KEY)), "应告知用户改绑了");
+		const file = path.join(workspace.agentDir, "keybindings.json");
+		assert.ok(fs.existsSync(file), "应写出 keybindings.json");
+		const bindings = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.equal(bindings["app.thinking.cycle"], THINKING_FALLBACK_KEY);
+		assert.ok(rec.notifies.some((message) => message.includes(THINKING_FALLBACK_KEY)), "首次改绑要告知一次");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		workspace.cleanup();
@@ -961,15 +1108,16 @@ test("已经有 keybindings.json 时保留其它绑定", { skip, timeout: 30_000
 	const workspace = makeWorkspace();
 	try {
 		process.env.PI_CODING_AGENT_DIR = workspace.agentDir;
-		fs.writeFileSync(path.join(workspace.agentDir, "keybindings.json"), `${JSON.stringify({ "tui.input.newLine": "ctrl+j" }, null, 2)}\n`);
 		const rec = recorder();
+		const file = path.join(workspace.agentDir, "keybindings.json");
+		fs.writeFileSync(file, JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t", "editor.undo": "ctrl+z" }));
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec);
 
-		await sessionStart(extension, { reason: "startup" }, makeContext(extension, rec).ctx);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		const written = JSON.parse(fs.readFileSync(path.join(workspace.agentDir, "keybindings.json"), "utf8")) as Record<string, string>;
-		assert.equal(written["tui.input.newLine"], "ctrl+j");
-		assert.equal(written["app.thinking.cycle"], THINKING_FALLBACK_KEY);
+		const bindings = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.equal(bindings["editor.undo"], "ctrl+z", "其它绑定原样保留");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		workspace.cleanup();
@@ -980,15 +1128,17 @@ test("用户自己配过 thinking cycle 时启动不碰文件", { skip, timeout:
 	const workspace = makeWorkspace();
 	try {
 		process.env.PI_CODING_AGENT_DIR = workspace.agentDir;
-		const raw = `${JSON.stringify({ "app.thinking.cycle": "ctrl+t" }, null, 2)}\n`;
-		fs.writeFileSync(path.join(workspace.agentDir, "keybindings.json"), raw);
 		const rec = recorder();
+		const file = path.join(workspace.agentDir, "keybindings.json");
+		fs.writeFileSync(file, JSON.stringify({ "app.thinking.cycle": "ctrl+alt+t" }));
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec);
 
-		await sessionStart(extension, { reason: "startup" }, makeContext(extension, rec).ctx);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		assert.equal(fs.readFileSync(path.join(workspace.agentDir, "keybindings.json"), "utf8"), raw, "文件必须原样不动");
-		assert.deepEqual(rec.notifies, [], "已经绑好了就不该再提示（每次启动都提醒会变成噪音）");
+		const bindings = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.equal(bindings["app.thinking.cycle"], "ctrl+alt+t", "用户的选择优先");
+		assert.ok(!rec.notifies.some((message) => message.includes("改绑")), "不该提醒");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		workspace.cleanup();
@@ -999,86 +1149,17 @@ test("上次改绑过（已绑到 fallback）时启动也静默", { skip, timeou
 	const workspace = makeWorkspace();
 	try {
 		process.env.PI_CODING_AGENT_DIR = workspace.agentDir;
-		fs.writeFileSync(
-			path.join(workspace.agentDir, "keybindings.json"),
-			`${JSON.stringify({ "app.thinking.cycle": THINKING_FALLBACK_KEY }, null, 2)}\n`,
-		);
 		const rec = recorder();
+		const file = path.join(workspace.agentDir, "keybindings.json");
+		fs.writeFileSync(file, JSON.stringify({ "app.thinking.cycle": THINKING_FALLBACK_KEY }));
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = makeContext(extension, rec);
 
-		await sessionStart(extension, { reason: "startup" }, makeContext(extension, rec).ctx);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		assert.deepEqual(rec.notifies, [], "已经是 fallback 绑定了，不该提示");
+		assert.ok(!rec.notifies.some((message) => message.includes("改绑")), "已经绑过就不该再提醒");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
-		workspace.cleanup();
-	}
-});
-
-test("执行期重新进 plan 时清掉镜像（状态行与清单不再各说各话）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		// 单扩展环境里没有 simple-task 的 task_update，用它的广播代替（等价于「第 1 步完成」）
-		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "pending" }]));
-		rec.emits.length = 0;
-
-		await callTool(extension, "enter_plan_mode", { reason: "重新规划" }, harness.ctx);
-
-		assert.deepEqual(lastMirror(rec), [], "重进 plan 时应广播空快照清掉旧镜像");
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("模型违规 task_set 清掉镜像后，turn_start 会把镜像重新推回去", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		// 模拟模型重建了清单（镜像条目被冲掉），此时自己还没有任何 done 步
-		extension.__emitTaskState({ items: [{ id: 1, text: "模型自己写的", status: "pending" }] });
-		rec.emits.length = 0;
-
-		await handlerOf(extension, "turn_start")({}, harness.ctx);
-
-		assert.ok(
-			(lastMirror(rec)?.length ?? 0) > 0,
-			`镜像不在清单里时 turn_start 应重推（旧判据「自己没有 done 步就不推」会让状态行冻死在 0/N），实际 ${JSON.stringify(lastMirror(rec))}`,
-		);
-	} finally {
-		workspace.cleanup();
-	}
-});
-
-test("镜像驱动的推进不产生多余的全量快照（回声 persist 被跳过）", { skip, timeout: 30_000 }, async () => {
-	const workspace = makeWorkspace();
-	try {
-		const rec = recorder();
-		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec);
-		harness.ctx.__feedInput("\x1b[Z");
-		await callTool(extension, "exit_plan_mode", { steps: PLAN_STEPS }, harness.ctx);
-		rec.entries.length = 0;
-		rec.emits.length = 0;
-
-		// simple-task 广播「第 1 步完成」→ plan-mode 记账并回写，但不应再触发一次 syncMirror
-		extension.__emitTaskState(taskState([{ step: 1, status: "done" }, { step: 2, status: "pending" }]));
-
-		assert.equal(rec.entries.length, 1, `应只写 1 条 plan-mode 快照，实际 ${rec.entries.length}`);
-		assert.equal(
-			rec.emits.filter((e) => e.channel === "plan-mode:sync-tasks").length,
-			0,
-			"进度由镜像驱动时不该回推镜像（回声）",
-		);
-	} finally {
 		workspace.cleanup();
 	}
 });

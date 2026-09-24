@@ -206,6 +206,13 @@ const DEFAULT_LABEL = "Working";
 const ASK_USER_QUESTION_TOOL = "ask_user_question";
 
 /**
+ * 弹窗期间 spinner 冻结在这一帧（与 `ask-user-question` 扩展同字同族：盲文全集字符，
+ * 看起来是「spinner 停住了」而不是换了个东西）。pi-tui Loader 对单帧 indicator 不起
+ * 动画定时器，所以冻结帧 = 停掉 80ms 重绘。
+ */
+const FROZEN_SPINNER_FRAME = "⠿";
+
+/**
  * 文案两个色段。标签用 `text`（正文正常色，深色主题下就是那条浅白），统计段用
  * `muted` —— 和 pi 给整条 working message 上的默认色**同一个槽位**，所以那截灰
  * 渲染出来和改动前一致（只是转义符的位置从整条包一层变成统计段自己带前缀）。
@@ -538,6 +545,13 @@ export default function (pi: ExtensionAPI) {
 	let ctxRef: ExtensionContext | null = null;
 	let lastMessage: string | null = null;
 	/**
+	 * 弹窗（`ui_prompt_start` → `ui_prompt_end`）期间为 true：所有定时器暂停、spinner 冻结成
+	 * 单帧，`refresh()` 早退。目的：pi 的主屏渲染每次重绘都把视口钉在底部，弹窗期间任何
+	 * 周期性重绘（Loader 的 80ms 动画、本扩展的 1s 读秒）都会把用户手动上翻的滚动位置立刻
+	 * 拉回去 —— 长内容弹窗（plan-mode 批准框）因此看不全。冻结后终端自己的回滚不再被抢。
+	 */
+	let uiPromptActive = false;
+	/**
 	 * 上一次装上去的色板指纹（`spinner-frames.ts` 的 `signature`）：`refresh()` 每秒拿当前主题
 	 * 现算一次，指纹变了才重装帧表 —— `/theme` 换肤后一秒内自愈，且相位只在真的换色时复位。
 	 */
@@ -631,6 +645,8 @@ export default function (pi: ExtensionAPI) {
 	 * 主题每次现读（`/theme` 换主题后一秒内自愈），刻意不订阅主题变更事件。
 	 */
 	function refresh(): void {
+		// 弹窗期间不碰 UI：定时器已停，但 tool_execution_start 等事件路径仍可能调到这里。
+		if (uiPromptActive) return;
 		const ctx = ctxRef;
 		if (ctx === null || turnStartedAt === null) {
 			stopBashSpinner();
@@ -676,6 +692,60 @@ export default function (pi: ExtensionAPI) {
 			timer = null;
 		}
 		ctxRef = null;
+	}
+
+	/**
+	 * 弹窗开始：停掉本扩展的三个定时器，并把 spinner 冻结成单帧。
+	 *
+	 * 冻结单帧是这里**最关键**的一步：pi 的 working indicator 是 pi-tui 的 `Loader`，它自带
+	 * 一个 80ms 的帧动画定时器，每帧都 `requestRender()` —— 比本扩展 1s 的读秒快 12.5 倍，
+	 * 是把视口钉回底部的主因。`Loader.restartAnimation()` 遇 `frames.length <= 1` 直接返回，
+	 * 所以装一个单帧就能停掉那个 interval（`ask-user-question` 扩展用的是同一手法）。
+	 *
+	 * 不用 `stopTimer()`：它会把 `ctxRef` 置 null，弹窗结束就没法恢复了。
+	 */
+	function pauseForUiPrompt(ctx: ExtensionContext): void {
+		if (uiPromptActive) return;
+		uiPromptActive = true;
+		if (timer !== null) {
+			clearInterval(timer);
+			timer = null;
+		}
+		stopBashSpinner();
+		try {
+			ctx.ui.setWorkingIndicator({ frames: [ctx.ui.theme.fg("accent", FROZEN_SPINNER_FRAME)] });
+		} catch {
+			// 旧 ctx / 宿主不支持：冻结失败不影响正确性，只是弹窗期间仍会重绘
+		}
+	}
+
+	/**
+	 * 弹窗结束：重装幻彩帧表（`installRainbowSpinner` 无条件装，正好覆盖掉冻结帧）、
+	 * 重启读秒定时器、立即刷一次文案（把弹窗期间走过的秒数补上）。
+	 *
+	 * 只在真的处于回合中（`ctxRef` 与 `turnStartedAt` 都在）时重启定时器 —— 弹窗可能
+	 * 发生在回合外（比如 `/plan` 命令弹的确认框），那时不该凭空起一个读秒。
+	 */
+	function resumeAfterUiPrompt(): void {
+		if (!uiPromptActive) return;
+		uiPromptActive = false;
+		const ctx = ctxRef;
+		if (ctx === null) return;
+		// 恢复帧表：幻彩开着就重装彩帧（无条件装，正好覆盖掉冻结帧）；关着就回到 pi 默认帧，
+		// 否则单帧冻结会卡住。
+		if (SPINNER_RAINBOW_ENABLED) installRainbowSpinner(ctx);
+		else {
+			try {
+				ctx.ui.setWorkingIndicator();
+			} catch {
+				// 旧 ctx：不碰 UI
+			}
+		}
+		if (turnStartedAt !== null && timer === null) {
+			timer = setInterval(refresh, TICK_MS);
+			timer.unref?.();
+		}
+		refresh();
 	}
 
 	/** 停掉 `●` 的节拍 / 排程定时器并回到灭态（幂等）。 */
@@ -979,6 +1049,19 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// 旧 ctx，忽略
 		}
+	});
+
+	/**
+	 * 弹窗期间冻结一切周期性重绘，让用户能上翻看长内容（plan-mode 批准框）。
+	 * 事件由 pi 的 `withUIPrompt` 发出，覆盖 select / confirm / input / editor / custom
+	 * 五种对话框；嵌套弹窗靠 `uiPromptDepth` 计数，只在最外层进出时发事件，所以这里
+	 * 不用自己防嵌套。
+	 */
+	pi.on("ui_prompt_start", async (_event, ctx) => {
+		pauseForUiPrompt(ctx);
+	});
+	pi.on("ui_prompt_end", async () => {
+		resumeAfterUiPrompt();
 	});
 
 	pi.on("session_shutdown", async () => {

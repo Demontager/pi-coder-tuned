@@ -11,19 +11,16 @@
  *   - 整行按终端宽度截断，截断标记用 "..."（三个 ASCII 点）而非 "…" ——
  *     这是 pi-tasks 的 `truncation` 默认值，注释里说明它是 pi-tui 自己的默认。
  *
- * 两个偏移：
- *   - 头部在**含 plan-mode 镜像条目**时不画（那段总量信息已由 statusline 的
- *     `▶ n/N executing` 在说，见下面 `hasMirror`）。
- *   - `plan-mirror.ts` 只被引一个函数 —— 这里只用它做「这一条是不是计划的步骤」判定。
- *
  * 颜色**全部走 theme.fg()**，一处硬编码颜色都没有 —— 所以跟着 pi 主题走，
  * 换主题就换配色，不需要改这里。
+ *
+ * 2026-09-24 之前头部在含 plan-mode 镜像条目时不画（那套镜像已随 plan-mode 的
+ * execute 态一起删除，头部恢复为永远画）。
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { countByStatus, type State } from "./types.ts";
-import { isMirrorText } from "./plan-mirror.ts";
 
 export const GLYPHS = {
 	header: "●",
@@ -56,12 +53,9 @@ export function buildWidgetLines(state: State, frame: number, theme: Theme, widt
 	const noun = tasks.length === 1 ? "task" : "tasks";
 	const statusText = `${tasks.length} ${noun} (${parts.join(", ")})`;
 
-	// 清单里带 plan-mode 的镜像条目时**不画头部**：那一段（共 N 个、已完成几个）已经由
-	// statusline 的 `▶ n/N executing` 在说，同一个屏上重复两遍同样的计数只是噪音。
-	// 全部是手建任务（镜像为空）时头部照旧 —— 那时它是这一块唯一的总量行。
-	const lines: string[] = tasks.some((task) => isMirrorText(task.text))
-		? []
-		: [truncate(`${theme.fg("accent", GLYPHS.header)} ${theme.fg("accent", statusText)}`)];
+	// 头部永远画：它是这一块唯一的总量行。（2026-09-24 之前含 plan-mode 镜像条目时
+	// 不画头部，那套镜像已随 plan-mode 的 execute 态一起删除。）
+	const lines: string[] = [truncate(`${theme.fg("accent", GLYPHS.header)} ${theme.fg("accent", statusText)}`)];
 
 	const visible = tasks.slice(0, MAX_VISIBLE);
 	const hidden = tasks.length - visible.length;

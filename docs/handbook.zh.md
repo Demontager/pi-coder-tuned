@@ -15,6 +15,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | 本仓库 | 真实路径 |
 | --- | --- |
 | `AGENTS.md` | `~/.pi/agent/AGENTS.md`（机器全局行为规则） |
+| `AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md`（`AGENTS.md` 的蒸馏版核心铁律，约 2KB；`extensions/core-rules/` 读它并中途重注入。**缺失则扩展静默跳过**） |
 | `config/settings.json` | `~/.pi/agent/settings.json` |
 | `config/models.json` | `~/.pi/agent/models.json` |
 | `config/mcp.json` | `~/.pi/agent/mcp.json`（MCP 服务器；不装就没有 MCP 工具，`/mcp` 会给出提示） |
@@ -22,13 +23,15 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json`（**已失效的遗留配置**：旧 npm statusline 包专用，留着只为随时换回那个包） |
 | `extensions/*.ts` | `~/.pi/agent/extensions/` |
 | `extensions/<name>/` | 同上（子目录形式：`<目录>/index.ts` 作入口，pi 支持 `extensions/*/index.ts`） |
-| `extensions/destructive-guard/` | 同上（`tool_call` 安全闸，见其 `README.md`） |
+| `extensions/sandbox-boundary/` | 同上（非 shell 工具的删除边界闸：只拦 apply_patch 的 Delete File，write/edit 不拦；与 bash 沙箱同一道白名单与同一套两层授权） |
+| `extensions/destructive-guard/` | **已从 live 退役**（词法黑名单路线的参考实现，仓库副本与测试保留；见其 `README.md`） |
 | `themes/*.json` | `~/.pi/agent/themes/`（pi 全局主题目录） |
 
 在仓库根目录执行：
 
 ```bash
 cp clients/pi/AGENTS.md                 ~/.pi/agent/AGENTS.md
+cp clients/pi/AGENTS.core.md            ~/.pi/agent/AGENTS.core.md      # core-rules 扩展读的蒸馏版核心铁律（不装则该扩展静默不注入）
 cp clients/pi/config/settings.json      ~/.pi/agent/settings.json
 cp clients/pi/config/models.json        ~/.pi/agent/models.json
 cp clients/pi/config/pi-statusline.json ~/.pi/agent/pi-statusline.json   # 可选：只有要回退到 npm statusline 包时才需要
@@ -37,7 +40,7 @@ cp clients/pi/config/web-search.json    ~/.pi/agent/web-search.json
 cp clients/pi/extensions/*.ts           ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/tool-diff          ~/.pi/agent/extensions/   # tool-diff.ts 的纯排版模块（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/prompt-editor     ~/.pi/agent/extensions/   # prompt-editor.ts 的纯逻辑模块（无 index.ts，不会被当成扩展）
-cp -R clients/pi/extensions/simple-task        ~/.pi/agent/extensions/   # 兼作 plan-mode 执行期的进度表；plan-mode 静态 import ../simple-task/plan-mirror.ts，两者必须一起装
+cp -R clients/pi/extensions/simple-task        ~/.pi/agent/extensions/   # 轻量任务清单（与 plan-mode 无耦合，可单独装）
 cp -R clients/pi/extensions/recap              ~/.pi/agent/extensions/   # 依赖上一行的 gap.ts（跨目录相对 import）
 cp -R clients/pi/extensions/rewind             ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/statusline         ~/.pi/agent/extensions/
@@ -47,11 +50,13 @@ cp -R clients/pi/extensions/ask-user-question  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/subagent-log-guard ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/fenceless-code-block ~/.pi/agent/extensions/   # 子目录形式：纯逻辑在 render.ts（不 import pi，可单测）
 cp -R clients/pi/extensions/user-message-bar   ~/.pi/agent/extensions/   # 同上：纯逻辑在 bar.ts
-cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bash-command-collapse.ts 的端到端渲染测试（无 index.ts，不会被当成扩展）
+cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bash-command-collapse.ts 的伴生模块（sandbox.ts / allowlist.ts 是 live 代码，不是测试）与端到端渲染测试（无 index.ts，不会被当成扩展）
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
-cp -R clients/pi/extensions/destructive-guard  ~/.pi/agent/extensions/   # 删除操作安全闸（tool_call 钩子，见 README）
+cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用两层授权与持久白名单）
+cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
+# destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代），不再安装
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
@@ -72,6 +77,8 @@ pi install npm:pi-subagents                 # 同上；零配置可用
 
 生效方式：扩展改完在 pi 里执行 `/reload` 即热加载（`~/.pi/agent/extensions/` 是自动发现目录）；
 `settings.json` / `models.json` / `AGENTS.md` 需要**重开 pi**（启动时读一次，`/reload` 也不管用）。
+`AGENTS.core.md` 是例外：`core-rules/` 在每次 `before_agent_start` 里现读，改完**下一条 prompt 就生效**，
+不用 `/reload` 也不用重开（内容 hash 变了会自动带替换声明重注入）。
 
 ## settings.json / models.json 的要紧处
 
@@ -452,53 +459,67 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `init-command.ts` | Claude Code 式 `/init`：`CLAUDE.md` → 否则 `AGENTS.md` → 否则新建 `AGENTS.md` |
 | `ask-user-question/` | Claude Code `AskUserQuestion` 式的结构化提问工具（子会话里按 `ctx.hasUI` 自动摘掉） |
 | `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
-| `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。自 2026-09-23 起**兼作 plan-mode 执行期的唯一进度表**：批准计划时步骤被镜像成带 `plan: n. ` 前缀的条目，状态行的 `▶ n/N` 读的也是它（契约在 `plan-mirror.ts`）。详见上文 plan mode 一节 |
-| `plan-mode/` | Claude Code 式 plan mode（normal → plan → execute 三态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交计划等用户批准。plan 阶段摘掉 edit/write（**快照-还原**，不动扩展注册的工具）并在 `tool_call` 里拦写类 bash。详见下文 |
+| `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。计划批准后模型认为该建清单就自己 `task_set`，扩展不再代它建（2026-09-24 起与 plan-mode 无耦合） |
+| `plan-mode/` | Claude Code 式 plan mode（bypass → plan 两态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾。详见下文 |
+| `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 2KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
+| `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**两层授权**（用户 2026-09-24 定）：危险目录（系统根 / bin / 应用安装目录 / 配置类 / 含 `.git`）每次删除必问、只支持会话级豁免；普通目录问一次，「同意并记住」后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目。完整口径与危险名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
+| `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
 
 ### plan mode（`plan-mode/`）
 
-三态：`normal` → `plan`（只读探索、模型出方案）→ `execute`（批准后按步骤执行，进度记在任务清单里，
-全部完成自动回 `normal`）。计划只存会话（`appendEntry("plan-mode")`，不进模型上下文、**不写工作区**）。
+两态：`bypass` → `plan`（只读探索、模型出方案）。**没有 execute 态** —— 与 Claude Code
+对齐：批准后写权限恢复、状态直接回 bypass，「按计划文档实施」是一次性交给模型的指令，
+进度也交还给模型（它认为该建任务清单就自己 `task_set`，扩展不再镜像步骤、不再记进度）。
+
+2026-09-24 之前是三态（bypass → plan → execute，批准即把步骤镜像进 simple-task 清单、
+按序号记 `[DONE:n]`、状态行报 `▶ n/N`）。那套「扩展持有进度」的机制整个删除：镜像契约
+（`simple-task/plan-mirror.ts`）、`[DONE:n]` 标记、步骤 widget、execute 态的每轮注入全部
+随之消失。起因是用户要求高度对齐 cc 的 plan mode：cc 的 `ExitPlanMode(plan)` 参数就是
+一份完整方案文本，批准后产出物是计划文档，任务清单由模型自决。
+
+计划状态存会话（`appendEntry("plan-mode")`，不进模型上下文）；计划文档写进工作区的
+`.pi/plans/`（被 `.gitignore` 排除 —— 计划是过程产物，不该进仓库）。
 
 四个入口：`shift+tab`、`/plan`、`--plan`（启动即进）、模型调 `enter_plan_mode`。
-`/plan-status` 看当前状态与步骤。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入。
+`/plan-status` 看当前状态。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入。
+
+**提交与审批（三选一）。** `exit_plan_mode` 的参数是 `plan`（给用户看的完整方案 markdown）
++ **必填 `slug`**（计划文档的文件名短名：小写英文 + 数字 + 连字符，3~5 个词，如
+`m5-entity-runtime`；最终文档名 `<日期>-<slug>.md`）+ 可选 `summary`（一句话总结，仅用于
+写文档指令与 `/plan-status` 展示）。文档名规则（`plan-doc.ts`）：slug 清洗成**纯英文
+kebab-case** —— CJK 与标点一律折掉（纯中文退化成 `plan`），路径分隔符与 `..` 进不了
+文件名；撞名追加 `-2` / `-3` 绝不覆盖。审批对话框是 `select` 三选一：
+
+| 选项 | 之后发生什么 |
+| --- | --- |
+| 写计划文档并实施 | 进写文档子态 → 模型 write 文档 → 自动收尾回 bypass，收尾指令是「按文档实施」 |
+| 只写计划文档 | 同上，但收尾指令是「报告路径就停，不要动手」 |
+| 打回（或按 esc） | 留在 plan 态（只读），等用户反馈后重新提交 |
+
+非交互运行（`pi -p`）没有对话框：自动按推荐路线（写文档并实施）走，不死锁。
+
+**写文档子态（`docWriting`）。** 两条批准路线都经过它：phase 仍是 `plan`（bash 写拦截、
+工具收拢全部照常），唯一的区别是 `write` 被单独放回工具表（`planModeToolSet(active, true)`），
+并由 `tool_call` 钩子限死只能写计划文档那一个路径（`.pi/plans/YYYY-MM-DD-<slug>.md`，
+路径在用户选路线的那一刻算好并钉死 —— 撞名判定问的是文件系统，`/resume` 后重算可能得到
+不同的 `-2` 后缀）。每轮注入的上下文从只读探索换成写文档指令（带钉死的路径与计划全文）。
+模型用 write 把文档写成功的那一刻，`tool_result` 钩子自动收尾：状态回 bypass、工具表还原、
+收尾指令（实施 / 只报告路径）**替换**掉 write 的普通成功文本 —— 模型在同一轮里就能看到
+接下来该做什么，不需要再调任何工具。write 失败（isError）不收尾，模型自己会看到错误并重试。
 
 **模式指示的显示位：statusline 第二行的行首**（那个区也叫「扩展 status 区」）。
-三个态**都有文案**，所以「当前在哪个模式」永远有一个固定的显示位：
+两个态**都有文案**，所以「当前在哪个模式」永远有一个固定的显示位：
 
 | 态 | 显示 |
 | --- | --- |
-| normal | `⏵ normal`（**`toolDiffRemoved`**，即删除行前景色 —— 三套皮肤里都是红） |
+| bypass | `⏵ bypass`（**`toolDiffRemoved`**，即删除行前景色 —— 三套皮肤里都是红） |
 | plan 等待模型出方案 | `⏸ plan`（`warning`） |
-| plan 已提交、等批准 | `⏸ plan · 2 steps` |
-| execute | `▶ 2/5 executing`（`accent`） |
+| plan 已提交、等批准 | `⏸ plan · 待批准` |
+| plan 写文档子态 | `⏸ plan · 写文档中`（尾巴走 `accent`） |
 
 这一格原先归 `simple-task`（那里显示 `✔ 7/7 done`），但**与它自己在输入框上方的 widget 重复**
 （widget 是完整版：`● N tasks (…)` + 逐条清单 + spinner），那个缩略版已删除，格子让给模式指示。
 注意 `simple-task` 的 widget 行**不吃这一格**，所以两者不会再抢显示位。
-
-**执行期只有一份清单，而且它是 simple-task 那份。**（2026-09-23 改，起因是两个真实问题：
-执行时状态行与 widget 各出一份清单；而 `▶ 0/10 executing` 从不更新。）现在的分工：
-
-| 阶段 | 清单在哪 | `▶ n/N` 的数字从哪来 |
-| --- | --- | --- |
-| plan（待批） | plan-mode 自己的 widget（`plan-steps`）—— 那时还没有任何任务清单 | `⏸ plan · N steps`，不报进度 |
-| execute（已批准） | **simple-task 的清单**（步骤镜像进去，id = 步号）；plan-mode 把 `plan-steps` 置 `undefined` | 镜像回来的状态（模型调 `task_update`，或写 `[DONE:n]`） |
-| 全部完成 | 清单留在屏幕上（用户要回看刚跑完的 ✔） | 模式回 `⏵ normal` |
-| 中途退出 / 重拟 | 清掉镜像条目，用户手建的任务保留 | 回 `normal` |
-
-镜像契约在 `simple-task/plan-mirror.ts`（两端共用的唯一一份）：plan-mode 发
-`plan-mode:sync-tasks`（全量 `{step,text,done}[]`，空数组 = 清掉），simple-task 回
-`simple-task:state`（全量 `{id,text,status}[]`）。镜像条目文案是 `` `plan: <步号>. <步骤>` ``，
-plan-mode 靠这个前缀认领条目 —— **别把前缀当成装饰改掉**，否则 `task_get` 里的 `#1` 会变成
-普通任务、状态行的数字会退回 0/N。为什么不再让 plan-mode 自己记进度：`[DONE:n]` 是模型往
-**散文里**写的标记，实测（本次会话日志）一轮 17 次 `task_update` 里 `[DONE:n]` 一次没写，
-状态行就永远停在 0；`task_update` 是结构化工具调用，漏不了。`[DONE:n]` 保留为**等价别名**
-（`plan-text.ts` 的 `extractDoneSteps`），两个入口改的是同一份状态。
-
-**镜像清单不画自己的头部。** `widget.ts` 检测到清单里有镜像条目时不输出
-`● N tasks (…)` 那一行 —— 同一段「共 N 个、完了几个」已经在 statusline 说了，一行屏幕里
-重复两遍只是噪音（手建清单仍照旧画头部）。
 
 **模式指示固定在第二行行首**（`statusline/line.ts` 的 `STATUS_PRIORITY`）。不要改回「按注册顺序」：
 第二行是超长只截断不折行，而路径 / checkpoint 计数会越长越长 —— 放尾部时一条长路径就能把它挤到
@@ -510,11 +531,13 @@ plan-mode 靠这个前缀认领条目 —— **别把前缀当成装饰改掉**�
 1. **工具集**：进 plan 时把 `edit` / `write` / `powershell` 从活动工具里摘掉，退出时按**进入前的快照
    原样还原**。本机 pi 的工具表里有二十多个扩展动态注册的工具（`mcp__*`、`ask_user_question`、
    `task_set` …），官方示例那种硬编码白名单会把它们全吃掉 —— 所以必须是快照-还原。
+   写文档子态单独放回 `write`（路径仍被第二道闸限死）。
 2. **`tool_call` 钩子**：`bash` 还在工具表里，所以写类命令（重定向、`rm` / `mv` / `sed -i` /
    `git commit` / `npm install` / `sudo` …）靠这道钩子拦，拒绝原因作为工具错误结果回给模型。
    判定按**简单命令**粒度切开（`cat a.txt && rm -rf b` 会拦下 rm 那段），heredoc 正文先剥掉，
-   fd 复制（`2>&1`）与 `/dev/null` 这类黑洞目标放行。实现与全部边界在 `plan.ts` 的上半部分与
-   `plan.test.ts`（98 例）。
+   fd 复制（`2>&1`）与 `/dev/null` 这类黑洞目标放行。写文档子态里 `write` 只许写钉死的那个
+   路径（写别处会被拒，拒绝原因里给出正确路径）。实现与全部边界在 `plan.ts` 的上半部分与
+   `plan.test.ts`。
 
 **这是给配合的模型用的护栏，不是沙箱。** 两个刻意放行的形状：双引号内的 `$(...)` 命令替换、
 以及 `npm run <script>` 这类由脚本内容决定副作用的命令 —— 宁可放行也不要把正常探索全部拦死。
@@ -541,18 +564,10 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 
 ### 跨扩展 / 跨文件
 
-- **plan-mode ⇄ simple-task 的镜像契约只有一份：`simple-task/plan-mirror.ts`**（事件名、前缀、
-  `rebuildTasks` 重建规则都在那里）。两个扩展通过 `pi.events` 互通，**不互相 import、不互相调用
-  命令**（两者都能单独 `/reload`）—— 唯一例外是 plan-mode 从 `../simple-task/` import 了
-  这个契约模块，因为“两份契约”必然漂移。事件名/载荷对不上是这条链路最容易坏的地方，所以有一个
-  集成测试把两个扩展装进同一个总线跑完整链路：`plan-mode/mirror.test.ts`（`enter_plan_mode` →
-  `exit_plan_mode` → 清单里出现 `plan: 1. …` → `task_update` → 状态行变 1/2）。
-  四条不要改：① 空数组的契约是「清掉镜像」而不是「没变化」；② 镜像条目的 `id` 就是步号，
-  `rebuildTasks` 不会给它换号（换了就找不到对应关系）——**与步号撞号的手建任务会被顺延
-  到 nextAvailableId 之上**，这是保住「id = 步号」这条承诺的必要代价；③ 同步是**全量快照**，
-  不是增量 —— 两个扩展都会重放会话，增量丢一条就永久错位；④ **镜像快照随 simple-task 的
-  会话条目一起持久化**，`/resume` 不依赖两个扩展的 `session_start` 顺序（目录字母序里
-  plan-mode 在前，靠事件顺序会丢任务）。
+- **plan-mode 与 simple-task 不再耦合**（2026-09-24 删掉了镜像契约）：两者都能单独装、
+  单独 `/reload`，互不 import、互不通信。计划批准后进度归模型自己 —— 它要建清单就调
+  `task_set`，那是 simple-task 的普通工具调用，没有任何特殊路径。`simple-task/gap.ts`
+  仍被 `recap/` 跨目录 import（那是另一个契约：widget 之间的空行判定，与任务清单无关）。
 - **statusline 第二行（扩展 status 区）的显示位分配**：顺序由 `statusline/line.ts` 的
   `STATUS_PRIORITY` 决定 —— `plan-mode`（模式指示）**强制行首**，其余按注册顺序跟在后面：
   `cwd-statusline`（完整路径）、`rewind`（`◆ N checkpoints`），限 5 条。
@@ -711,6 +726,12 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   的去重与命令的闸门共用它；有新对话（指纹变化，或 `input` 事件先清了状态）时闸门自动放开。
 - `auto-default-model/` 会写 `~/.pi/agent/settings.json` 的 `defaultProvider` / `defaultModel`
   （pi 的 `/model` 只改当前会话，本机把那次 Ctrl+S 自动化掉了）。
+- 删除边界的持久白名单 `~/.pi/agent/sandbox-allowlist.json` 是**机器本地状态**（见下表）：
+  它记的是「哪个目录被用户确认过安全」的授权决定，不是配置，不进快照；`PI_SANDBOX_ALLOWLIST`
+  可改位置（测试靠它隔离）。写入是原子的（临时文件 + rename），损坏 / 版本不认识降级为空不抛；
+  危险范围（`/`、`$HOME`、`~/.ssh`、含 `.git` 的路径）在写入前与加载时**两道过滤**，手改的 JSON 也塞不进去。
+  会话级豁免（危险目录的「本会话不再询问」）与单次豁免不落盘，只活在进程内存里（globalThis 单例，
+  bash 侧与 apply_patch 侧共享）。
 
 ## 刻意不入库的机器本地文件
 
@@ -723,6 +744,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 | `~/.pi/agent/sessions/` | 会话记录 |
 | `~/.pi/agent/missions/`、`run-history.jsonl` | `pi-subagents` 的 mission / 运行历史，换机器没有迁移价值 |
 | `~/.pi/agent/rewind/` | `rewind/` 的影子快照仓库 |
+| `~/.pi/agent/sandbox-allowlist.json` | 删除边界的持久白名单（哪个目录被用户确认过安全），是授权决定不是配置，换机器不该跟着走 |
 | `~/.pi/agent/plans/` | 机器本地的计划与一次性脚本 |
 | `~/.pi/agent/npm/`、`bin/` | pnpm 装的包（靠 `pi install` 重拉）与 pi 自带的 `fd` / `rg` |
 | `~/.pi/agent/web-search-cache/`、`~/.pi/folder-history/*.jsonl` | 运行时缓存 / 历史数据 |
@@ -749,17 +771,21 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
   `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，
   只有 `index.ts` 接线 —— 所以整条 MCP 链路（含真实 spawn 子进程）都能 `node --test` 覆盖。
-- **`AGENTS.md` 自设 9600 字符预算**（当前 **9392 字符** ≈ 2348 tokens，落在盘上是 9438 字节，余量 208 字符）：
+- **`AGENTS.md` 自设 19000 字符预算**（当前 **18867 字符** ≈ 4717 tokens，余量 133 字符）：
   pi 本身没有上限 —— 0.87.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
-  9500 字符处仍被模型逐字读回；7400 那条是自设的每请求固定开销预算，已为 skill 优先级与 shell 卫生
-  三条规则放宽到 8000，随后又为 Communication 节的「失败/跳过/与预期不符须置于报告首句」一条占满。
-  9600 这一档是给新增的 `## Uncertainty` 节（issue #8：没有计划文档时的不确定性策略 —— 先查证、按
-  可逆性分三档、会分叉的任务先进 plan mode、两个选项先做判别实验）腾的地方，同时顺手删掉两条重复规则
-  （Persistence 的「good enough」与 Communication 的禁用词清单）；`## Task list` 后来又加了一句
-  「批准后的计划步骤就是当次任务清单」。
-  下次再加规则前必须先压缩现有节或再抬上限。
+  9500 字符处仍被模型逐字读回；这条上限是自设的每请求固定开销预算，一路放宽：7400 → 8000（skill 优先级
+  与 shell 卫生）→ 9600（issue #8 的 `## Uncertainty` 节）→ 18000（2026-09-23 删除安全 / 爆炸半径重写）
+  → **19000（2026-09-23 审议式/门控式升级，issue #10）**。最后一档把执行风格从「直接式/精益式」改成
+  「CC 式审议/门控」：`## Uncertainty` 的 plan 触发从「会分叉才进」改为**默认准入**（多文件、任何设计/
+  结构/接口/数据形状取舍、文档重写或重构、方案未定都先进 plan，仅极简单单文件小改豁免），并新增
+  「实质取舍先问」一条；新增 `## Delegation` 节（subagent 仅用户明确点名才调、调查默认内联、被授权的
+  委派仍守全部纪律）；`## Verification` 加两条（写文档前逐条对权威来源核事实、报告须写明跑了哪些验证）。
+  同一次改动里压缩了现有节腾空间（Git↔Shell 的交互式禁令去重、secrets/staging 三条合并、Destructive
+  actions 措辞瘦身），所以抬上限是买新规则而非灌水。下次再加规则前仍须先压缩或再抬上限。
   它是每个会话、每一轮请求都带的固定开销，改完要重开会话才生效（context files 只在 pi 启动时读一次）。
-  它只装纯行为规则，刻意剔除全部
+  它装的是行为规则与安全闸（Authorization / Delegation / Destructive actions / Blast radius /
+  Shell commands / Git 六节是硬闸，项目级 AGENTS.md/CLAUDE.md 只能赢过其余的工作流/风格规则，
+  赢不过这六节 —— 文件开头就是这么声明的），并刻意剔除全部
   Codex 机制耦合内容（`apply_patch` / `update_plan` / `multi_tool_use` 等十个词一个都不能出现），
   工具名一律用 pi 的真实工具（`read` / `bash` / `edit` / `write`，任务清单写作 `task_set` / `task_update`）。
   本机另有一份 4 断言 gate 脚本 `~/.pi/agent/plans/verify-global-agents.mjs`（机器本地，不入库）。

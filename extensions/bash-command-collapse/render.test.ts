@@ -27,6 +27,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -101,10 +102,39 @@ if (process.env.FORCE_COLOR === undefined && process.env.NO_COLOR === undefined)
 const piEntry = await findPiLibraryEntry();
 const skip = piEntry === undefined ? SKIP : false;
 
+/**
+ * 本进程能不能再套一层 `sandbox-exec`。
+ *
+ * seatbelt **不允许嵌套**：如果跑测试的 shell 自己就在沙箱里（比如在开了
+ * `PI_SANDBOX` 的 pi 会话里跑 `node --test`），内层的 `sandbox_apply` 会直接
+ * `Operation not permitted`（退出码 71）。这是环境条件而不是代码回归，
+ * 所以真沙箱用例在这种情况下整体 skip（不假装通过，也不报一堆看不懂的错）。
+ * 在普通终端里跑（没有外层沙箱）时它是 true，用例全部真跑。
+ */
+const NESTED_SKIP = "嵌套 sandbox-exec 不可用（本进程已在沙箱里），真沙箱用例跳过";
+const nestedSandboxOk = (() => {
+	if (piEntry === undefined) return false;
+	try {
+		execFileSync("sandbox-exec", ["-p", "(version 1)(allow default)", "/bin/echo", "ok"], { stdio: "pipe" });
+		return true;
+	} catch {
+		return false;
+	}
+})();
+/** 真沙箱用例的 skip 值：平台不支持 / 找不到 pi / 嵌套不可用，三种情况都跳。 */
+const sandboxSkip = skip !== false ? skip : nestedSandboxOk ? false : NESTED_SKIP;
+
 interface BashToolDefinitionLike {
 	renderShell?: string;
 	renderCall?: (...args: any[]) => any;
 	renderResult?: (...args: any[]) => any;
+	execute?: (
+		toolCallId: string,
+		params: { command: string; timeout?: number },
+		signal: unknown,
+		onUpdate: unknown,
+		ctx: unknown,
+	) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown }>;
 }
 
 interface PiApi {
@@ -177,7 +207,17 @@ if (pi) {
 	fs.mkdirSync(projectDir);
 	cleanup = () => fs.rmSync(root, { recursive: true, force: true });
 
-	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
+	// 隔离持久白名单：不指向用户真实的 ~/.pi/agent/sandbox-allowlist.json，
+	// 否则用户批准过某个目录后，这里的「越界删除被拒」用例就会因白名单命中而失败。
+	const prevAllowlist = process.env.PI_SANDBOX_ALLOWLIST;
+	process.env.PI_SANDBOX_ALLOWLIST = path.join(root, "sandbox-allowlist.json");
+	let loaded;
+	try {
+		loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
+	} finally {
+		if (prevAllowlist === undefined) delete process.env.PI_SANDBOX_ALLOWLIST;
+		else process.env.PI_SANDBOX_ALLOWLIST = prevAllowlist;
+	}
 	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
 	const definition = loaded.extensions[0]?.tools.get("bash")?.definition;
 	assert.ok(definition, "本扩展必须注册 bash 工具（跨扩展同名注册是 first wins，见文件头）");
@@ -723,5 +763,523 @@ test("耗时页脚：短命令不画 `Took`，长命令画", { skip }, () => {
 	assert.equal(fast.some((line) => line.includes("Took ")), false, "短命令不该有 Took 页脚");
 	const slow = text("echo hi", { output: "hi\n", ...SLOW }).map(body);
 	assert.equal(slow.find((line) => line.includes("Took "))!.startsWith("  Took "), true, "长命令的 Took 在树里缩进");
+});
+
+/* ------------------------------------------------------------------ *
+ * 能力边界（seatbelt 沙箱）—— execute 路径的端到端断言
+ *
+ * 这里跑的是**真命令**，但全部无害：`echo`、往测试自己的临时目录写文件，
+ * 以及一次**注定被沙箱拦住**的越界删除。越界目标用带随机后缀的探针文件名，
+ * 万一沙箱没生效（测试就会失败）也只会在 $HOME 下多一个空文件，
+ * 用例自己会把它清掉 —— 不会碰到任何已有文件。
+ *
+ * 口径（用户 2026-09-24）：写入不拦，只拦边界外的删除。
+ * ------------------------------------------------------------------ */
+
+/** 构造一个非交互的 ctx（hasUI: false → 越界不升级，直接失败）。
+ *
+ * 内置 bash 的 execute 会读 `ctx.sessionManager.getSessionId()` / `getSessionFile()`
+ * 来注入 PI_SESSION_ID 等环境变量，所以这两个字段必须给 —— 否则报的不是沙箱错误
+ * 而是 `Cannot read properties of undefined`，测试就看不出真正要验的东西。
+ */
+function execCtx(cwd: string) {
+	return {
+		cwd,
+		hasUI: false,
+		mode: "print",
+		ui: {},
+		model: undefined,
+		thinkingLevel: undefined,
+		sessionManager: {
+			getSessionId: () => "sbx-test-session",
+			getSessionFile: () => undefined,
+		},
+	};
+}
+
+/** 跑一条命令，返回 { ok, text }：成功取正文，失败取抛出的 message。 */
+async function runCommand(definition: BashToolDefinitionLike, command: string, cwd: string) {
+	assert.ok(definition.execute, "bash 工具必须有 execute");
+	try {
+		const result = await definition.execute("call-sbx", { command }, undefined, undefined, execCtx(cwd));
+		const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
+		return { ok: true, text };
+	} catch (err) {
+		return { ok: false, text: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+/**
+ * 交互 ctx：`select` 按 `selections` 顺序回放（模拟用户在弹框里的选择），
+ * `confirm` 按 `confirmAnswers` 回放（抽不出路径的兜底分支用）。两层授权的
+ * 端到端用例全靠这个 harness 驱动。
+ */
+function execCtxUI(cwd: string, selections: string[], confirmAnswers: boolean[] = []) {
+	const selects: Array<{ title: string; options: string[] }> = [];
+	const confirms: Array<{ title: string; message: string }> = [];
+	const notifies: string[] = [];
+	return {
+		cwd,
+		hasUI: true,
+		mode: "tui",
+		selects,
+		confirms,
+		notifies,
+		ui: {
+			select: async (title: string, options: string[]) => {
+				selects.push({ title, options });
+				return selections.shift();
+			},
+			confirm: async (title: string, message: string) => {
+				confirms.push({ title, message });
+				return confirmAnswers.shift() ?? false;
+			},
+			notify: (text: string) => notifies.push(text),
+		},
+		model: undefined,
+		thinkingLevel: undefined,
+		sessionManager: {
+			getSessionId: () => "sbx-test-session",
+			getSessionFile: () => undefined,
+		},
+	};
+}
+
+async function runCommandWithCtx(
+	definition: BashToolDefinitionLike,
+	command: string,
+	ctx: ReturnType<typeof execCtxUI>,
+) {
+	assert.ok(definition.execute, "bash 工具必须有 execute");
+	try {
+		const result = await definition.execute("call-sbx", { command }, undefined, undefined, ctx);
+		const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
+		return { ok: true, text };
+	} catch (err) {
+		return { ok: false, text: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+/**
+ * 为两层授权用例加载一份**独立的**扩展实例：`PI_SANDBOX_ALLOWLIST` 指向用例自己的
+ * 临时文件（不碰用户真实白名单），会话 scope 集合清空（那是 globalThis 单例，
+ * 跨用例残留会污染判定）。返回的 restore 负责把 env 与集合恢复原状。
+ */
+async function loadSandboxFixture(name: string): Promise<{
+	definition: BashToolDefinitionLike;
+	projectDir: string;
+	allowlistFile: string;
+	restore: () => void;
+}> {
+	assert.ok(pi);
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-bash-${name}-`));
+	const agentDir = path.join(root, "agent");
+	const projectDir = path.join(root, "project");
+	fs.mkdirSync(agentDir);
+	fs.mkdirSync(projectDir);
+	const allowlistFile = path.join(root, "sandbox-allowlist.json");
+	const prevAllowlist = process.env.PI_SANDBOX_ALLOWLIST;
+	process.env.PI_SANDBOX_ALLOWLIST = allowlistFile;
+	let definition: BashToolDefinitionLike | undefined;
+	try {
+		const { getSessionScopes } = await import("./allowlist.ts");
+		getSessionScopes().clear();
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
+		assert.deepEqual(loaded.errors, [], "加载不该报错");
+		definition = loaded.extensions[0]?.tools.get("bash")?.definition;
+	} finally {
+		if (prevAllowlist === undefined) delete process.env.PI_SANDBOX_ALLOWLIST;
+		else process.env.PI_SANDBOX_ALLOWLIST = prevAllowlist;
+	}
+	assert.ok(definition?.execute, "应当注册 bash 工具");
+	return {
+		definition,
+		projectDir,
+		allowlistFile,
+		restore: () => {
+			fs.rmSync(root, { recursive: true, force: true });
+		},
+	};
+}
+
+test("沙箱：边界内命令正常执行（echo、写 cwd、删 cwd 都成功）", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	const echoed = await runCommand(definition, "echo sandbox-ok", projectDir);
+	assert.equal(echoed.ok, true, `echo 不该失败：${echoed.text}`);
+	assert.match(echoed.text, /sandbox-ok/);
+
+	// projectDir 在 /tmp 下，属于可删边界 → 写进去、删掉都应当成功
+	const wrote = await runCommand(definition, "echo x > .sbx-write-probe && cat .sbx-write-probe", projectDir);
+	assert.equal(wrote.ok, true, `边界内写入不该失败：${wrote.text}`);
+	assert.match(wrote.text, /x/);
+
+	const removed = await runCommand(definition, "rm -f .sbx-write-probe && echo removed", projectDir);
+	assert.equal(removed.ok, true, `边界内删除不该失败：${removed.text}`);
+	assert.match(removed.text, /removed/);
+});
+
+test("沙箱：越界写入放行（创建与覆盖都不拦）", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 探针路径：$HOME 下、带随机后缀。写入按口径放行，所以它**会**被创建出来，
+	// finally 里用测试进程自己的 fs（不走沙箱）清掉这个字面路径。
+	const probe = path.join(os.homedir(), `.sbx-write-probe-${process.pid}-${Date.now()}.txt`);
+	try {
+		const created = await runCommand(definition, `echo hi > ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(created.ok, true, `越界写入应当放行：${created.text}`);
+		assert.equal(fs.existsSync(probe), true, "越界文件应当被创建出来");
+
+		const appended = await runCommand(definition, `echo more >> ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(appended.ok, true, `越界追写也应当放行：${appended.text}`);
+	} finally {
+		if (fs.existsSync(probe)) fs.rmSync(probe);
+	}
+});
+
+test("沙箱：越界删除被 OS 拒绝，文件仍在，非交互环境不升级", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	// 先用测试进程自己的 fs 在 $HOME 下建一个探针文件（不走沙箱，所以能建），
+	// 再让沙箱里的命令去删它 —— 这才是两次事故的真实形状。
+	const probe = path.join(os.homedir(), `.sbx-delete-probe-${process.pid}-${Date.now()}.txt`);
+	fs.writeFileSync(probe, "victim\n");
+	try {
+		const denied = await runCommand(definition, `rm -f ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(denied.ok, false, "越界删除必须失败（沙箱没生效？）");
+		assert.match(denied.text, /Operation not permitted|EPERM/, `应当是沙箱拒绝：${denied.text}`);
+		assert.match(denied.text, /\[沙箱\]/, "非交互环境要带上沙箱说明");
+		assert.match(denied.text, /删除可删边界之外/, "说明文案要点名是删除而不是写入");
+		assert.equal(fs.existsSync(probe), true, "越界文件必须仍在");
+		assert.equal(fs.readFileSync(probe, "utf8"), "victim\n", "内容也不能变");
+	} finally {
+		// 只清本用例自己建的那个字面路径；不存在就什么都不做。
+		if (fs.existsSync(probe)) fs.rmSync(probe);
+	}
+});
+
+test("沙箱：越界 rmdir 同样被拒，目录仍在", { skip: sandboxSkip }, async () => {
+	assert.ok(cached);
+	const { definition, projectDir } = cached;
+
+	const probe = path.join(os.homedir(), `.sbx-rmdir-probe-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(probe);
+	try {
+		const denied = await runCommand(definition, `rmdir ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(denied.ok, false, "越界 rmdir 必须失败");
+		assert.match(denied.text, /Operation not permitted|EPERM/);
+		assert.equal(fs.existsSync(probe), true, "越界目录必须仍在");
+	} finally {
+		if (fs.existsSync(probe)) fs.rmdirSync(probe);
+	}
+});
+
+test("沙箱：PI_SANDBOX=off 时命令不被包裹（越界删除会成功）", { skip }, async () => {
+	assert.ok(pi);
+	// 用 off 重新加载一份扩展：sandboxOn 是注册时读的，改 env 必须重新加载才生效。
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bash-nosbx-"));
+	const agentDir = path.join(root, "agent");
+	const projectDir = path.join(root, "project");
+	fs.mkdirSync(agentDir);
+	fs.mkdirSync(projectDir);
+	const prev = process.env.PI_SANDBOX;
+	process.env.PI_SANDBOX = "off";
+	let offDefinition: BashToolDefinitionLike | undefined;
+	try {
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, pi.createEventBus());
+		assert.deepEqual(loaded.errors, [], "off 模式加载不该报错");
+		offDefinition = loaded.extensions[0]?.tools.get("bash")?.definition;
+	} finally {
+		if (prev === undefined) delete process.env.PI_SANDBOX;
+		else process.env.PI_SANDBOX = prev;
+	}
+	assert.ok(offDefinition?.execute, "off 模式仍要注册 bash 工具");
+
+	// 关掉沙箱后，越界删除不再被拦 —— 这正是 PI_SANDBOX=off 的语义。
+	// 用本用例自己的临时目录当"越界"目标：它在 /tmp 下，但 offDefinition 的
+	// 边界概念已经不存在，所以这里只验证"命令原样执行、没有 sandbox-exec 前缀"。
+	const probe = path.join(root, "off-probe.txt");
+	try {
+		const r = await runCommand(offDefinition, `echo off > ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(r.ok, true, `off 模式下写 root 内文件应当成功：${r.text}`);
+		assert.equal(fs.existsSync(probe), true);
+		const del = await runCommand(offDefinition, `rm -f ${JSON.stringify(probe)}`, projectDir);
+		assert.equal(del.ok, true, `off 模式下删除也应当成功：${del.text}`);
+		assert.equal(fs.existsSync(probe), false);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+/* ------------------------------------------------------------------ *
+ * 两层授权（用户 2026-09-24 定）的端到端断言
+ *
+ * 跑的是真命令 + 真 seatbelt 沙箱 + 真弹框（脚本化的 ui.select）。
+ * 越界目标全部用带 pid + 时间戳的探针名，由用例自己的 fs 建和清，
+ * 不碰任何已有文件；白名单指向用例自己的临时文件，不碰用户真实的那份。
+ * ------------------------------------------------------------------ */
+
+test("两层授权：普通目录首次弹框→记住→真删掉→同目录第二次不弹框", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("ordinary");
+	// 探针目录：$HOME 下、带随机后缀 —— 边界外但不在危险名单里（普通目录）。
+	const dir = path.join(os.homedir(), `.sbx-ordinary-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const first = path.join(dir, "a.txt");
+	const second = path.join(dir, "b.txt");
+	fs.writeFileSync(first, "a\n");
+	fs.writeFileSync(second, "b\n");
+	try {
+		// 第一次：弹框，选「同意并记住」
+		const ctx1 = execCtxUI(fx.projectDir, ["同意并记住（以后不再问）"]);
+		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
+		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
+		assert.equal(fs.existsSync(first), false, "文件真的被删了（不是只返回成功）");
+		assert.equal(ctx1.selects.length, 1, "应当弹一次框");
+		assert.ok(ctx1.selects[0]!.title.includes("边界外"), `弹框标题：${ctx1.selects[0]!.title}`);
+		assert.deepEqual(ctx1.selects[0]!.options, ["取消", "同意并记住（以后不再问）", "只同意本次"], "普通目录的三选项");
+		assert.ok(ctx1.selects[0]!.title.includes("危险") === false, "普通目录不该走危险弹框");
+
+		// 落盘：白名单里应当有这个目录（不是那个文件）
+		const onDisk = JSON.parse(fs.readFileSync(fx.allowlistFile, "utf8"));
+		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [dir], "记住的是父目录");
+
+		// 第二次：同目录另一个文件 —— profile 已带上白名单根，沙箱内直接成功，**不弹框**
+		const ctx2 = execCtxUI(fx.projectDir, []);
+		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
+		assert.equal(r2.ok, true, `第二次不该被拦：${r2.text}`);
+		assert.equal(fs.existsSync(second), false);
+		assert.equal(ctx2.selects.length, 0, "已记住的目录不再弹框（这就是本功能的意义）");
+		assert.equal(ctx2.confirms.length, 0);
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：「只同意本次」删得掉但不落盘，同目录第二次仍弹框", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("once");
+	const dir = path.join(os.homedir(), `.sbx-once-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const first = path.join(dir, "a.txt");
+	const second = path.join(dir, "b.txt");
+	fs.writeFileSync(first, "a\n");
+	fs.writeFileSync(second, "b\n");
+	try {
+		const ctx1 = execCtxUI(fx.projectDir, ["只同意本次"]);
+		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
+		assert.equal(r1.ok, true, `本次批准应当删成功：${r1.text}`);
+		assert.equal(fs.existsSync(first), false);
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "「只同意本次」不该落盘");
+
+		const ctx2 = execCtxUI(fx.projectDir, ["取消"]);
+		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
+		assert.equal(r2.ok, false, "没记住 → 第二次仍被拦");
+		assert.equal(ctx2.selects.length, 1, "第二次仍弹框");
+		assert.equal(fs.existsSync(second), true, "取消后文件必须仍在");
+		assert.match(r2.text, /用户拒绝/, `拒绝理由要给人看：${r2.text}`);
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：危险目录每次都弹，选「本会话不再询问」后不弹，重新加载扩展后又弹", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("dangerous");
+	// 危险目录：~/.config 在 DANGEROUS_HOME_DIRS 里（子树语义）。
+	// 探针建在它下面，用例自己清掉 —— 不碰 ~/.config 里任何已有内容。
+	const dir = path.join(os.homedir(), ".config", `.sbx-dangerous-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const first = path.join(dir, "a.txt");
+	const second = path.join(dir, "b.txt");
+	const third = path.join(dir, "c.txt");
+	for (const f of [first, second, third]) fs.writeFileSync(f, "x\n");
+	try {
+		// 第一次：危险弹框，三选项与普通弹框不同
+		const ctx1 = execCtxUI(fx.projectDir, ["只同意本次"]);
+		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
+		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
+		assert.equal(fs.existsSync(first), false);
+		assert.equal(ctx1.selects.length, 1);
+		assert.ok(ctx1.selects[0]!.title.includes("危险目录"), `危险弹框标题：${ctx1.selects[0]!.title}`);
+		assert.deepEqual(ctx1.selects[0]!.options, ["取消", "只同意本次", "本会话不再询问"], "危险目录没有「记住」选项");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "危险目录永远不落盘");
+
+		// 第二次：仍是危险目录 → 仍弹框（这就是「每次必问」）
+		const ctx2 = execCtxUI(fx.projectDir, ["本会话不再询问"]);
+		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
+		assert.equal(r2.ok, true, `会话豁免应当放行：${r2.text}`);
+		assert.equal(ctx2.selects.length, 1, "危险目录第二次仍弹框");
+		assert.equal(fs.existsSync(second), false);
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "会话豁免也不落盘");
+
+		// 第三次：本会话已豁免 → 不弹框，profile 带上会话根后沙箱内直接成功
+		const ctx3 = execCtxUI(fx.projectDir, []);
+		const r3 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(third)}`, ctx3);
+		assert.equal(r3.ok, true, `会话豁免后不该再被拦：${r3.text}`);
+		assert.equal(ctx3.selects.length, 0, "会话豁免后不再弹框");
+		assert.equal(fs.existsSync(third), false);
+
+		// 会话豁免不落盘 → 重新加载一份扩展（模拟重启 pi）后又弹框。
+		// 新实例读的是同一个空白名单文件，而会话 scope 是 globalThis 单例 ——
+		// 所以这里先清掉它，模拟「重启后会话状态没了」。
+		const { getSessionScopes } = await import("./allowlist.ts");
+		getSessionScopes().clear();
+		const fourth = path.join(dir, "d.txt");
+		fs.writeFileSync(fourth, "x\n");
+		const ctx4 = execCtxUI(fx.projectDir, ["取消"]);
+		const r4 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(fourth)}`, ctx4);
+		assert.equal(r4.ok, false, "重启后危险目录恢复必问");
+		assert.equal(ctx4.selects.length, 1, "又弹框了");
+		assert.equal(fs.existsSync(fourth), true);
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		const { getSessionScopes } = await import("./allowlist.ts");
+		getSessionScopes().clear();
+		fx.restore();
+	}
+});
+
+test("两层授权：headless + 预置白名单 → 删除成功且不弹框", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("headless-allow");
+	const dir = path.join(os.homedir(), `.sbx-headless-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const target = path.join(dir, "a.txt");
+	fs.writeFileSync(target, "a\n");
+	// 预置白名单：模拟用户之前在交互会话里批准过这个目录
+	fs.writeFileSync(
+		fx.allowlistFile,
+		JSON.stringify({ version: 1, entries: [{ path: dir, addedAt: new Date().toISOString(), source: "confirm" }] }),
+		"utf8",
+	);
+	try {
+		// 重新加载一份扩展，让它读到预置的白名单（store 是单例缓存，按文件路径 keyed，
+		// 而 loadSandboxFixture 的临时文件路径是新的，所以新实例会读盘）
+		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
+		assert.equal(r.ok, true, `headless 下白名单应当生效：${r.text}`);
+		assert.equal(fs.existsSync(target), false, "文件真被删了");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍在", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("headless-danger");
+	const dir = path.join(os.homedir(), ".config", `.sbx-headless-danger-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const target = path.join(dir, "a.txt");
+	fs.writeFileSync(target, "a\n");
+	try {
+		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
+		assert.equal(r.ok, false, "headless 下危险目录必须拒");
+		assert.match(r.text, /非交互环境/, `理由要点明环境：${r.text}`);
+		assert.equal(fs.existsSync(target), true, "文件必须仍在");
+		assert.equal(fs.readFileSync(target, "utf8"), "a\n", "内容也不能变");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：headless + 未授权的普通目录 → 也 fail-closed", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("headless-ordinary");
+	const dir = path.join(os.homedir(), `.sbx-headless-ord-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const target = path.join(dir, "a.txt");
+	fs.writeFileSync(target, "a\n");
+	try {
+		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
+		assert.equal(r.ok, false, "没人在屏幕前，普通目录也不能默认同意");
+		assert.match(r.text, /未授权/, `理由要点明未授权：${r.text}`);
+		assert.equal(fs.existsSync(target), true);
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：一条命令里混有已授权与未授权路径 → 仍弹框（全部命中才自动放行）", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("mixed");
+	const allowedDir = path.join(os.homedir(), `.sbx-mixed-allow-${process.pid}-${Date.now()}`);
+	const otherDir = path.join(os.homedir(), `.sbx-mixed-other-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(allowedDir);
+	fs.mkdirSync(otherDir);
+	const a = path.join(allowedDir, "a.txt");
+	const b = path.join(otherDir, "b.txt");
+	fs.writeFileSync(a, "a\n");
+	fs.writeFileSync(b, "b\n");
+	fs.writeFileSync(
+		fx.allowlistFile,
+		JSON.stringify({ version: 1, entries: [{ path: allowedDir, addedAt: new Date().toISOString(), source: "confirm" }] }),
+		"utf8",
+	);
+	try {
+		// 两个目标一起删：已授权那个在沙箱内成功，未授权那个被拦 → 命令失败并弹框。
+		// 弹框里只该出现未授权的那个（已授权的不该再问）。
+		const ctx = execCtxUI(fx.projectDir, ["取消"]);
+		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(a)} ${JSON.stringify(b)}`, ctx);
+		assert.equal(r.ok, false, "有未授权路径 → 不能静默放行整条命令");
+		assert.equal(ctx.selects.length, 1, "应当弹框");
+		assert.ok(ctx.selects[0]!.title.includes("边界外"), `弹框标题：${ctx.selects[0]!.title}`);
+		assert.equal(fs.existsSync(b), true, "取消后未授权的文件必须仍在");
+	} finally {
+		for (const d of [allowedDir, otherDir]) if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：抽不出被拦路径（cd + 相对路径）→ 退回按整条命令问一次", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("unparsed");
+	const dir = path.join(os.homedir(), `.sbx-unparsed-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const target = path.join(dir, "a.txt");
+	fs.writeFileSync(target, "a\n");
+	try {
+		// `cd` 到边界外再用**相对路径**删：BSD rm 报的是 `rm: a.txt: Operation not permitted`，
+		// 里面没有绝对路径 —— extractDeniedPaths 刻意不认相对路径（猜不出绝对目标），
+		// 于是走兜底分支：按整条命令问一次（confirm，不是 select）。
+		// 这是模型真实会写的形状（`cd X && rm -f y`），不是人造的极端用例。
+		const ctx = execCtxUI(fx.projectDir, [], [false]);
+		const r = await runCommandWithCtx(fx.definition, `cd ${JSON.stringify(dir)} && rm -f a.txt`, ctx);
+		assert.equal(r.ok, false, "拒绝后命令仍失败");
+		assert.equal(ctx.confirms.length, 1, "兜底分支走 confirm");
+		assert.equal(ctx.selects.length, 0, "兜底分支不该走 select（认不出路径就无法分危险/普通）");
+		assert.ok(ctx.confirms[0]!.message.includes("认不出具体被拦的路径"), `兜底文案要说明原因：${ctx.confirms[0]!.message}`);
+		assert.equal(fs.existsSync(target), true, "拒绝后文件必须仍在");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "兜底分支不落盘（它根本不按目录记）");
+
+		// 同一条命令再跑一次：本会话已批准过 → 不再问，沙箱外重跑成功
+		const ctx2 = execCtxUI(fx.projectDir, [], [false]);
+		const r2 = await runCommandWithCtx(fx.definition, `cd ${JSON.stringify(dir)} && rm -f a.txt`, ctx2);
+		assert.equal(r2.ok, true, `会话内同一条命令不再问：${r2.text}`);
+		assert.equal(ctx2.confirms.length, 0);
+		assert.equal(fs.existsSync(target), false);
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("两层授权：取消后文件仍在、内容不变，且什么都没落盘", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("cancel");
+	const dir = path.join(os.homedir(), `.sbx-cancel-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir);
+	const target = path.join(dir, "a.txt");
+	fs.writeFileSync(target, "victim\n");
+	try {
+		const ctx = execCtxUI(fx.projectDir, ["取消"]);
+		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
+		assert.equal(r.ok, false);
+		assert.equal(fs.existsSync(target), true, "取消后文件必须仍在");
+		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "取消不该落盘");
+		assert.ok(ctx.notifies.length === 0, "取消不该发 notify");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
 });
 

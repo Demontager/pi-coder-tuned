@@ -1,5 +1,5 @@
 /**
- * Tests for plan.ts — plan-mode 的三态状态机与 bash 写操作判定。
+ * Tests for plan.ts — plan-mode 的两态状态机与 bash 写操作判定。
  *
  * Run with:  node --test clients/pi/extensions/plan-mode/plan.test.ts
  *
@@ -12,16 +12,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-	type PlanState,
-	approvePlan,
-	applyDoneSteps,
-	cancelPlan,
-	countDoneSteps,
+	completeDocWrite,
+	enterDocWriting,
 	enterPlan,
-	inspectBashCommand,
 	initialPlanState,
-	isPlanComplete,
+	inspectBashCommand,
 	planModeToolSet,
+	rejectPlan,
 	restoredToolSet,
 	splitSimpleCommands,
 	stripHeredocBodies,
@@ -50,6 +47,13 @@ describe("工具集", () => {
 		assert.deepEqual(planModeToolSet(["read", "read", "write"]), ["read"]);
 	});
 
+	it("写文档子态单独放回 write，edit / powershell 仍摘着", () => {
+		const tools = planModeToolSet(ALL_TOOLS, true);
+		assert.ok(tools.includes("write"), "子态需要 write 把计划落成文件");
+		assert.ok(!tools.includes("edit"));
+		assert.ok(!tools.includes("powershell"));
+	});
+
 	it("退出时优先还原进入前的快照", () => {
 		const state = enterPlan(initialPlanState(), ALL_TOOLS);
 		assert.deepEqual(restoredToolSet(state, ["read", "bash"]), ALL_TOOLS);
@@ -61,16 +65,15 @@ describe("工具集", () => {
 });
 
 describe("状态迁移", () => {
-	const STEPS = [
-		{ step: 1, text: "读代码", done: false },
-		{ step: 2, text: "改代码", done: false },
-	];
+	const PLAN = "# 方案\n\n## 总结\n改两个文件。";
 
-	it("enterPlan 记下快照并清空步骤", () => {
+	it("enterPlan 记下快照并清空上一次计划的痕迹", () => {
 		const state = enterPlan(initialPlanState(), ALL_TOOLS);
 		assert.equal(state.phase, "plan");
 		assert.deepEqual(state.toolsBeforePlan, ALL_TOOLS);
-		assert.deepEqual(state.steps, []);
+		assert.equal(state.pending, undefined);
+		assert.equal(state.docMode, undefined);
+		assert.equal(state.docWriting, undefined);
 	});
 
 	it("重复 enterPlan 不覆盖快照", () => {
@@ -79,48 +82,92 @@ describe("状态迁移", () => {
 		assert.deepEqual(twice.toolsBeforePlan, ["read", "edit"]);
 	});
 
-	it("cancelPlan 回 normal 并丢掉步骤", () => {
-		const state = cancelPlan(approvePlan(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), STEPS)));
-		assert.equal(state.phase, "normal");
-		assert.deepEqual(state.steps, []);
+	it("enterPlan 清掉上一次留下的 docWriting（否则新一轮直接注入写文档指令）", () => {
+		const stale = enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
+		const fresh = enterPlan({ ...stale, phase: "bypass" }, ALL_TOOLS);
+		assert.equal(fresh.docWriting, undefined);
+		assert.equal(fresh.pendingDocPath, undefined);
+	});
+
+	it("submitPlan 存下计划全文与总结，仍停在 plan 等审批", () => {
+		const submitted = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "  改两个文件  ");
+		assert.equal(submitted.pending, PLAN);
+		assert.equal(submitted.planSummary, "改两个文件", "总结要 trim");
+		assert.equal(submitted.phase, "plan");
+	});
+
+	it("submitPlan 空总结记为 undefined（slug 会退回兜底值）", () => {
+		const submitted = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "   ");
+		assert.equal(submitted.planSummary, undefined);
 	});
 
 	it("submitPlan 只在 plan 阶段生效", () => {
-		assert.equal(submitPlan(initialPlanState(), STEPS).pending, undefined);
-		const pending = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), STEPS);
-		assert.equal(pending.pending?.length, 2);
-		assert.equal(pending.phase, "plan", "提交后仍停在 plan 等审批");
+		assert.equal(submitPlan(initialPlanState(), PLAN).pending, undefined);
 	});
 
-	it("approvePlan 把待审批步骤搬进执行列表；没有计划时不动", () => {
-		assert.equal(approvePlan(enterPlan(initialPlanState(), ALL_TOOLS)).phase, "plan");
-		const executing = approvePlan(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), STEPS));
-		assert.equal(executing.phase, "execute");
-		assert.deepEqual(executing.steps, STEPS);
-		assert.equal(executing.pending, undefined);
+	it("rejectPlan 留在 plan、丢掉 pending 与文档子态标记，但保住工具快照", () => {
+		const writing = enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
+		const rejected = rejectPlan(writing);
+		assert.equal(rejected.phase, "plan", "打回不是退出，要继续改方案");
+		assert.equal(rejected.pending, undefined);
+		assert.equal(rejected.docWriting, undefined);
+		assert.equal(rejected.pendingDocPath, undefined);
+		assert.deepEqual(rejected.toolsBeforePlan, ALL_TOOLS);
+	});
+});
+
+describe("写文档子态", () => {
+	const PLAN = "# 方案";
+	const DOC = "/repo/.pi/plans/2026-09-24-方案.md";
+
+	function inDocWriting(mode: "execute-with-doc" | "doc-only" = "execute-with-doc") {
+		return enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "方案"), mode, DOC);
+	}
+
+	it("enterDocWriting 翻开关、记住路线与路径，phase 仍是 plan", () => {
+		const state = inDocWriting();
+		assert.equal(state.phase, "plan", "子态不是第三个 phase：bash 拦截与工具收拢全靠 plan 态");
+		assert.equal(state.docWriting, true);
+		assert.equal(state.docMode, "execute-with-doc");
+		assert.equal(state.pendingDocPath, DOC);
+		assert.equal(state.pending, PLAN, "计划全文留着，写文档指令要用");
 	});
 
-	it("approvePlan 复制步骤，不共享 submitPlan 传进来的数组", () => {
-		const source = STEPS.map((step) => ({ ...step }));
-		const executing = approvePlan(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), source));
-		executing.steps[0]!.done = true;
-		assert.equal(source[0]!.done, false);
+	it("重复 enterDocWriting 幂等，不覆盖已钉死的路径", () => {
+		const once = inDocWriting();
+		const twice = enterDocWriting(once, "doc-only", "/repo/.pi/plans/other.md");
+		assert.equal(twice.pendingDocPath, DOC);
+		assert.equal(twice.docMode, "execute-with-doc");
 	});
 
-	it("applyDoneSteps 只标记 execute 阶段的已知序号，重复标记不重复计数", () => {
-		const executing = approvePlan(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), STEPS));
-		assert.equal(applyDoneSteps(executing, [1, 1, 99]), 1);
-		assert.equal(applyDoneSteps(executing, [1]), 0, "已完成的步骤不再计数");
-		assert.equal(countDoneSteps(executing), 1);
-		assert.equal(applyDoneSteps(enterPlan(initialPlanState(), ALL_TOOLS), [1]), 0);
+	it("不在 plan 态时 enterDocWriting 不动", () => {
+		assert.equal(enterDocWriting(initialPlanState(), "doc-only", DOC).docWriting, undefined);
 	});
 
-	it("全部步骤完成后 isPlanComplete 才为真", () => {
-		const executing = approvePlan(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), STEPS));
-		assert.equal(isPlanComplete(executing), false);
-		applyDoneSteps(executing, [1, 2]);
-		assert.equal(isPlanComplete(executing), true);
-		assert.equal(isPlanComplete(initialPlanState()), false, "没有步骤时不算完成");
+	it("completeDocWrite 收尾回 bypass，并把路线与路径交给调用方", () => {
+		const outcome = completeDocWrite(inDocWriting("doc-only"));
+		assert.ok(outcome);
+		assert.equal(outcome.state.phase, "bypass");
+		assert.equal(outcome.docMode, "doc-only");
+		assert.equal(outcome.docPath, DOC);
+		assert.equal(outcome.state.docWriting, undefined);
+		assert.equal(outcome.state.pending, undefined);
+		assert.equal(outcome.state.toolsBeforePlan, undefined, "快照随状态清空（还原动作由调用方先做）");
+	});
+
+	it("不在子态里调用 completeDocWrite 返回 undefined（那不是收尾）", () => {
+		assert.equal(completeDocWrite(enterPlan(initialPlanState(), ALL_TOOLS)), undefined);
+		assert.equal(completeDocWrite(initialPlanState()), undefined);
+	});
+
+	it("路径丢了也不收尾（宁可可恢复地停在子态，不要静默放行）", () => {
+		const broken = { ...inDocWriting(), pendingDocPath: undefined };
+		assert.equal(completeDocWrite(broken), undefined);
+	});
+
+	it("docMode 缺失时收尾按 execute-with-doc 走（批准过就该能实施）", () => {
+		const outcome = completeDocWrite({ ...inDocWriting(), docMode: undefined });
+		assert.equal(outcome?.docMode, "execute-with-doc");
 	});
 });
 

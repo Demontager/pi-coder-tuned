@@ -718,3 +718,106 @@ test("单色主题（NO_COLOR / 恒等 fg）不下发帧表，而是无参交回
 		workspace.cleanup();
 	}
 });
+
+// =============================================================================
+// 弹窗期间冻结重绘（ui_prompt_start / ui_prompt_end）
+// =============================================================================
+
+test("弹窗开始：spinner 冻结成单帧、读秒定时器停（1.2s 内无新文案）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentSettled, shutdown } = handlersOf(extension);
+		const promptStart = extension.handlers.get("ui_prompt_start")?.[0];
+		assert.ok(promptStart, "应该注册了 ui_prompt_start");
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const calls: IndicatorCall[] = [];
+		const ctx = createContext(recorder, { onIndicator: (o) => calls.push(o) });
+
+		await input({ text: "跑一个长命令", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.workingMessages.length >= 1, "回合开始后的第一条文案");
+
+		await promptStart({}, ctx);
+
+		// 冻结帧：单帧盲文全集字符（与 ask-user-question 同字），accent 上色。
+		const frozen = calls.at(-1);
+		assert.ok(frozen?.frames, "弹窗开始应装冻结帧");
+		assert.equal(frozen.frames.length, 1, "单帧才能停掉 Loader 的 80ms 动画定时器");
+		assert.ok(frozen.frames[0].endsWith("⠿"), "冻结帧应是盲文全集字符");
+
+		// 定时器已停：等过一个 TICK（1s）也不该有新文案。
+		const countAtFreeze = recorder.workingMessages.length;
+		await delay(1_200);
+		assert.equal(recorder.workingMessages.length, countAtFreeze, "弹窗期间读秒定时器不该再出文案");
+
+		await agentSettled({}, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("弹窗结束：重装幻彩帧表、重启读秒、立即补刷一次", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const { input, agentStart, agentSettled, shutdown } = handlersOf(extension);
+		const promptStart = extension.handlers.get("ui_prompt_start")?.[0];
+		const promptEnd = extension.handlers.get("ui_prompt_end")?.[0];
+		assert.ok(promptStart && promptEnd, "应该注册了 ui_prompt_start / ui_prompt_end");
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const calls: IndicatorCall[] = [];
+		// 用可区分的七色主题：默认恒等主题是单色的，`spinnerPalette` 会返回 null 帧表
+		// （恢复时走无参调用），测不到「重装 1330 帧幻彩」这一步。
+		const theme = createMutableTheme();
+		const ctx = createContext(recorder, { themeFg: theme.fg, onIndicator: (o) => calls.push(o) });
+
+		await input({ text: "跑一个长命令", source: "interactive" }, ctx);
+		await agentStart({}, ctx);
+		await waitFor(() => recorder.workingMessages.length >= 1, "回合开始后的第一条文案");
+
+		await promptStart({}, ctx);
+		await promptEnd({}, ctx);
+
+		// 帧表重装成 1330 帧幻彩（覆盖掉单帧冻结帧）。恢复时的立即 refresh 受 lastMessage
+		// 去重保护：弹窗只持续几毫秒、文案没变就不重发 —— 那是设计行为，不是 bug。
+		const restored = calls.at(-1);
+		assert.equal((restored?.frames as string[] | undefined)?.length, 1330, "应重装完整幻彩帧表");
+
+		// 定时器重启：再过 1.2s 应继续出文案。
+		const countAfterResume = recorder.workingMessages.length;
+		await waitFor(() => recorder.workingMessages.length > countAfterResume, "恢复后读秒定时器继续走", 3_000);
+
+		await agentSettled({}, ctx);
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("回合外的弹窗（无 agent_start）：冻结不崩、结束不起定时器", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const extension = await loadExtension(workspace);
+		const promptStart = extension.handlers.get("ui_prompt_start")?.[0];
+		const promptEnd = extension.handlers.get("ui_prompt_end")?.[0];
+		const shutdown = extension.handlers.get("session_shutdown")?.[0];
+		assert.ok(promptStart && promptEnd && shutdown);
+		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
+		const calls: IndicatorCall[] = [];
+		const ctx = createContext(recorder, { onIndicator: (o) => calls.push(o) });
+
+		// 没有 agent_start：ctxRef 为 null、turnStartedAt 为 null。
+		await promptStart({}, ctx);
+		assert.equal(calls.length, 1, "仍应装一次冻结帧");
+		await promptEnd({}, ctx);
+		// 不该凭空起读秒定时器：等过一个 TICK 也没有文案。
+		await delay(1_200);
+		assert.equal(recorder.workingMessages.length, 0, "回合外不该有读秒文案");
+
+		await shutdown({}, ctx);
+	} finally {
+		workspace.cleanup();
+	}
+});

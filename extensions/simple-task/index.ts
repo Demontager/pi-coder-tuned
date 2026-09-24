@@ -1,9 +1,10 @@
 /**
- * simple-task — 轻量级任务清单扩展，兼作 plan-mode 执行期的唯一进度表。
+ * simple-task — 轻量级任务清单扩展。
  *
- * 自 2026-09-23 起它还承担一件事：plan-mode 批准计划时会把步骤镜像进来（id = 步号、
- * 文案带 `plan: n. ` 前缀），执行期的进度以这份清单为准 —— 跨扩展契约（事件名、
- * 前缀、重建规则）全在 `./plan-mirror.ts` 的文件头。
+ * 2026-09-23 到 2026-09-24 之间它曾兼作 plan-mode 执行期的唯一进度表（plan-mode 批准
+ * 计划时把步骤镜像进来，id = 步号、文案带 `plan: n. ` 前缀）。那套镜像已随 plan-mode
+ * 的 execute 态一起删除：计划批准后进度归模型自己，它认为该建清单就调 `task_set`，
+ * 扩展不再代它建、也不再读它的状态。本扩展现在是一份普通的任务清单。
  *
  * 功能参照 @thunstack/pi-task-list（会话级、agent 自主管理、无需 plan 模式），
  * 样式参照 @tintinweb/pi-tasks（● 头部统计 + ◻/◼/✔ 符号 + 星形 spinner + 完成项删除线）。
@@ -47,13 +48,6 @@ import {
 // 只引 buildWidgetLines：GLYPHS 只被 widget 自己的渲染用，本文件不再直接碰符号表。
 import { buildWidgetLines } from "./widget.ts";
 import { widgetGaps } from "./gap.ts";
-import {
-	type PlanMirrorItem,
-	SYNC_TASKS_EVENT,
-	TASK_STATE_EVENT,
-	nextAvailableId,
-	rebuildTasks,
-} from "./plan-mirror.ts";
 
 const WIDGET_KEY = "simple-task";
 const ENTRY_TYPE = "simple-task-state";
@@ -86,78 +80,11 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * 向 plan-mode 广播全量状态快照（contract 见 `plan-mirror.ts` 文件头）。
-	 *
-	 * 广播点有三处：任何状态写入（工具调用与镜像同步都走 `setState`）、会话重建后。
-	 * **不在每帧渲染里广播** —— spinner 每 150ms 重画一次，而 plan-mode 只需要在
-	 * 完成状态真的变时才重算进度。
-	 */
-	function broadcast(): void {
-		try {
-			pi.events.emit(TASK_STATE_EVENT, {
-				items: state.tasks.map((task) => ({ id: task.id, text: task.text, status: task.status })),
-			});
-		} catch {
-			// 事件总线在会话替换窗口里可能不可用；广播是尽力而为，不是状态的一部分
-		}
-	}
-
-	/**
-	 * plan-mode 的镜像同步：**全量重建**镜像条目，非镜像任务原样保留（规则见
-	 * `rebuildTasks`）。空数组 = 清掉镜像（退出 plan / 放弃计划）。
-	 */
-	function applyMirrorSync(incoming: PlanMirrorItem[], ctx?: ExtensionContext): void {
-		// 服务镜像之前必须已经重建过：否则会拿空清单重建，把手建任务抹掉（见
-		// `reconstructed` 的注释）。拿不到 ctx 时搁置（不是丢掉）—— 等 `session_start`
-		// 重建完再补上，那时 `state.tasks` 已经是会话里的真实清单了。
-		if (!ensureReconstructed(ctx)) {
-			pendingMirror = incoming;
-			return;
-		}
-		const tasks = rebuildTasks(state.tasks, incoming);
-		if (tasks.length === 0) {
-			setState(emptyState(), ctx);
-			return;
-		}
-		setState({ active: true, tasks, nextId: nextAvailableId(tasks) }, ctx);
-	}
-
-	/**
-	 * 本进程内有没有从会话重建过。
-	 *
-	 * 存在的理由：plan-mode 的 `session_start` 早于本扩展（加载顺序里它在前、本扩展在
-	 * 后），它一恢复出 execute 态就会推镜像 —— 那时 `state` 还是模块加载时的
-	 * `emptyState()`。若直接按空清单重建，手建任务当场丢失，而且 `persist()` 追加的
-	 * 那条 entry 会成为随后 `reconstruct()` 取到的「最后一条」，损坏就此固化。
-	 */
-	let reconstructed = false;
-
-	/**
-	 * 尚未服务的镜像快照。
-	 *
-	 * 还存在一种 `ensureReconstructed` 盖不住的时序：**pi 刚启动**（或 `/reload`）时，
-	 * plan-mode 的 `session_start` 先跑，而本扩展那时候连 `lastCtx` 都还没有
-	 * （它由本扩展自己的 `session_start` 赋值）—— 没有 ctx 就重建不了，也认不出
-	 * 会话里那份手建清单。此时**不能**拿空清单去重建：那正是缺陷本身。
-	 * 所以先把它存起来，等本扩展的 `session_start` 重建完再照常应用。
-	 */
-	let pendingMirror: PlanMirrorItem[] | undefined;
-
-	/** 需要会话与 ctx 才能重建；拿不到就先搁置，返回 false 让调用方不要往下走。 */
-	function ensureReconstructed(ctx: ExtensionContext | undefined): boolean {
-		if (reconstructed) return true;
-		if (!ctx) return false;
-		reconstruct(ctx);
-		return true;
-	}
-
-	/**
 	 * 用 getBranch() 而不是 getEntries()：分支导航（回退到旧消息再继续）时必须
 	 * 跟着当前分支走，否则会把已丢弃分支上的任务状态复活。
 	 * 取最后一条 —— 每条都是全量快照，最新的即当前状态。
 	 */
 	function reconstruct(ctx: ExtensionContext): void {
-		reconstructed = true;
 		state = emptyState();
 		enabled = true;
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -166,7 +93,6 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			if (data?.state) state = cloneState(data.state);
 			if (typeof data?.enabled === "boolean") enabled = data.enabled;
 		}
-		broadcast();
 	}
 
 	// ── UI ────────────────────────────────────────────────────────────────
@@ -261,7 +187,6 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		state = cloneState(next);
 		persist();
 		updateUi(ctx);
-		broadcast();
 	}
 
 	function details(action: ToolDetails["action"]): ToolDetails {
@@ -341,7 +266,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Update one task's status in the active task list.",
 		promptGuidelines: [
 			"Use task_update immediately when starting or finishing a tracked task.",
-			"Mark a task in_progress before beginning the work, and done right after it finishes.",
+			"Prefer marking a task in_progress before starting and done when it finishes — that is what drives the spinner. The order is not enforced, so a direct pending → done is tolerated rather than corrected.",
 			"Prefer task_update over text-only done markers whenever a task list is active.",
 		],
 		parameters: Type.Object({
@@ -459,28 +384,6 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	// ── 事件 ──────────────────────────────────────────────────────────────
 
 	/**
-	 * plan-mode 批准计划时把步骤镜像进来（契约与事件名见 `plan-mirror.ts`）。
-	 * 用 `pi.events` 而不是 import plan-mode：两个扩展都可以单独装、单独 reload。
-	 * 镜像重建后带上前缀的条目就成了清单的一部分 —— 用户手建的任务不受影响。
-	 */
-	pi.events.on(SYNC_TASKS_EVENT, (data) => {
-		const items = Array.isArray(data) ? (data as PlanMirrorItem[]) : [];
-		applyMirrorSync(items, lastCtx);
-	});
-
-	/**
-	 * 重放 `session_start` 期间搁置的镜像快照（见 `pendingMirror`）。
-	 *
-	 * 只有真的搁置过才重放：正常路径上镜像已经应用过了，重放会多发一次全量广播。
-	 */
-	function flushPendingMirror(ctx: ExtensionContext): void {
-		if (pendingMirror === undefined) return;
-		const items = pendingMirror;
-		pendingMirror = undefined;
-		applyMirrorSync(items, ctx);
-	}
-
-	/**
 	 * 会话结束必须立刻停表 —— spinner 定时器会在会话结束后继续 tick，
 	 * 而那时 lastCtx 已被 pi 作废，读 ctx.ui 会抛。
 	 * docs/extensions.md 明确要求「注册一个幂等的 session_shutdown 处理器，
@@ -491,19 +394,15 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		// 先钉死 lastCtx：事件订阅处靠它把 ctx 交给 `applyMirrorSync`，而 plan-mode 的
-		// session_start 早于本处理器，它推镜像时我们还没走到这里。
 		lastCtx = ctx;
 		reconstruct(ctx);
 		updateUi(ctx);
-		flushPendingMirror(ctx);
 	});
 
 	// 分支导航后必须重建：否则会把已丢弃分支上的状态复活
 	pi.on("session_tree", async (_event, ctx) => {
 		reconstruct(ctx);
 		updateUi(ctx);
-		flushPendingMirror(ctx);
 	});
 
 	// 压缩时清掉已完成的列表，给下一批工作一个干净的起点
