@@ -10,7 +10,7 @@
  * 直接 `EPERM` 拒绝，写入则不限制（见下面「边界」一节）。
  *
  * 于是"确认"只在该出现的时候出现：正常操作（边界内删除、任何写入）→ 一次都不弹；
- * 越界删除 → 命令先失败，用户明确批准后才在沙箱外重跑。这是 fail-closed ——
+ * 越界删除 → 命令先失败，用户明确批准后才带着批准的范围**在沙箱内**重跑。这是 fail-closed ——
  * 枚举之外的洞不存在，因为根本不枚举。
  *
  * 本模块只负责**生成 profile 与判定边界**，真正执行在 `bash-command-collapse.ts`。
@@ -19,23 +19,27 @@
  *
  * - **写入**：不限制。`echo x > ~/.zshrc` 这类边界外的写直接放行、不弹框 ——
  *   用户定的口径是「写入目标在可写边界之外不需要提醒」。
- * - **删除**：只有项目目录（`cwd`）+ 临时目录（`/tmp`、`/private/tmp`、`/var/folders`）
- *   + `PI_SANDBOX_EXTRA_WRITE` 里显式列出的路径**之内**才放行；边界外的 `unlink` 被内核
- *   `EPERM` 拒绝，然后才弹一次确认。两次事故的损失面（`~/.zshrc`、`~/.pi/agent/sessions`、
- *   `~/.claude`）全是**删除**造成的，所以强制点就落在删除上。
+ * - **删除**：只有项目目录（`cwd`）+ 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/var/tmp`）
+ *   + 可再生缓存（`SAFE_CACHE_HOME_DIRS`）+ `PI_SANDBOX_EXTRA_WRITE` 里显式列出的路径
+ *   **之内**才放行；边界外的 `unlink` 被内核 `EPERM` 拒绝，然后才弹一次确认。
+ *   两次事故的损失面（`~/.zshrc`、`~/.pi/agent/sessions`、`~/.claude`）全是**删除**造成的，
+ *   所以强制点就落在删除上。
  * - **读**：不限制。Codex 的 `workspace-write` 同样只管写不管读；限制读会打断
  *   `cat ~/.zshrc` 这类完全正常的排查动作。
  * - **网络**：全放行。本机的 npm / git / 网关流量都依赖出站，而风险面是文件删除不是网络。
  *
- * ## 两层授权（用户 2026-09-24 定）
+ * ## 三档授权（用户 2026-09-24 定，同日新增「永不删除」档）
  *
- * 边界外的删除不再一律「按命令问一次」，而是按**目标路径**分两档：
+ * 边界外的删除按**目标路径**分三档：
  *
- * - **危险路径**（`DANGEROUS_ROOTS` + home 下的配置类 + 任何一级是 `.git`/`.hg`/`.svn`）：
+ * - **永不删除**（`NEVER_DELETE_HOME_FILES` / `NEVER_DELETE_HOME_DIRS`）：身份 / 凭据 /
+ *   手写配置（`~/.zshrc`、`~/.ssh`、`~/.config`、`~/.pi`…）。**不弹框、无任何放行选项**，
+ *   白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（内核 deny 行在 allow 行之后）。
+ *   2026-09-23 第二次事故删掉的 `~/.zshrc`、`~/.gitconfig`、`~/.zprofile` 就在这一档。
+ * - **危险路径**（`DANGEROUS_ROOTS` + `~/Library` + 任何一级是 `.git`/`.hg`/`.svn`）：
  *   每次删除都问，只支持**会话级**豁免（重启 pi 后恢复）。这是 unix 系统根、
- *   bin、应用程序安装目录与配置项目录 —— 2026-09-23 第二次事故的损失面
- *   （`~/.zshrc`、`~/.gitconfig`、`~/.zprofile`、`~/.pi/agent/sessions`）全在这一档。
- * - **普通路径**（边界外但不在危险名单里）：问一次，同意后把**目录范围**写进
+ *   bin、应用程序安装目录 —— 删错难恢复，但不是凭据。
+ * - **普通路径**（边界外但不在上面两档）：问一次，同意后把**目录范围**写进
  *   `~/.pi/agent/sandbox-allowlist.json`，以后（含 headless）都不再问。
  *
  * 记住一个目录 = 把它加进 profile 的 `(allow file-write-unlink (subpath …))`，
@@ -55,6 +59,9 @@
  *
  * 这不是漏洞而是删除语义的必然：原子替换确实会让原来那个 inode 消失。相比改动前
  * （边界外**所有**写都被拦）这是严格放宽，没有任何操作从「能用」变成「不能用」。
+ * 但「永不删除」档是例外：`sed -i '' ~/.zshrc` 这类对配置文件的**原地改写**也会被
+ * 内核拦下（rename 走 unlink）—— 这正是用户要的「永不删除」强度，代价是改配置得
+ * 自己在终端做，或 `PI_SANDBOX=off` 整体关掉这一层。
  *
  * `sandbox-exec` 被 Apple 标记为 deprecated，但在 macOS 26.5.1 上实测可用
  * （边界外 `echo >` 成功、边界外 `rm` 得到 `Operation not permitted` 且文件仍在、
@@ -81,21 +88,34 @@ export interface WriteBoundary {
  * `/var/folders` 是 macOS 真正的 `$TMPDIR`：node / git / npm / python3 都往那里写临时文件，
  * 不放行会让大量正常命令失败。`/private/...` 是它们的 realpath 形式，两种拼写都要在表里
  * （与 `destructive-guard` 的 `TEMP_ROOTS` 同一套理由）。
+ *
+ * `/var/tmp` 是 macOS 自带 **bash 3.2** 的 heredoc 临时目录，而且**编译期写死**：
+ * `strings /bin/bash` 只含 `/var/tmp/` 与 `sh-thd`，`TMPDIR=/tmp`、`TMPDIR=<项目目录>`、
+ * `env -u TMPDIR` 全部无效（实测内层 `$TMPDIR` 已是新值，文件仍落 `/private/var/tmp/sh-thd-*`）。
+ * bash 3.2 的 heredoc 实现必须先建临时文件再 unlink（delete-on-open），不放行这个根，
+ * **沙箱内任何 heredoc 都 100% 失败**，还会每次泄漏一个 `sh-thd-*`。用户口径：
+ * `/var/tmp` 与 `/tmp` 同级，「怎么折腾都没事」。注意它比 `/tmp` 更「持久」——
+ * 本机没有 `/etc/periodic` 也没有 periodic LaunchDaemon，`/private/var/tmp` 里确有数月前的条目。
  */
 export const TEMP_WRITE_ROOTS: readonly string[] = [
 	"/tmp",
 	"/private/tmp",
 	"/var/folders",
 	"/private/var/folders",
+	"/var/tmp",
+	"/private/var/tmp",
 ];
 
 /**
  * 危险路径：每次删除都必问，只支持会话级豁免。
  *
  * 口径（用户 2026-09-24 选的「窄枚举」）：unix 重要系统根目录 + bin +
- * 应用程序安装目录 + 与配置项有关的目录。`/usr/local` 与 `/opt/homebrew` 是
- * 包管理器前缀（`brew uninstall` / `npm -g` 的地盘），单列出来是因为它们比
- * `/usr` 更常被正常操作碰到，但删错了同样难恢复。
+ * 应用程序安装目录。`/usr/local` 与 `/opt/homebrew` 是包管理器前缀
+ * （`brew uninstall` / `npm -g` 的地盘），单列出来是因为它们比 `/usr` 更常被
+ * 正常操作碰到，但删错了同样难恢复。
+ *
+ * home 下的身份 / 凭据 / 配置目录已升入「永不删除」档（`NEVER_DELETE_HOME_DIRS`），
+ * 这张表的 home 部分只剩 `~/Library`。
  *
  * `/private/...` 是 macOS 的 realpath 形式（`/etc` → `/private/etc`），两种拼写都要在表里 ——
  * 与 `TEMP_WRITE_ROOTS` 同一套理由。注意 `/private/tmp` 与 `/private/var/folders`
@@ -108,11 +128,12 @@ export const TEMP_WRITE_ROOTS: readonly string[] = [
  *
  * - **子树危险**（`DANGEROUS_ROOTS` + `DANGEROUS_HOME_DIRS`）：它**与它下面的一切**都危险。
  *   `/usr/local/bin/tsc` 危险，因为 `/usr` 在表里。
- * - **仅自身危险**（`DANGEROUS_EXACT` + `DANGEROUS_HOME_FILES`）：只有这个路径本身危险，
- *   它的子路径要**单独判**。`$HOME` 在这一档 —— 删掉整个 home 是灾难，但
- *   `~/Downloads` 是普通目录，该走「问一次就记住」那一档。把 `$HOME` 放进子树表
- *   会让 home 下**所有**路径都变成危险，普通目录白名单就永远不会生效了。
- *   `/Users` 同理（否则别人的 home 也算危险，而自己的 home 已由 `$HOME` 单独管）。
+ * - **仅自身危险**（`DANGEROUS_EXACT`）：只有它自己危险，它的子路径要**单独判**。
+ *   `$HOME` 在这一档 —— 删掉整个 home 是灾难，但 `~/Downloads` 是普通目录，该走
+ *   「问一次就记住」那一档。把 `$HOME` 放进子树表会让 home 下**所有**路径都变成
+ *   危险，普通目录白名单就永远不会生效了。`/Users` 同理。
+ *
+ * 身份 / 凭据 / 手写配置已升入「永不删除」档（`NEVER_DELETE_*`），不再走这张表。
  */
 export const DANGEROUS_ROOTS: readonly string[] = [
 	"/System",
@@ -140,50 +161,81 @@ export const DANGEROUS_ROOTS: readonly string[] = [
 export const DANGEROUS_EXACT: readonly string[] = ["/", "/Users"];
 
 /**
- * `$HOME` 下「与配置项有关」的目录：删掉等于丢掉凭据 / 会话 / 全局规则。
+ * `$HOME` 下「与配置项有关」的目录，**每次必问、可会话豁免**那一档。
  *
- * 这一档是**子树**语义：`~/.ssh/id_rsa`、`~/.config/foo/bar` 都危险。
- * `~/.pi` 在名单里顺带完成了**自保护** —— 守卫自己的扩展目录、`AGENTS.md`、
- * `sessions/`、`rewind/`、以及白名单文件本身全在它下面。删掉它们等于当场解除武装
- * 并毁掉自己的恢复手段，这是 `destructive-guard` 时代用事故换来的教训。
- * `~/Library` 是 macOS 应用偏好与 Application Support 的所在，同样属于配置类。
+ * 2026-09-24 起身份 / 凭据 / 全局规则类目录（`.ssh`、`.config`、`.pi`、`.claude`…）
+ * 升入「永不删除」档（`NEVER_DELETE_HOME_DIRS`），这里只剩 `~/Library` ——
+ * macOS 应用偏好与 Application Support 的所在，删错难恢复但不是凭据，仍走必问可豁免。
  *
- * 注意 `~/.cache`、`~/.npm`、`~/Downloads`、`~/projects` 这类**不在**名单里 ——
- * 它们是用户选的「窄枚举」口径下的普通目录，问一次就记住。
+ * 注意 `~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` 在**可删边界内**
+ * （`SAFE_CACHE_HOME_DIRS`），`classifyOutsidePaths` 先判边界，走不到这里。
  */
-export const DANGEROUS_HOME_DIRS: readonly string[] = [
-	".ssh",
-	".gnupg",
-	".config",
-	".pi",
-	".claude",
-	".codex",
-	".aws",
-	".kube",
-	".docker",
-	"Library",
+export const DANGEROUS_HOME_DIRS: readonly string[] = ["Library"];
+
+/**
+ * 「永不删除」档：删了补不回的身份 / 凭据 / 手写配置。内核级拦死，不弹框、
+ * 无任何放行选项（`Allow once` / `Allow for this session` / 白名单 / extraWrites
+ * 都压不过）。用户 2026-09-24 定的口径：只列**身份 / 凭据 / 手写配置**，
+ * 缓存类 dotfile（`.cache`、`.npm`、`.dartServer`…）一律不列。
+ *
+ * 与「危险必问」档的区别：危险档是「能删但要明确同意」，这一档是「不给删」。
+ * 2026-09-23 第二次事故删掉的 `~/.zshrc`、`~/.gitconfig`、`~/.zprofile` 就在这一档。
+ *
+ * 只列 **home 一级**（`~/.zshrc`），不递归 —— `~/projects/.zshrc` 是项目文件，
+ * 不该按永不删除处理。
+ */
+export const NEVER_DELETE_HOME_FILES: readonly string[] = [
+	// shell 启动项
+	".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout",
+	".bashrc", ".bash_profile", ".bash_login", ".bash_logout",
+	".profile", ".cshrc", ".login", ".hushlogin",
+	// git / VCS
+	".gitconfig", ".git-credentials", ".gitattributes",
+	// 凭据
+	".netrc", ".npmrc", ".pgpass", ".my.cnf", ".pypirc", ".vault-token", ".terraformrc",
+	// shell / 工具配置
+	".inputrc", ".editorconfig", ".tmux.conf", ".screenrc", ".vimrc",
+	".curlrc", ".wgetrc", ".gemrc", ".irbrc", ".pryrc", ".pythonrc",
+	".Rprofile", ".Renviron", ".condarc",
+	// AI / agent
+	".claude.json",
+	// 环境
+	".env",
 ];
 
 /**
- * `$HOME` 一级的配置文件：shell 启动项与 VCS / 凭据配置。
- *
- * 只列**一级**（`~/.zshrc`），不递归 —— `~/projects/.zshrc` 是项目文件，不该按危险处理。
- * 2026-09-23 第二次事故删掉的正是 `~/.zshrc`、`~/.gitconfig`、`~/.zprofile`。
- *
- * 这一档天然是「仅自身」语义（它们是文件），但实现上走子树判定也无害：
- * `~/.zshrc` 下面不会有子路径。
+ * 「永不删除」档的目录（子树语义）：`~/.ssh/id_rsa`、`~/.config/foo/bar` 都拦。
+ * `.pi` 兼自保护 —— 守卫自己的扩展、`AGENTS.md`、`sessions/`、`rewind/`、白名单文件
+ * 全在其下，删掉等于当场解除武装并毁掉恢复手段（destructive-guard 时代事故换来的教训）。
  */
-export const DANGEROUS_HOME_FILES: readonly string[] = [
-	".zshrc",
-	".zprofile",
-	".zshenv",
-	".zlogin",
-	".bashrc",
-	".bash_profile",
-	".profile",
-	".gitconfig",
-	".netrc",
-	".npmrc",
+export const NEVER_DELETE_HOME_DIRS: readonly string[] = [
+	// 凭据 / 身份
+	".ssh", ".gnupg", ".aws", ".kube", ".docker",
+	// 全局规则
+	".config", ".pi",
+	// AI / agent
+	".claude", ".codex", ".agents", ".copilot", ".iflow", ".lingma",
+	".aone_copilot", ".aone-copilot-preview", ".codex-claude-proxy", ".cursor-tutor",
+];
+
+/**
+ * 可再生缓存：删了能干净重建，进**可删边界**（静默放行，不弹框）。
+ * 用户 2026-09-24 定的口径。home 相对路径，`writableRoots` 解析成绝对路径。
+ *
+ * 明确**不列**的：`Library/pnpm/store`（pi 本体安装位置）、`.deno`（含 bin）、
+ * `.nvm`（含已装 Node 版本）、`.gem` / `.bundle`（小且混合）—— 删了不能干净重建。
+ */
+export const SAFE_CACHE_HOME_DIRS: readonly string[] = [
+	".cache",
+	".npm",
+	".gradle/caches",
+	".m2/repository",
+	".cargo/registry",
+	".bun/install/cache",
+	".node-gyp",
+	".Trash",
+	"Library/Caches",
+	"Library/Developer/Xcode/DerivedData",
 ];
 
 /** 版本控制存储的目录名：路径里**任何一级**是它就算危险（删掉是丢只此一份的历史）。 */
@@ -257,9 +309,54 @@ export function makeBoundary(cwd: string, extraWrites: readonly string[] = []): 
 	};
 }
 
-/** 全部可写根：项目目录 + 临时目录 + 显式额外路径。 */
+/**
+ * 全部可写根：项目目录 + 临时目录 + 可再生缓存 + 显式额外路径。
+ *
+ * 可再生缓存（`SAFE_CACHE_HOME_DIRS`）按 `homedir()` 解析成绝对路径 ——
+ * 与 `makeBoundary` 用同一个 `homedir()`，口径一致。
+ */
 export function writableRoots(boundary: WriteBoundary): string[] {
-	return [boundary.cwd, ...TEMP_WRITE_ROOTS, ...boundary.extraWrites];
+	const home = stripTrailingSlash(homedir());
+	const cacheRoots = SAFE_CACHE_HOME_DIRS.map((rel) => `${home}/${rel}`);
+	return [boundary.cwd, ...TEMP_WRITE_ROOTS, ...cacheRoots, ...boundary.extraWrites];
+}
+
+/**
+ * 「永不删除」路径的绝对形式（home 一级文件 + 目录子树根）。
+ *
+ * 供三处共用：`classifyOutsidePaths` 的 `blocked` 档、`buildSeatbeltProfile` 的
+ * deny 行、`isSafeAllowlistRoot` 的白名单闸 —— 同一张表，口径不会漂移。
+ *
+ * `home` 可注入（与 `dangerousRoots(env)` 同一口径），不传则用 `homedir()`。
+ */
+export function neverDeletePaths(home: string = homedir()): string[] {
+	const base = stripTrailingSlash(resolvePath(home));
+	return [...NEVER_DELETE_HOME_FILES, ...NEVER_DELETE_HOME_DIRS].map((name) =>
+		stripTrailingSlash(resolvePath(`${base}/${name}`)),
+	);
+}
+
+/**
+ * 目标是不是「永不删除」路径：等于名单里某项，或在其子树下。
+ *
+ * 与 `dangerousReasonFor` 同一套双形态判定（词法 + realpath），所以
+ * `~/link → ~/.ssh` 这类符号链接逃逸也拦得住。
+ */
+export function neverDeleteReasonFor(target: string, env: PathEnv): string | undefined {
+	const roots = neverDeletePaths(env.home);
+	const forms = [stripTrailingSlash(resolvePath(target))];
+	const real = env.realpath?.(target);
+	if (real) {
+		const resolvedReal = stripTrailingSlash(resolvePath(real));
+		if (!forms.includes(resolvedReal)) forms.push(resolvedReal);
+	}
+	for (const form of forms) {
+		for (const root of roots) {
+			if (form === root) return `${form} 是永不删除的身份/凭据/手写配置`;
+			if (form.startsWith(`${root}/`)) return `${form} 在永不删除的 ${root} 下`;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -306,11 +403,9 @@ export interface DangerousTables {
 export function dangerousRoots(env: PathEnv): DangerousTables {
 	const home = stripTrailingSlash(resolvePath(env.home));
 	return {
-		subtree: [
-			...DANGEROUS_ROOTS,
-			...DANGEROUS_HOME_DIRS.map((name) => `${home}/${name}`),
-			...DANGEROUS_HOME_FILES.map((name) => `${home}/${name}`),
-		].map((p) => stripTrailingSlash(resolvePath(p))),
+		subtree: [...DANGEROUS_ROOTS, ...DANGEROUS_HOME_DIRS.map((name) => `${home}/${name}`)].map((p) =>
+			stripTrailingSlash(resolvePath(p)),
+		),
 		exact: [...DANGEROUS_EXACT, home].map((p) => stripTrailingSlash(resolvePath(p))),
 	};
 }
@@ -353,17 +448,18 @@ export function dangerousReasonFor(target: string, env: PathEnv): string | undef
 /**
  * 这个路径能不能作为白名单根持久化。
  *
- * 三道闸：组件数 ≥ `MIN_ALLOWLIST_DEPTH`、自身不危险、且**不是任何危险路径的祖先**
- * （记下 `$HOME` 就等于把 `~/.ssh` 一起交出去）。加载白名单时也跑这一遍，
- * 手改或损坏的 JSON 塞不进 `/`。
+ * 四道闸：组件数 ≥ `MIN_ALLOWLIST_DEPTH`、自身不危险、自身不是永不删除路径、
+ * 且**不是任何危险 / 永不删除路径的祖先**（记下 `$HOME` 就等于把 `~/.ssh` 一起交出去）。
+ * 加载白名单时也跑这一遍，手改或损坏的 JSON 塞不进 `/`。
  */
 export function isSafeAllowlistRoot(path: string, env: PathEnv): boolean {
 	const resolved = stripTrailingSlash(resolvePath(path));
 	if (componentCount(resolved) < MIN_ALLOWLIST_DEPTH) return false;
 	if (dangerousReasonFor(resolved, env)) return false;
-	// 不能是任何危险路径的**祖先**：记下 `$HOME` 就等于把 `~/.ssh` 一起交出去。
+	if (neverDeleteReasonFor(resolved, env)) return false;
+	// 不能是任何危险 / 永不删除路径的**祖先**：记下 `$HOME` 就等于把 `~/.ssh` 一起交出去。
 	const tables = dangerousRoots(env);
-	const all = [...tables.subtree, ...tables.exact];
+	const all = [...tables.subtree, ...tables.exact, ...neverDeletePaths(env.home)];
 	return !all.some((root) => root !== resolved && root.startsWith(resolved + "/"));
 }
 
@@ -398,19 +494,22 @@ function parentOf(resolved: string): string | undefined {
 }
 
 /**
- * 「本会话不再询问」应该豁免多大范围。
+ * `Allow for this session`（危险路径分支，旧名「本会话不再询问」）应该豁免多大范围。
  *
  * 与 `memoryScopeFor` 的区别：会话豁免**不落盘**、重启即失效，所以可以比持久白名单宽 ——
- * 允许落在危险子树根**之下**（比如 `~/.config/foo`），这样用户豁免一次后，同一子目录里的
+ * 允许落在危险子树根**之下**（比如 `~/Library/Foo`），这样用户豁免一次后，同一子目录里的
  * 兄弟文件本会话不再反复问（用户口径：「当前会话就不再弹框确认」）。但仍有一道硬闸：
  *
- * - 范围不能**本身是**某个危险根（豁免了 `~/.config` 就等于把整个配置目录交出去）；
- * - 范围不能是某个危险根的**祖先**（豁免了 `$HOME` 就等于把 `~/.ssh` 一起交出去）；
+ * - 范围不能**本身是**某个危险根 / 永不删除路径（豁免了 `~/Library` 就等于把整个偏好目录交出去）；
+ * - 范围不能是某个危险根 / 永不删除路径的**祖先**（豁免了 `$HOME` 就等于把 `~/.ssh` 一起交出去）；
  * - 组件数 ≥ `MIN_ALLOWLIST_DEPTH`。
  *
- * 三条都过不了就退回**精确路径**（只豁免这一个目标）。于是豁免删 `~/.config/foo/bar`
- * 会记下 `~/.config/foo`，但豁免删 `~/.zshrc`（父目录是 `$HOME`，是危险根的祖先）只会
- * 记下 `~/.zshrc` 这一个文件。
+ * 三条都过不了就退回**精确路径**（只豁免这一个目标）。于是豁免删 `~/Library/Foo/bar`
+ * 会记下 `~/Library/Foo`，但豁免删 `~/Library/x.plist`（父目录是 `~/Library`，本身是危险根）
+ * 只会记下 `~/Library/x.plist` 这一个文件。
+ *
+ * 注：永不删除路径（`~/.zshrc`、`~/.ssh`…）在 `classifyOutsidePaths` 里进 `blocked` 档，
+ * 根本走不到会话豁免这一步 —— 这里把它们纳入硬闸只是口径一致的防御。
  */
 export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd()): string {
 	const resolved = stripTrailingSlash(resolveAgainst(target, cwd));
@@ -421,11 +520,14 @@ export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd(
 }
 
 /**
- * 会话豁免范围能不能用：深度够、自身不是危险根、也不是任何危险根的祖先。
+ * 会话豁免范围能不能用：深度够、自身不是危险根 / 永不删除路径、也不是它们的祖先。
  *
- * 与持久白名单不同，这里**允许**落在危险子树根之下（`~/.config/foo` 在 `~/.config` 下）——
- * 会话豁免不落盘、重启即失效，宽一点是安全的，而且这正是「本会话不再询问」的语义：
+ * 与持久白名单不同，这里**允许**落在危险子树根之下（`~/Library/Foo` 在 `~/Library` 下）——
+ * 会话豁免不落盘、重启即失效，宽一点是安全的，而且这正是 `Allow for this session` 的语义：
  * 豁免一次后同子目录的兄弟文件不再反复问。
+ *
+ * 永不删除路径没有豁免一说（blocked 档根本走不到这里），但为了口径一致仍把它们
+ * 纳入硬闸 —— 将来调用方误用时不会静默交出 `~/.ssh`。
  *
  * 深度闸与持久白名单同宽：`$HOME` 的直接子目录（`~/Downloads`，2 个组件）放行，
  * 其余卡 `MIN_ALLOWLIST_DEPTH`。
@@ -433,64 +535,109 @@ export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd(
 function isSafeSessionRoot(path: string, env: PathEnv): boolean {
 	const resolved = stripTrailingSlash(resolvePath(path));
 	if (componentCount(resolved) < MIN_ALLOWLIST_DEPTH) return false;
+	// 永不删除是**子树**语义：它下面的一切都不能豁免（`~/.config/foo` 也算）。
+	if (neverDeleteReasonFor(resolved, env)) return false;
 	const tables = dangerousRoots(env);
 	const all = [...tables.subtree, ...tables.exact];
 	for (const root of all) {
-		if (resolved === root) return false; // 自身是危险根（豁免了 ~/.config 就等于交出整个配置目录）
-		if (root.startsWith(resolved + "/")) return false; // 是危险根的祖先（豁免了 $HOME 就等于交出 ~/.ssh）
+		if (resolved === root) return false; // 自身是危险根（豁免了 ~/Library 就等于交出整个偏好目录）
+		if (root.startsWith(resolved + "/")) return false; // 是危险根的祖先（豁免了 $HOME 就等于交出 ~/Library）
 	}
 	return true;
 }
 
 /**
+ * heredoc 临时文件失败的特征串（排除 1）。
+ *
+ * macOS 自带 bash 3.2 的 heredoc 实现必须先建临时文件再 unlink（delete-on-open），
+ * 而该临时目录**编译期写死在 `/var/tmp`**（`strings /bin/bash` 只含 `/var/tmp/` 与 `sh-thd`，
+ * `TMPDIR` 怎么改都无效）。`/var/tmp` 进可删边界后这条失败本身已消失，但保留这道排除：
+ * 它不是删除用户数据，不该弹删除确认框。
+ */
+const HERE_DOCUMENT_RE = /here[\s-]*document/i;
+
+/**
+ * 行首 prog token 是 shell 或 `sandbox-exec` 时整行跳过（排除 2）。
+ *
+ * shell 自己报的 EPERM 是 **exec 失败**（setuid / platform binary，如 `/bin/ps`、`/usr/bin/top`），
+ * 不是 unlink；bash 唯一会 unlink 的是 heredoc 临时文件，已由排除 1 覆盖。
+ * `sandbox-exec: sandbox_apply: Operation not permitted` 是嵌套沙箱不可用，同样不是删除。
+ * 带不带路径前缀都认（`bash:` 与 `/bin/bash:` 是同一个程序）。
+ */
+const SHELL_PROG_RE = /^(?:\/[\w./+-]+\/)?(bash|sh|zsh|dash|ksh|csh|tcsh|fish|sandbox-exec)$/i;
+
+/**
  * 从**已失败**命令的输出里抽出被沙箱拦下的路径。
  *
  * 内核只给 `EPERM`，不会告诉你是谁拦的 —— 按目录记忆的前提就是能从 stderr 里认出路径。
- * 只扫含 `Operation not permitted` / `EPERM` 的行（成功命令的输出里出现这些字样不该触发），
- * 依次尝试：
+ * 只扫含 `Operation not permitted` / `EPERM` 的行（成功命令的输出里出现这些字样不该触发）。
  *
- * - `mv: rename A to B: …` / `sed: rename(A to B): …` → 取**源** A（unlink 落在源上）
- * - GNU 的 `rm: cannot remove 'X': …` / `unlink: cannot unlink 'X': …` → 取引号里的 X
- * - BSD 的 `rm: X: …` / `rmdir: X: …` → 取程序名后面那个 token
- * - 兜底：行里所有看起来像绝对路径的 token
+ * ## 排除法，不是白名单（用户 2026-09-24 定）
  *
- * **抽不出任何路径时返回空数组**，调用方必须退回「按整条命令、会话级问一次」的旧行为 ——
- * 猜不出目标就不许进记忆逻辑，这是 `AGENTS.md` 「Never derive a delete target」的同一口径。
+ * 曾考虑过「只认 `rm|rmdir|unlink|…` 这些程序名」的白名单，实测会**静默丢掉**三类真实
+ * 删除形状 —— 恰是这套机制要拦的「脚本驱动的边界外删除」：
+ *
+ * - `PermissionError: [Errno 1] Operation not permitted: '/p'`（python3，路径在 EPERM **之后**
+ *   且无 `cannot`，prog token 是 `PermissionError` 不是 `python3`，两条正则都够不着）
+ * - `find: /p: Operation not permitted`（`find -delete` / `-exec rm`）
+ * - `ln: /p: Operation not permitted`（`ln -sf` 覆盖 = unlink 目标）
+ *
+ * 白名单的本质是「枚举删除程序」，永远枚举不全。所以这里**保留兜底扫描**，只排除已知的
+ * 误报源（覆盖面只增不减）。
+ *
+ * ## 逐行判定顺序
+ *
+ * 1. 不含 `Operation not permitted` / `EPERM` → 跳过
+ * 2. **排除 1**：含 `here document` → 跳过该行（**逐行**，不是全局 ——
+ *    `cat <<EOF …; rm /边界外` 这种 `;` 串联命令里，真删除的那一行仍会被抽出）
+ * 3. **排除 2**：行首 prog 是 shell / `sandbox-exec` → 跳过该行
+ * 4. `mv: rename A to B: …` / `sed: rename(A to B): …` → 取**源** A（unlink 落在源上）
+ * 5. GNU 的 `rm: cannot remove 'X': …` / `unlink: cannot unlink 'X': …` → 取引号里的 X
+ * 6. BSD 的 `rm: X: …` / `rmdir: X: …` → 取程序名后面那个 **单 token**（`(\S+?)`，
+ *    不含空格 —— 旧的 `(.+?)` 会把 `find: /p/a: cannot unlink:` 的中段一起吃进来）
+ * 7. **兜底**：行里所有看起来像绝对路径的 token（rvm 的 `errno=1` 形状、
+ *    `ruby: … @ apply2files - /p`、`xargs: rm: /p`、node 的 `EPERM … unlink '/p'`、
+ *    git 的 `unable to unlink '/p'` 全靠它）
+ *
+ * 4-6 抽不出东西时**不再 `continue`**，而是落到兜底 —— 旧实现的 `continue` 正是
+ * `bash: line 0: /usr/bin/top` 返回空而非兜底抽取的原因。
+ *
+ * **抽不出任何路径时返回空数组**，调用方据此**不弹框**、原样返回失败输出并追加一行
+ * `[沙箱]` 提示 —— 猜不出目标就不许进记忆逻辑，这是 `AGENTS.md`
+ * 「Never derive a delete target」的同一口径。
  *
  * 抽错了也不会静默放行：弹框会把这些路径原样列给用户看，确认之前不会落盘。
  */
 export function extractDeniedPaths(output: string): string[] {
 	if (!output) return [];
 	const found: string[] = [];
-	const push = (candidate: string | undefined) => {
+	/** 返回是否真的抽到了一个合法绝对路径（决定要不要继续往兜底走）。 */
+	const push = (candidate: string | undefined): boolean => {
 		const cleaned = cleanExtractedPath(candidate);
-		if (cleaned && !found.includes(cleaned)) found.push(cleaned);
+		if (!cleaned) return false;
+		if (!found.includes(cleaned)) found.push(cleaned);
+		return true;
 	};
 
 	for (const rawLine of output.split("\n")) {
 		const line = rawLine.trim();
 		if (!SANDBOX_DENIAL_PATTERNS.some((re) => re.test(line))) continue;
+		if (HERE_DOCUMENT_RE.test(line)) continue; // 排除 1
+
+		const prog = /^([\w.+-]+|\/[\w./+-]+):/.exec(line)?.[1];
+		if (prog && SHELL_PROG_RE.test(prog)) continue; // 排除 2
 
 		// rename A to B —— mv / sed -i / git 落 ref 都是这个形状，unlink 在源上
 		const rename = /rename[\s(]+(.+?)\s+to\s+(.+?)[\s)]*[:：]?\s*(?:Operation not permitted|EPERM)/i.exec(line);
-		if (rename?.[1]) {
-			push(rename[1]);
-			continue;
-		}
+		if (rename?.[1] && push(rename[1])) continue;
 
 		// GNU: cannot remove '/path': …
 		const quoted = /cannot\s+\w+\s+'([^']+)'/.exec(line);
-		if (quoted?.[1]) {
-			push(quoted[1]);
-			continue;
-		}
+		if (quoted?.[1] && push(quoted[1])) continue;
 
-		// BSD: prog: /path: Operation not permitted
-		const bsd = /^[\w.+-]+:\s*(.+?)\s*[:：]\s*(?:Operation not permitted|EPERM)/i.exec(line);
-		if (bsd?.[1]) {
-			push(bsd[1]);
-			continue;
-		}
+		// BSD: prog: /path: Operation not permitted —— 捕获只取单 token，抽不出就落兜底
+		const bsd = /^[\w./+-]+:\s*(\S+?)\s*[:：]\s*(?:Operation not permitted|EPERM)/i.exec(line);
+		if (bsd?.[1] && push(bsd[1])) continue;
 
 		// 兜底：行里所有绝对路径 token
 		for (const token of line.split(/\s+/)) push(token);
@@ -498,17 +645,23 @@ export function extractDeniedPaths(output: string): string[] {
 	return found;
 }
 
-/** 去掉包裹的引号与尾部标点，只留下以 `/` 开头、长度 > 1 的绝对路径。 */
+/**
+ * 去掉包裹的引号与首尾标点，只留下以 `/` 开头、长度 > 1 的绝对路径。
+ *
+ * 一次性剥掉首尾的空白 / 引号 / 标点：旧实现先剥引号再剥标点，对 `'…lock':`
+ * 这种「引号在标点内侧」的形状会留下尾引号（抽成 `/p'`）。
+ */
 function cleanExtractedPath(candidate: string | undefined): string | undefined {
 	if (!candidate) return undefined;
-	let value = candidate.trim().replace(/^['"]+|['"]+$/g, "");
-	value = value.replace(/[,;:]+$/, "");
+	const value = candidate.trim().replace(/^[\s'"`,;:]+|[\s'"`,;:]+$/g, "");
 	if (!value.startsWith("/") || value.length <= 1) return undefined;
 	return stripTrailingSlash(value);
 }
 
-/** `classifyOutsidePaths` 的结果：三档互斥，调用方据此决定弹不弹、弹哪种。 */
+/** `classifyOutsidePaths` 的结果：五档互斥，调用方据此决定弹不弹、弹哪种。 */
 export interface PathClassification {
+	/** 永不删除 → 直接拒，不弹框、无任何放行选项。带命中原因。 */
+	readonly blocked: ReadonlyArray<{ path: string; reason: string }>;
 	/** 已被持久白名单或会话豁免覆盖 → 静默放行，不弹框。 */
 	readonly covered: string[];
 	/** 危险 → 每次必问，只能会话级豁免。带命中原因，弹框里要给人看。 */
@@ -520,15 +673,22 @@ export interface PathClassification {
 }
 
 /**
- * 把一批删除目标分成四档。这是 bash 与 `apply_patch` 两条路线**共用**的判定核心，
+ * 把一批删除目标分成五档。这是 bash 与 `apply_patch` 两条路线**共用**的判定核心，
  * 所以两边的口径不会漂移。
  *
- * 顺序很重要：**先判边界**（边界内直接放行，连危险名单都不看 —— `/private/tmp` 在
- * `/private` 下但它在边界内），再判已授权，最后才分危险 / 普通。
+ * 顺序很重要：
  *
- * 自动放行的口径是「**全部**命中」而不是「任一命中」：调用方只有在 `dangerous` 与
- * `ordinary` 都为空时才能不弹框。否则 `rm 已授权目录 未授权目录` 会因为前者被静默
- * 放行、后者跟着裸跑。
+ * 1. **永不删除**（`blocked`）最先判，且**先于边界** —— 否则 `PI_SANDBOX_EXTRA_WRITE=~/.ssh`
+ *    或白名单里手塞了 `~/.ssh` 就能把凭据目录变成可删。但有一个例外：**项目目录
+ *    （`boundary.cwd`）之下不判 blocked** —— 否则在 `~/.pi/agent/extensions/x` 这种
+ *    本身就在永不删除目录里的项目干活时，删自己的文件会被全部拦死（项目目录
+ *    按定义在可删边界内，这是既有口径）。
+ * 2. 边界内直接放行（`/private/tmp` 在 `/private` 下但它在边界内；`~/.cache` 同理）。
+ * 3. 再判已授权，最后才分危险 / 普通。
+ *
+ * 自动放行的口径是「**全部**命中」而不是「任一命中」：调用方只有在 `blocked`、
+ * `dangerous` 与 `ordinary` 都为空时才能不弹框。否则 `rm 已授权目录 未授权目录`
+ * 会因为前者被静默放行、后者跟着裸跑。
  */
 export function classifyOutsidePaths(
 	paths: readonly string[],
@@ -536,21 +696,33 @@ export function classifyOutsidePaths(
 		readonly boundary: WriteBoundary;
 		/** 持久白名单根（`sandbox-allowlist.json`）。 */
 		readonly allowedRoots: readonly string[];
-		/** 会话级豁免根（危险目录的「本会话不再询问」）。 */
+		/** 会话级豁免根（危险目录的 `Allow for this session`）。 */
 		readonly sessionRoots: readonly string[];
 		readonly env: PathEnv;
 	},
 ): PathClassification {
+	const blocked: Array<{ path: string; reason: string }> = [];
 	const covered: string[] = [];
 	const dangerous: Array<{ path: string; reason: string }> = [];
 	const ordinary: string[] = [];
 	const inside: string[] = [];
 	const seen = new Set<string>();
+	const cwd = stripTrailingSlash(resolvePath(opts.boundary.cwd));
 
 	for (const raw of paths) {
 		const resolved = stripTrailingSlash(resolveAgainst(raw, opts.boundary.cwd));
 		if (seen.has(resolved)) continue;
 		seen.add(resolved);
+
+		// 项目目录之下不判永不删除（见上面顺序说明第 1 条）。
+		const inProject = resolved === cwd || resolved.startsWith(`${cwd}/`);
+		if (!inProject) {
+			const neverReason = neverDeleteReasonFor(resolved, opts.env);
+			if (neverReason) {
+				blocked.push({ path: resolved, reason: neverReason });
+				continue;
+			}
+		}
 
 		if (isPathInWriteBoundary(resolved, opts.boundary)) {
 			inside.push(resolved);
@@ -570,7 +742,7 @@ export function classifyOutsidePaths(
 		else ordinary.push(resolved);
 	}
 
-	return { covered, dangerous, ordinary, inside };
+	return { blocked, covered, dangerous, ordinary, inside };
 }
 
 /** 把一批目标折算成要记住的目录范围（去重、丢掉算不出安全范围的）。 */
@@ -602,8 +774,18 @@ export function memoryScopesFor(paths: readonly string[], env: PathEnv, cwd = pr
  *
  * `extraUnlinkRoots` 是两层授权的注入点：持久白名单与会话豁免的目录在这里并进
  * 同一行 `(allow file-write-unlink …)` —— 记住一个目录 = 加宽这一行，删除在沙箱内
- * 直接成功，命令的其余部分仍被沙箱管着。顺序仍是「全局 deny 在前、allow 在后」
- * （seatbelt 后写的规则覆盖先写的，现有测试钉住了这个顺序）。
+ * 直接成功，命令的其余部分仍被沙箱管着。
+ *
+ * **永不删除路径在 allow 行之后另起一行 `deny`**（`neverDeletePaths()`）：seatbelt 后写
+ * 的规则覆盖先写的，所以即使某个 allow 根是它的祖先（`PI_SANDBOX_EXTRA_WRITE=$HOME`、
+ * 或白名单里手塞了 `~/.ssh`），这些子树仍被内核 `EPERM` 拦死 —— 这是「无任何放行
+ * 选项」的内核级强制，与 `classifyOutsidePaths` 的 `blocked` 档出自同一张表。
+ *
+ * 一个例外：**项目目录（`boundary.cwd`）落在某个永不删除路径之下时，该路径不进 deny
+ * 行** —— 否则在 `~/.pi/agent/extensions/x` 这种项目里干活时，删自己的文件会被全部
+ * 拦死（项目目录按定义在可删边界内，这是既有口径）。这里不用 SBPL 的嵌套过滤器
+ * 表达「deny 整棵但挖掉 cwd」：本 profile 只用已实测可用的构造（`deny default` /
+ * `allow` / `deny` / `subpath` / `literal`），不引入无法在本环境验证的语法。
  *
  * 设备文件（`/dev/null` 等）的 `file-write-data` / `file-write-mode` 已被全局 `file-write*`
  * 覆盖，不再单列；`file-ioctl` 不属于 `file-write*`，仍需显式放行（tty 操作要用）。
@@ -613,6 +795,15 @@ export function buildSeatbeltProfile(boundary: WriteBoundary, extraUnlinkRoots: 
 		.map((root) => stripTrailingSlash(resolvePath(root)))
 		.filter((root, index, all) => all.indexOf(root) === index)
 		.map((root) => `(subpath ${quoteSb(root)})`);
+
+	// 永不删除：项目目录在其下的那一项跳过（见上面 docstring 的例外说明）。
+	// 每项同时发 `literal` 与 `subpath`：`subpath` 对**目录**是确定语义（它与其下一切），
+	// 而对**文件**（`~/.zshrc`）是否匹配文件本身没有权威文档，所以补一条 `literal`
+	// 把精确路径钉死 —— 两条都是 deny，多写不改变结果，只消除不确定性。
+	const cwd = stripTrailingSlash(resolvePath(boundary.cwd));
+	const neverDeleteFilters = neverDeletePaths()
+		.filter((root) => !(cwd === root || cwd.startsWith(`${root}/`)))
+		.map((root) => `(literal ${quoteSb(root)})(subpath ${quoteSb(root)})`);
 
 	const deviceLiterals = ["/dev/null", "/dev/zero", "/dev/tty", "/dev/urandom", "/dev/random", "/dev/dtracehelper"]
 		.map((dev) => `(literal ${quoteSb(dev)})`)
@@ -632,6 +823,8 @@ export function buildSeatbeltProfile(boundary: WriteBoundary, extraUnlinkRoots: 
 		"(allow file-write*)",
 		"(deny file-write-unlink)",
 		`(allow file-write-unlink ${unlinkSubpaths.join("")})`,
+		// 永不删除：allow 行之后收回（seatbelt 后写覆盖先写）。名单为空时不写这行。
+		...(neverDeleteFilters.length > 0 ? [`(deny file-write-unlink ${neverDeleteFilters.join("")})`] : []),
 		`(allow file-ioctl ${deviceLiterals})`,
 	].join("\n");
 }

@@ -23,7 +23,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | `config/pi-statusline.json` | `~/.pi/agent/pi-statusline.json`（**已失效的遗留配置**：旧 npm statusline 包专用，留着只为随时换回那个包） |
 | `extensions/*.ts` | `~/.pi/agent/extensions/` |
 | `extensions/<name>/` | 同上（子目录形式：`<目录>/index.ts` 作入口，pi 支持 `extensions/*/index.ts`） |
-| `extensions/sandbox-boundary/` | 同上（非 shell 工具的删除边界闸：只拦 apply_patch 的 Delete File，write/edit 不拦；与 bash 沙箱同一道白名单与同一套两层授权） |
+| `extensions/sandbox-boundary/` | 同上（非 shell 工具的删除边界闸：只拦 apply_patch 的 Delete File，write/edit 不拦；与 bash 沙箱同一道白名单与同一套三档授权） |
 | `extensions/destructive-guard/` | **已从 live 退役**（词法黑名单路线的参考实现，仓库副本与测试保留；见其 `README.md`） |
 | `themes/*.json` | `~/.pi/agent/themes/`（pi 全局主题目录） |
 
@@ -54,7 +54,7 @@ cp -R clients/pi/extensions/bash-command-collapse ~/.pi/agent/extensions/  # bas
 cp -R clients/pi/extensions/working-indicator  ~/.pi/agent/extensions/
 cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP（纯逻辑模块 + fixtures 一起拷）
 cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
-cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用两层授权与持久白名单）
+cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用三档授权与持久白名单）
 cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
 # destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代），不再安装
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
@@ -462,8 +462,8 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。计划批准后模型认为该建清单就自己 `task_set`，扩展不再代它建（2026-09-24 起与 plan-mode 无耦合） |
 | `plan-mode/` | Claude Code 式 plan mode（bypass → plan 两态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾。详见下文 |
 | `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 2KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
-| `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**两层授权**（用户 2026-09-24 定）：危险目录（系统根 / bin / 应用安装目录 / 配置类 / 含 `.git`）每次删除必问、只支持会话级豁免；普通目录问一次，「同意并记住」后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目。完整口径与危险名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
-| `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
+| `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**三档授权**（用户 2026-09-24 定）：**永不删除**（身份/凭据/手写配置：`~/.zshrc`、`~/.gitconfig`、`~/.env` 等 home 一级文件，以及 `~/.ssh`、`~/.gnupg`、`~/.config`、`~/.pi`、`~/.claude`、`~/.codex`、`~/.aws`、`~/.kube`、`~/.docker` 等子树）——**不弹框、无任何放行选项**，白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（profile 在 allow 行之后另起一行 deny 收回，内核级强制）；**危险目录**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）每次删除必问、只支持会话级豁免（选项 `Deny` / `Allow once` / `Allow for this session`）；**普通目录**问一次（`Deny` / `Allow for this session（并记住该目录）` / `Allow once`），选中间那项后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。可删边界 = 项目目录 + 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/private/var/folders`、`/var/tmp`、`/private/var/tmp`）+ **可再生缓存**（`~/.cache`、`~/.npm`、`~/.gradle/caches`、`~/.m2/repository`、`~/.cargo/registry`、`~/.bun/install/cache`、`~/.node-gyp`、`~/.Trash`、`~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` —— 删了能干净重建，静默放行；`~/Library/pnpm/store`、`~/.deno`、`~/.nvm` 含不可重建内容，**不在**名单）+ `PI_SANDBOX_EXTRA_WRITE`；`/var/tmp` 是 macOS 自带 bash 3.2 的 heredoc 临时目录（编译期写死、`TMPDIR` 改不动），不放行则沙箱内任何 heredoc 都 100% 失败。从失败输出里抽被拦路径用的是**排除法**（保留「行内绝对路径 token」兜底扫描，只排除含 `here document` 的行与行首 prog 是 shell / `sandbox-exec` 的行）而不是程序名白名单 —— 白名单会静默丢掉 python3 `PermissionError`、`find:`、`ln:` 这三类真实删除形状。**抽不出路径就不弹框**，原样报错并追加一行 `[沙箱]` 提示（出口是 `/sandbox-boundary allow <目录>`）；旧的「按整条命令会话级问一次、同意后沙箱外裸跑」降级路径已删。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目（`allow` 对永不删除路径直接拒）。完整口径与名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
+| `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。永不删除路径整份 patch 一起拒（不给「批准其余部分」的机会）。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
 
 ### plan mode（`plan-mode/`）
 
@@ -729,8 +729,9 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 - 删除边界的持久白名单 `~/.pi/agent/sandbox-allowlist.json` 是**机器本地状态**（见下表）：
   它记的是「哪个目录被用户确认过安全」的授权决定，不是配置，不进快照；`PI_SANDBOX_ALLOWLIST`
   可改位置（测试靠它隔离）。写入是原子的（临时文件 + rename），损坏 / 版本不认识降级为空不抛；
-  危险范围（`/`、`$HOME`、`~/.ssh`、含 `.git` 的路径）在写入前与加载时**两道过滤**，手改的 JSON 也塞不进去。
-  会话级豁免（危险目录的「本会话不再询问」）与单次豁免不落盘，只活在进程内存里（globalThis 单例，
+  危险范围（`/`、`$HOME`、含 `.git` 的路径）与**永不删除路径**（`~/.ssh`、`~/.config`、`~/.zshrc` 等）
+  在写入前与加载时**两道过滤**，手改的 JSON 也塞不进去。
+  会话级豁免（危险目录的 `Allow for this session`）与单次豁免（`Allow once`）不落盘，只活在进程内存里（globalThis 单例，
   bash 侧与 apply_patch 侧共享）。
 
 ## 刻意不入库的机器本地文件

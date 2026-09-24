@@ -54,7 +54,7 @@ Expected visible results of a successful load:
 - A user message has a `▎ ` at the head of every line, including the blank lines above and below the text, in the theme's `accent` color (`user-message-bar`).
 - A bash run starts with a `• ` dot followed by `Run `, with **no background** behind the block (`bash-command-collapse`); pressing `shift+tab` switches to plan mode and the statusline's second line starts showing `⏵ bypass` / `⏸ plan · 4 steps` (`plan-mode`).
 - `/theme`, `/tasks`, `/recap`, `/rewind`, `/init`, `/clear`, `/exit`, `/ask`, `/mcp`, `/plan`, `/plan-status`, `/sandbox-boundary`, `/destructive-guard` and the `/bash-*` family (`/bash-preview`, `/bash-timeout`) all exist. Type `/` and scroll the command list.
-- `/sandbox-boundary` prints the delete boundary (project directory, `/tmp`, `/var/folders`) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
+- `/sandbox-boundary` prints the delete boundary (project directory, the temp roots `/tmp` / `/var/folders` / `/var/tmp`, the regenerable caches) and a `持久白名单` line, and `~/.pi/agent/AGENTS.core.md` exists — `core-rules` does nothing, silently, without it.
 - `/destructive-guard` prints `模式：on` and a line of zeros for this session's counts. That extension is **retired upstream** and shipped here as a reference implementation; it stays quiet unless it has something to say.
 
 If something is missing, start pi and search the screen for `Failed to load extension` — a parse error in one file does not stop the others.

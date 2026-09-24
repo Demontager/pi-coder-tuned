@@ -1032,14 +1032,18 @@ test("两层授权：普通目录首次弹框→记住→真删掉→同目录�
 	fs.writeFileSync(first, "a\n");
 	fs.writeFileSync(second, "b\n");
 	try {
-		// 第一次：弹框，选「同意并记住」
-		const ctx1 = execCtxUI(fx.projectDir, ["同意并记住（以后不再问）"]);
+		// 第一次：弹框，选 `Allow for this session（并记住该目录）`
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false, "文件真的被删了（不是只返回成功）");
 		assert.equal(ctx1.selects.length, 1, "应当弹一次框");
 		assert.ok(ctx1.selects[0]!.title.includes("边界外"), `弹框标题：${ctx1.selects[0]!.title}`);
-		assert.deepEqual(ctx1.selects[0]!.options, ["取消", "同意并记住（以后不再问）", "只同意本次"], "普通目录的三选项");
+		assert.deepEqual(
+			ctx1.selects[0]!.options,
+			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			"普通目录的三选项",
+		);
 		assert.ok(ctx1.selects[0]!.title.includes("危险") === false, "普通目录不该走危险弹框");
 
 		// 落盘：白名单里应当有这个目录（不是那个文件）
@@ -1059,7 +1063,7 @@ test("两层授权：普通目录首次弹框→记住→真删掉→同目录�
 	}
 });
 
-test("两层授权：「只同意本次」删得掉但不落盘，同目录第二次仍弹框", { skip: sandboxSkip }, async () => {
+test("两层授权：`Allow once` 删得掉但不落盘，同目录第二次仍弹框", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("once");
 	const dir = path.join(os.homedir(), `.sbx-once-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir);
@@ -1068,17 +1072,17 @@ test("两层授权：「只同意本次」删得掉但不落盘，同目录第�
 	fs.writeFileSync(first, "a\n");
 	fs.writeFileSync(second, "b\n");
 	try {
-		const ctx1 = execCtxUI(fx.projectDir, ["只同意本次"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow once"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `本次批准应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false);
-		assert.equal(fs.existsSync(fx.allowlistFile), false, "「只同意本次」不该落盘");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "`Allow once` 不该落盘");
 
-		const ctx2 = execCtxUI(fx.projectDir, ["取消"]);
+		const ctx2 = execCtxUI(fx.projectDir, ["Deny"]);
 		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
 		assert.equal(r2.ok, false, "没记住 → 第二次仍被拦");
 		assert.equal(ctx2.selects.length, 1, "第二次仍弹框");
-		assert.equal(fs.existsSync(second), true, "取消后文件必须仍在");
+		assert.equal(fs.existsSync(second), true, "Deny 后文件必须仍在");
 		assert.match(r2.text, /用户拒绝/, `拒绝理由要给人看：${r2.text}`);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1086,11 +1090,11 @@ test("两层授权：「只同意本次」删得掉但不落盘，同目录第�
 	}
 });
 
-test("两层授权：危险目录每次都弹，选「本会话不再询问」后不弹，重新加载扩展后又弹", { skip: sandboxSkip }, async () => {
+test("两层授权：危险目录每次都弹，选 `Allow for this session` 后不弹，重新加载扩展后又弹", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("dangerous");
-	// 危险目录：~/.config 在 DANGEROUS_HOME_DIRS 里（子树语义）。
-	// 探针建在它下面，用例自己清掉 —— 不碰 ~/.config 里任何已有内容。
-	const dir = path.join(os.homedir(), ".config", `.sbx-dangerous-${process.pid}-${Date.now()}`);
+	// 危险目录：~/Library 在 DANGEROUS_HOME_DIRS 里（子树语义）。
+	// 探针建在它下面，用例自己清掉 —— 不碰 ~/Library 里任何已有内容。
+	const dir = path.join(os.homedir(), "Library", `.sbx-dangerous-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const first = path.join(dir, "a.txt");
 	const second = path.join(dir, "b.txt");
@@ -1098,17 +1102,21 @@ test("两层授权：危险目录每次都弹，选「本会话不再询问」�
 	for (const f of [first, second, third]) fs.writeFileSync(f, "x\n");
 	try {
 		// 第一次：危险弹框，三选项与普通弹框不同
-		const ctx1 = execCtxUI(fx.projectDir, ["只同意本次"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow once"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false);
 		assert.equal(ctx1.selects.length, 1);
 		assert.ok(ctx1.selects[0]!.title.includes("危险目录"), `危险弹框标题：${ctx1.selects[0]!.title}`);
-		assert.deepEqual(ctx1.selects[0]!.options, ["取消", "只同意本次", "本会话不再询问"], "危险目录没有「记住」选项");
+		assert.deepEqual(
+			ctx1.selects[0]!.options,
+			["Deny", "Allow once", "Allow for this session"],
+			"危险目录没有「记住」选项",
+		);
 		assert.equal(fs.existsSync(fx.allowlistFile), false, "危险目录永远不落盘");
 
 		// 第二次：仍是危险目录 → 仍弹框（这就是「每次必问」）
-		const ctx2 = execCtxUI(fx.projectDir, ["本会话不再询问"]);
+		const ctx2 = execCtxUI(fx.projectDir, ["Allow for this session"]);
 		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
 		assert.equal(r2.ok, true, `会话豁免应当放行：${r2.text}`);
 		assert.equal(ctx2.selects.length, 1, "危险目录第二次仍弹框");
@@ -1129,7 +1137,7 @@ test("两层授权：危险目录每次都弹，选「本会话不再询问」�
 		getSessionScopes().clear();
 		const fourth = path.join(dir, "d.txt");
 		fs.writeFileSync(fourth, "x\n");
-		const ctx4 = execCtxUI(fx.projectDir, ["取消"]);
+		const ctx4 = execCtxUI(fx.projectDir, ["Deny"]);
 		const r4 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(fourth)}`, ctx4);
 		assert.equal(r4.ok, false, "重启后危险目录恢复必问");
 		assert.equal(ctx4.selects.length, 1, "又弹框了");
@@ -1168,7 +1176,7 @@ test("两层授权：headless + 预置白名单 → 删除成功且不弹框", {
 
 test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍在", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("headless-danger");
-	const dir = path.join(os.homedir(), ".config", `.sbx-headless-danger-${process.pid}-${Date.now()}`);
+	const dir = path.join(os.homedir(), "Library", `.sbx-headless-danger-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const target = path.join(dir, "a.txt");
 	fs.writeFileSync(target, "a\n");
@@ -1178,6 +1186,70 @@ test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍�
 		assert.match(r.text, /非交互环境/, `理由要点明环境：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "a\n", "内容也不能变");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("永不删除：删 ~/.config 下的探针不弹框、直接拒，文件仍在", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("never-delete");
+	// 探针建在 ~/.config（永不删除子树）下，由测试进程自己的 fs 创建（不走沙箱），
+	// finally 里也由它自己清掉 —— 不碰 ~/.config 里任何已有内容。
+	const dir = path.join(os.homedir(), ".config", `.sbx-never-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const target = path.join(dir, "probe.txt");
+	fs.writeFileSync(target, "victim\n");
+	try {
+		// 给足「放行」选项：如果它真弹框并选了放行，这个用例就会失败 ——
+		// 断言的正是「根本没有放行选项可给」。
+		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
+		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
+		assert.equal(r.ok, false, "永不删除必须失败");
+		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
+		assert.equal(ctx.confirms.length, 0);
+		assert.equal(fs.existsSync(target), true, "文件必须仍在");
+		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "什么都不落盘");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("永不删除：headless 下同样拒，且理由点名档位", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("never-delete-headless");
+	const dir = path.join(os.homedir(), ".config", `.sbx-never-h-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const target = path.join(dir, "probe.txt");
+	fs.writeFileSync(target, "victim\n");
+	try {
+		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
+		assert.equal(r.ok, false, "headless 下永不删除照样拒");
+		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.equal(fs.existsSync(target), true, "文件必须仍在");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("可再生缓存：删 ~/.cache 下的探针静默成功，不弹框", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("safe-cache");
+	// ~/.cache 在可删边界内（SAFE_CACHE_HOME_DIRS）—— 删了能重建，不该打扰用户。
+	const dir = path.join(os.homedir(), ".cache", `.sbx-cache-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const target = path.join(dir, "probe.txt");
+	fs.writeFileSync(target, "x\n");
+	try {
+		const ctx = execCtxUI(fx.projectDir, []);
+		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)} && echo removed`, ctx);
+		assert.equal(r.ok, true, `缓存目录在可删边界内，应当直接成功：${r.text}`);
+		assert.match(r.text, /removed/);
+		assert.equal(fs.existsSync(target), false, "文件真被删了");
+		assert.equal(ctx.selects.length, 0, "不弹框");
+		assert.equal(ctx.confirms.length, 0);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 		fx.restore();
@@ -1219,19 +1291,19 @@ test("两层授权：一条命令里混有已授权与未授权路径 → 仍弹
 	try {
 		// 两个目标一起删：已授权那个在沙箱内成功，未授权那个被拦 → 命令失败并弹框。
 		// 弹框里只该出现未授权的那个（已授权的不该再问）。
-		const ctx = execCtxUI(fx.projectDir, ["取消"]);
+		const ctx = execCtxUI(fx.projectDir, ["Deny"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(a)} ${JSON.stringify(b)}`, ctx);
 		assert.equal(r.ok, false, "有未授权路径 → 不能静默放行整条命令");
 		assert.equal(ctx.selects.length, 1, "应当弹框");
 		assert.ok(ctx.selects[0]!.title.includes("边界外"), `弹框标题：${ctx.selects[0]!.title}`);
-		assert.equal(fs.existsSync(b), true, "取消后未授权的文件必须仍在");
+		assert.equal(fs.existsSync(b), true, "Deny 后未授权的文件必须仍在");
 	} finally {
 		for (const d of [allowedDir, otherDir]) if (fs.existsSync(d)) fs.rmSync(d, { recursive: true, force: true });
 		fx.restore();
 	}
 });
 
-test("两层授权：抽不出被拦路径（cd + 相对路径）→ 退回按整条命令问一次", { skip: sandboxSkip }, async () => {
+test("两层授权：抽不出被拦路径（cd + 相对路径）→ 不弹框、不裸跑、原样报错", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("unparsed");
 	const dir = path.join(os.homedir(), `.sbx-unparsed-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir);
@@ -1239,44 +1311,86 @@ test("两层授权：抽不出被拦路径（cd + 相对路径）→ 退回按�
 	fs.writeFileSync(target, "a\n");
 	try {
 		// `cd` 到边界外再用**相对路径**删：BSD rm 报的是 `rm: a.txt: Operation not permitted`，
-		// 里面没有绝对路径 —— extractDeniedPaths 刻意不认相对路径（猜不出绝对目标），
-		// 于是走兜底分支：按整条命令问一次（confirm，不是 select）。
+		// 里面没有绝对路径 —— extractDeniedPaths 刻意不认相对路径（猜不出绝对目标）。
 		// 这是模型真实会写的形状（`cd X && rm -f y`），不是人造的极端用例。
-		const ctx = execCtxUI(fx.projectDir, [], [false]);
+		//
+		// 旧行为：按整条命令会话级问一次（confirm），同意后整条命令在沙箱外裸跑。
+		// 新行为（2026-09-24）：不弹框、不裸跑 —— 认不出目标就不许拿整条命令去换
+		// 整层边界之外的删除能力。出口是 /sandbox-boundary allow <目录>。
+		const ctx = execCtxUI(fx.projectDir, [], [true]);
 		const r = await runCommandWithCtx(fx.definition, `cd ${JSON.stringify(dir)} && rm -f a.txt`, ctx);
-		assert.equal(r.ok, false, "拒绝后命令仍失败");
-		assert.equal(ctx.confirms.length, 1, "兜底分支走 confirm");
-		assert.equal(ctx.selects.length, 0, "兜底分支不该走 select（认不出路径就无法分危险/普通）");
-		assert.ok(ctx.confirms[0]!.message.includes("认不出具体被拦的路径"), `兜底文案要说明原因：${ctx.confirms[0]!.message}`);
-		assert.equal(fs.existsSync(target), true, "拒绝后文件必须仍在");
-		assert.equal(fs.existsSync(fx.allowlistFile), false, "兜底分支不落盘（它根本不按目录记）");
+		assert.equal(r.ok, false, "抽不出路径 → 命令保持失败");
+		assert.equal(ctx.confirms.length, 0, "不再走 confirm（沙箱外重跑降级路径已删）");
+		assert.equal(ctx.selects.length, 0, "也不走 select（认不出路径就无法分危险/普通）");
+		assert.ok(r.text.includes("[沙箱] 认不出被拦的具体路径"), `报错要带 [沙箱] 提示：${r.text}`);
+		assert.ok(r.text.includes("/sandbox-boundary allow"), `提示里要给出路：${r.text}`);
+		assert.equal(fs.existsSync(target), true, "文件必须仍在（什么都没跑成）");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "什么都没落盘");
 
-		// 同一条命令再跑一次：本会话已批准过 → 不再问，沙箱外重跑成功
-		const ctx2 = execCtxUI(fx.projectDir, [], [false]);
+		// 同一条命令再跑一次：行为不变（没有会话级批准这回事了）
+		const ctx2 = execCtxUI(fx.projectDir, [], [true]);
 		const r2 = await runCommandWithCtx(fx.definition, `cd ${JSON.stringify(dir)} && rm -f a.txt`, ctx2);
-		assert.equal(r2.ok, true, `会话内同一条命令不再问：${r2.text}`);
+		assert.equal(r2.ok, false, "第二次同样失败 —— 不再有「会话内已批准」");
 		assert.equal(ctx2.confirms.length, 0);
-		assert.equal(fs.existsSync(target), false);
+		assert.equal(fs.existsSync(target), true);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 		fx.restore();
 	}
 });
 
-test("两层授权：取消后文件仍在、内容不变，且什么都没落盘", { skip: sandboxSkip }, async () => {
-	const fx = await loadSandboxFixture("cancel");
-	const dir = path.join(os.homedir(), `.sbx-cancel-${process.pid}-${Date.now()}`);
+test("沙箱内 heredoc 成功（/var/tmp 在可删边界内）", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("heredoc");
+	try {
+		// bash 3.2 的 heredoc 必须先建 /var/tmp/sh-thd-* 再 unlink（delete-on-open）。
+		// /var/tmp 进可删边界前这里 100% 失败（2026-09-24 实测），且每次泄漏一个 sh-thd-*。
+		const before = fs.readdirSync("/private/var/tmp").filter((n) => n.startsWith("sh-thd-")).length;
+		const ctx = execCtxUI(fx.projectDir, []);
+		const r = await runCommandWithCtx(fx.definition, 'cat <<EOF\nhello heredoc\nEOF', ctx);
+		assert.equal(r.ok, true, `heredoc 应当成功：${r.text}`);
+		assert.ok(r.text.includes("hello heredoc"), "heredoc 正文要原样输出");
+		assert.equal(ctx.selects.length, 0, "不该弹框");
+		assert.equal(ctx.confirms.length, 0, "不该 confirm");
+		const after = fs.readdirSync("/private/var/tmp").filter((n) => n.startsWith("sh-thd-")).length;
+		// 用 <= 而不是 ==：本次运行不该新增（旧行为是 100% 泄漏），但系统清理掉
+		// 一个旧的不该让用例假失败。
+		assert.ok(after <= before, `不再泄漏 sh-thd-* 临时文件（before=${before} after=${after}）`);
+	} finally {
+		fx.restore();
+	}
+});
+
+test("输出含 EPERM 但无删除形状 → 不弹框、不 confirm、带 [沙箱] 提示", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("exec-failure");
+	try {
+		// setuid / platform binary 在沙箱内 exec 直接 EPERM —— 不是删除，不该弹删除框。
+		// /bin/ps 是 setuid，沙箱内必失败；输出形状 `bash: /bin/ps: Operation not permitted`
+		// 被排除 2（shell prog）拦下，extractDeniedPaths 返回空 → 不弹框。
+		const ctx = execCtxUI(fx.projectDir, []);
+		const r = await runCommandWithCtx(fx.definition, "/bin/ps -o pid= 2>&1; exit 1", ctx);
+		assert.equal(r.ok, false, "命令本身失败（exec EPERM）");
+		assert.equal(ctx.selects.length, 0, "exec 失败不是删除，不弹 select");
+		assert.equal(ctx.confirms.length, 0, "也不 confirm（沙箱外重跑降级路径已删）");
+		assert.ok(r.text.includes("[沙箱] 认不出被拦的具体路径"), `报错要带 [沙箱] 提示：${r.text}`);
+	} finally {
+		fx.restore();
+	}
+});
+
+test("两层授权：Deny 后文件仍在、内容不变，且什么都没落盘", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("deny");
+	const dir = path.join(os.homedir(), `.sbx-deny-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir);
 	const target = path.join(dir, "a.txt");
 	fs.writeFileSync(target, "victim\n");
 	try {
-		const ctx = execCtxUI(fx.projectDir, ["取消"]);
+		const ctx = execCtxUI(fx.projectDir, ["Deny"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
 		assert.equal(r.ok, false);
-		assert.equal(fs.existsSync(target), true, "取消后文件必须仍在");
+		assert.equal(fs.existsSync(target), true, "Deny 后文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
-		assert.equal(fs.existsSync(fx.allowlistFile), false, "取消不该落盘");
-		assert.ok(ctx.notifies.length === 0, "取消不该发 notify");
+		assert.equal(fs.existsSync(fx.allowlistFile), false, "Deny 不该落盘");
+		assert.ok(ctx.notifies.length === 0, "Deny 不该发 notify");
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 		fx.restore();

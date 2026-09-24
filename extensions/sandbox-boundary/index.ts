@@ -20,24 +20,28 @@
  * - `apply_patch` —— 只检查 `*** Delete File: <path>` 行里的路径。`Update File` /
  *   `Add File` 是写入，放行。
  *
- * ## 两层授权（与 bash 沙箱同一套，用户 2026-09-24 定）
+ * ## 三档授权（与 bash 沙箱同一套，用户 2026-09-24 定，同日新增「永不删除」档）
  *
- * 边界外的删除按目标路径分两档，判定核心是 `sandbox.ts` 的 `classifyOutsidePaths`，
+ * 边界外的删除按目标路径分三档，判定核心是 `sandbox.ts` 的 `classifyOutsidePaths`，
  * 记忆落在 `allowlist.ts` 的同一个 globalThis 单例上 —— 所以 bash 侧记住的目录，
  * 这里立刻生效，反之亦然，两边口径不会漂移：
  *
- * - **危险路径**（系统根 / bin / 应用安装目录 / 配置类 / 含 `.git`）：每次都问，
- *   只支持会话级豁免（「本会话不再询问」），重启 pi 后恢复。
- * - **普通路径**：问一次，「同意并记住」后把目录范围写进持久白名单，以后（含 headless）
- *   不再问。
+ * - **永不删除**（身份 / 凭据 / 手写配置：`~/.zshrc`、`~/.ssh`、`~/.config`、`~/.pi`…）：
+ *   **不弹框、无任何放行选项**，直接 fail-closed。白名单 / 会话豁免 /
+ *   `PI_SANDBOX_EXTRA_WRITE` 都压不过。整份 patch 一起拒。
+ * - **危险路径**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）：每次都问，
+ *   只支持会话级豁免（`Allow for this session`），重启 pi 后恢复。
+ * - **普通路径**：问一次，`Allow for this session（并记住该目录）` 后把目录范围写进持久白名单，
+ *   以后（含 headless）不再问。
  *
  * 与 bash 侧的一个区别：`apply_patch` 是 `tool_call` 钩子，**执行前**就能拦，且它知道
  * 全部目标路径（不像 bash 要先失败再从 stderr 里抽）。所以这里没有「命令重跑一次」的代价，
- * 「只同意本次」就是单纯放行这一次、不记忆。
+ * `Allow once` 就是单纯放行这一次、不记忆。
  *
  * ## 体验
  *
- * 写入**一次都不弹窗**，边界内的删除也不弹 —— 这是绝大多数操作。只有删边界外的文件才问。
+ * 写入**一次都不弹窗**，边界内（含可再生缓存 `~/.cache`、`~/Library/Caches` 等）的删除
+ * 也不弹 —— 这是绝大多数操作。只有删边界外的文件才问。
  * 命中持久白名单时静默放行，但补一行 `notify`（否则会疑惑「怎么不问了」）。
  * 非交互环境（`pi -p`、subagent）：持久白名单**生效**（授权本来就是交互时给的），
  * 危险目录与未授权的普通目录 fail-closed 直接拒 —— 没有人在屏幕前，"默认同意"等于没有边界。
@@ -54,6 +58,7 @@ import {
 	isSandboxEnabled,
 	memoryScopeFor,
 	memoryScopesFor,
+	neverDeleteReasonFor,
 	sessionScopeFor,
 	writableRoots,
 	type PathEnv,
@@ -148,6 +153,21 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		const pending = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
+
+		// 永不删除档：不弹框、无任何放行选项，直接 fail-closed。
+		// 整份 patch 一起拒（与「全部命中才放行」同一口径）—— 否则一份 patch 里
+		// 混一个 `*** Delete File: ~/.ssh/id_rsa` 会被其余合法操作带着放行。
+		if (classification.blocked.length > 0) {
+			stats.blocked += classification.blocked.length;
+			return {
+				block: true,
+				reason:
+					`以下路径是永不删除的身份/凭据/手写配置，任何授权方式都不放行：\n` +
+					classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
+					`\n如确需删除，请自己在终端执行（或 PI_SANDBOX=off 整体关掉这一层）。`,
+			};
+		}
+
 		if (pending.length === 0) {
 			// 全部命中边界内 / 持久白名单 / 会话豁免。命中白名单时补一行 notify，
 			// 否则用户会疑惑「怎么不问了」。（边界内的删除不 notify —— 那是绝大多数操作。）
@@ -192,9 +212,9 @@ export default function (pi: ExtensionAPI) {
 			if (classification.ordinary.length > 0) {
 				lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
 			}
-			lines.push("", `可删边界：${roots}`, "", "选“取消”不会删任何东西。");
+			lines.push("", `可删边界：${roots}`, "", "选 Deny 不会删任何东西。");
 			// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
-			choice = await ctx.ui.select(lines.join("\n"), ["取消", "只同意本次", "本会话不再询问"]);
+			choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 		} else {
 			const lines = [
 				"⚠️ 删除目标在可删边界之外",
@@ -208,12 +228,16 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`可删边界：${roots}`,
 				"",
-				"选“取消”不会删任何东西。",
+				"选 Deny 不会删任何东西。",
 			];
-			choice = await ctx.ui.select(lines.join("\n"), ["取消", "同意并记住（以后不再问）", "只同意本次"]);
+			choice = await ctx.ui.select(lines.join("\n"), [
+				"Deny",
+				"Allow for this session（并记住该目录）",
+				"Allow once",
+			]);
 		}
 
-		if (choice === undefined || choice === "取消") {
+		if (choice === undefined || choice === "Deny") {
 			stats.blocked += pending.length;
 			return {
 				block: true,
@@ -221,14 +245,19 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 
-		if (choice === "同意并记住（以后不再问）") {
+		if (choice === "Allow for this session（并记住该目录）") {
 			const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
 			stats.remembered += remembered.length;
-			if (remembered.length > 0) ctx.ui.notify(`已记住 ${remembered.length} 个目录，以后其下的删除不再询问`, "info");
-		} else if (choice === "本会话不再询问") {
+			if (remembered.length > 0)
+				ctx.ui.notify(
+					`已永久记住 ${remembered.length} 个目录（重启后仍生效），以后其下的删除不再询问`,
+					"info",
+				);
+		} else if (choice === "Allow for this session") {
+			// 危险分支的会话级豁免：不落盘，重启 pi 即失效。
 			sessionScopes.add(dangerousScopes);
 		}
-		// 「只同意本次」：什么都不记，直接放行这一次。
+		// `Allow once`：什么都不记，直接放行这一次。
 
 		stats.confirmed += pending.length;
 		return undefined;
@@ -268,7 +297,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				const scope = memoryScopeFor(target, pathEnv, boundary.cwd);
 				if (!scope) {
-					ctx.ui.notify(`这个路径算不出可安全记住的范围（太浅或本身危险）：${target}`, "warning");
+					const never = neverDeleteReasonFor(target, pathEnv);
+					ctx.ui.notify(
+						never
+							? `这是永不删除的身份/凭据/手写配置，不能预授权：${target}`
+							: `这个路径算不出可安全记住的范围（太浅或本身危险）：${target}`,
+						"warning",
+					);
 					return;
 				}
 				const remembered = store.remember([scope], "command", pathEnv);
@@ -289,7 +324,8 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`会话级豁免（重启失效）：${sessionScopes.roots().length ? sessionScopes.roots().join("、") : "（无）"}`,
 				"",
-				"危险目录（系统根 / bin / 应用安装目录 / 配置类 / 含 .git）每次删除都问，只能会话级豁免。",
+				"危险目录（系统根 / bin / 应用安装目录 / ~/Library / 含 .git）每次删除都问，只能会话级豁免。",
+				"永不删除（~/.zshrc、~/.ssh、~/.config、~/.pi 等身份/凭据/手写配置）不弹框、无任何放行选项。",
 				"写入不拦（write / edit 边界外也放行）；bash 命令由 seatbelt 沙箱强制同一道删除边界。",
 				"子命令：forget <path> 移除一条 · clear 清空 · allow <path> 预授权。PI_SANDBOX=off 整体关闭。",
 			];

@@ -1511,13 +1511,6 @@ export default function (pi: ExtensionAPI) {
 	// 沙箱内用哪个 shell 跑原命令。跟 readShellOptions() 保持一致：用户配了 shellPath 就用它，
 	// 否则 /bin/bash。注意这是**沙箱内**的 shell，与 pi 自己 spawn 的外层 shell 无关。
 	const sandboxShellPath = readShellOptions().shellPath || "/bin/bash";
-	// 本会话已批准在沙箱外重跑的命令。同一条命令不重复问 —— 否则一个循环里
-	// 每次迭代都弹一次框，那就比没有沙箱还烦。按命令原文做键，不跨会话持久化。
-	//
-	// 两层授权上线后这个集合只剩一个用途：**从失败输出里抽不出被拦路径时的兜底**
-	// （`extractDeniedPaths` 返回空 → 猜不出目标就不许进按目录的记忆逻辑，
-	// 退回旧的「按整条命令、会话级问一次、沙箱外重跑」）。能抽出路径的走新流程。
-	const sandboxApproved = new Set<string>();
 	// 持久白名单（`~/.pi/agent/sandbox-allowlist.json`，`PI_SANDBOX_ALLOWLIST` 可改位置）。
 	// 与 sandbox-boundary 扩展共用同一个 globalThis 单例，所以一边记住另一边立刻生效。
 	const allowlistPath = process.env.PI_SANDBOX_ALLOWLIST?.trim() || join(getAgentDir(), "sandbox-allowlist.json");
@@ -1678,35 +1671,24 @@ export default function (pi: ExtensionAPI) {
 			const deniedPaths = extractDeniedPaths(denialMessage ?? "");
 			if (deniedPaths.length === 0) {
 				// 抽不出路径 → 猜不出目标就不许进按目录的记忆逻辑（AGENTS.md
-				// 「Never derive a delete target」的同一口径）。退回旧行为：
-				// 按整条命令、会话级问一次，同意后沙箱外重跑。
-				if (!sandboxApproved.has(command)) {
-					// 非交互环境不升级：没有人在屏幕前，"默认同意"等于没有边界。
-					// 与 destructive-guard 的 fail-closed 同一口径。
-					if (!ctx?.hasUI) {
-						throw new Error(
-							`${denialMessage}\n\n[沙箱] 这条命令要删除可删边界之外的文件，非交互环境不予升级。` +
-								`可删边界：${writableRoots(boundary).join("、")}`,
-						);
-					}
-					const approved = await ctx.ui.confirm(
-						ESCALATION_TITLE,
-						[
-							`命令：${truncateToWidth(command, 160)}`,
-							`可删边界：${truncateToWidth(writableRoots(boundary).join("、"), 160)}`,
-							"",
-							"认不出具体被拦的路径，只能按整条命令问一次。",
-							"同意后这条命令在沙箱外重跑一次（本会话内同一条命令不再询问）。",
-						].join("\n"),
-					);
-					if (!approved) {
-						throw new Error(
-							`${denialMessage}\n\n[沙箱] 用户拒绝在沙箱外重跑。可删边界：${writableRoots(boundary).join("、")}`,
-						);
-					}
-					sandboxApproved.add(command);
-				}
-				return base.execute(toolCallId, nextParams, signal, runOnUpdate, ctx);
+				// 「Never derive a delete target」的同一口径）。
+				//
+				// 这里**不弹框**，也不拿到沙箱外裸跑：旧行为是「按整条命令会话级问一次，
+				// 同意后整条命令在边界之外重跑」，而那个兜底分支正是 heredoc 误报
+				// （`/bin/bash: cannot create temp file for here document: EPERM`）被抽成
+				// 「要删 /bin/bash」后弹危险目录框的入口。`extractDeniedPaths` 现在用排除法
+				// 从源头认不出这类非删除形状，抽不出路径就只剩两种可能：真不是删除
+				// （exec 失败、嵌套沙箱不可用），或是我们认不出的删除形状 —— 两种都该
+				// 原样报错，而不是把整条命令拿到整层边界之外裸跑（那等于为了一个认不出的
+				// 目标交出全部删除能力）。出口是 `/sandbox-boundary allow <目录>`，
+				// 授权后重试 —— 那条路径走的是同一个安全闸，不会把危险目录落盘。
+				//
+				// 交互与非交互（headless）走同一条路：原样报错 + 一行 `[沙箱]` 提示。
+				throw new Error(
+					`${denialMessage}\n\n[沙箱] 认不出被拦的具体路径，未弹确认框；` +
+						`如确认要删，可用 /sandbox-boundary allow <目录> 授权后重试。` +
+						`\n可删边界：${writableRoots(boundary).join("、")}`,
+				);
 			}
 
 			const classification = classifyOutsidePaths(deniedPaths, {
@@ -1715,6 +1697,17 @@ export default function (pi: ExtensionAPI) {
 				sessionRoots: sessionScopes.roots(),
 				env: pathEnv,
 			});
+
+			// 永不删除档：**不弹框、无任何放行选项**。内核 deny 行已经把它拦下了
+			// （`buildSeatbeltProfile` 在 allow 行之后收回），这里只负责把原因说清楚。
+			// 交互与 headless 同一条路 —— 本来就没有「批准」这个动作可给。
+			if (classification.blocked.length > 0) {
+				throw new Error(
+					`${denialMessage}\n\n[沙箱] 以下路径是永不删除的身份/凭据/手写配置，任何授权方式都不放行：\n` +
+						classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
+						`\n如确需删除，请自己在终端执行（或 PI_SANDBOX=off 整体关掉这一层）。`,
+				);
+			}
 
 			if (classification.dangerous.length === 0 && classification.ordinary.length === 0) {
 				// 全部已授权却仍被拦：白名单可能刚被另一侧（sandbox-boundary / 手动 allow）
@@ -1775,8 +1768,8 @@ export default function (pi: ExtensionAPI) {
 				if (classification.ordinary.length > 0) {
 					lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
 				}
-				lines.push("", "同意后命令会重新执行一次（已执行过的部分会重复）。", "选“取消”不会删任何东西。");
-				choice = await ctx.ui.select(lines.join("\n"), ["取消", "只同意本次", "本会话不再询问"]);
+				lines.push("", "同意后命令会重新执行一次（已执行过的部分会重复）。", "选 Deny 不会删任何东西。");
+				choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 			} else {
 				const lines = [
 					`⚠️ ${ESCALATION_TITLE}`,
@@ -1791,12 +1784,16 @@ export default function (pi: ExtensionAPI) {
 						: "这些路径算不出可安全记住的范围，只能逐次批准。",
 					"",
 					"同意后命令会重新执行一次（已执行过的部分会重复）。",
-					"选“取消”不会删任何东西。",
+					"选 Deny 不会删任何东西。",
 				];
-				choice = await ctx.ui.select(lines.join("\n"), ["取消", "同意并记住（以后不再问）", "只同意本次"]);
+				choice = await ctx.ui.select(lines.join("\n"), [
+					"Deny",
+					"Allow for this session（并记住该目录）",
+					"Allow once",
+				]);
 			}
 
-			if (choice === undefined || choice === "取消") {
+			if (choice === undefined || choice === "Deny") {
 				throw new Error(
 					`${denialMessage}\n\n[沙箱] 用户拒绝删除可删边界之外的路径：` +
 						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join("、") +
@@ -1805,20 +1802,26 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// 按选择落授权：
-			// - 「同意并记住」→ 普通路径的范围落盘（remember 内部还有安全闸，危险范围落不进去）
-			// - 「本会话不再询问」→ 危险路径的会话范围进会话集合，重启即失效
-			// - 「只同意本次」→ 只加宽这一次重跑的 profile，不进任何记忆
+			// - `Allow for this session（并记住该目录）` → 普通路径的范围**落盘**（remember 内部
+			//   还有安全闸，危险范围落不进去）。名字里的 session 由括注与下面的 notify 共同
+			//   说清：它比 `Allow once` 多记住了目录，而且重启后仍生效。
+			// - `Allow for this session`（危险分支）→ 危险路径的会话范围进会话集合，重启即失效
+			// - `Allow once` → 只加宽这一次重跑的 profile，不进任何记忆
 			const onceRoots: string[] = [];
-			if (choice === "同意并记住（以后不再问）") {
+			if (choice === "Allow for this session（并记住该目录）") {
 				const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
-				if (remembered.length > 0) ctx.ui.notify(`已记住 ${remembered.length} 个目录，以后其下的删除不再询问`, "info");
+				if (remembered.length > 0)
+					ctx.ui.notify(
+						`已永久记住 ${remembered.length} 个目录（重启后仍生效），以后其下的删除不再询问`,
+						"info",
+					);
 				// 被安全闸挡掉的范围（算不出可记范围的）仍要放行这一次
 				onceRoots.push(...ordinaryScopes.filter((s) => !remembered.includes(s)));
-			} else if (choice === "本会话不再询问") {
+			} else if (choice === "Allow for this session") {
 				sessionScopes.add(dangerousScopes);
 				onceRoots.push(...classification.ordinary.map((p) => sessionScopeFor(p, pathEnv, boundary.cwd)));
 			} else {
-				// 只同意本次
+				// Allow once
 				onceRoots.push(...ordinaryScopes, ...dangerousScopes);
 			}
 

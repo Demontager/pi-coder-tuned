@@ -46,7 +46,7 @@ export const ALLOWLIST_FILENAME = "sandbox-allowlist.json";
 /** 当前 schema 版本。读到的版本不等于它就整体丢弃（宁可可空也不猜旧格式）。 */
 export const ALLOWLIST_VERSION = 1;
 
-/** 条目是怎么进来的：弹框里选了「同意并记住」，还是 `/sandbox-boundary allow` 手动加的。 */
+/** 条目是怎么进来的：弹框里选了 `Allow for this session（并记住该目录）`，还是 `/sandbox-boundary allow` 手动加的。 */
 export type AllowlistSource = "confirm" | "command";
 
 export interface AllowlistEntry {
@@ -243,7 +243,7 @@ function stripTrailingSlash(p: string): string {
 }
 
 /**
- * 会话级豁免（危险目录的「本会话不再询问」）与单次豁免（「只同意本次」）。
+ * 会话级豁免（危险目录的 `Allow for this session`）与单次豁免（`Allow once`）。
  *
  * 与持久白名单分开，因为它们的寿命不同：会话级重启 pi 就没了，单次只活到这条命令跑完。
  * 同样挂 `globalThis`，理由与 store 缓存一致。
@@ -251,7 +251,7 @@ function stripTrailingSlash(p: string): string {
 const SESSION_KEY = "__piSandboxSessionScopes__";
 
 export interface SessionScopes {
-	/** 本会话已豁免的目录（危险目录选了「本会话不再询问」）。 */
+	/** 本会话已豁免的目录（危险目录选了 `Allow for this session`）。 */
 	roots(): string[];
 	add(paths: readonly string[]): void;
 	clear(): void;

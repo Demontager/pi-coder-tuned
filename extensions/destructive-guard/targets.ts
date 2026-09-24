@@ -108,9 +108,18 @@ const VCS_DIRS = [".git", ".hg", ".svn"];
  * AGENTS.md 的断言是“工作目录之外、**且不是本会话创建的**”才要确认；“本会话创建的”
  * 静态判不出来，而临时目录是它唯一可靠的近似 —— 守卫自己的测试、调试脚本全在这里，
  * 每次都弹窗等于没有守卫。`/tmp` 与 `/private/tmp` 都列：macOS 上前者是后者的链接，
- * 而本模块刻意不解析符号链接。
+ * 而本模块刻意不解析符号链接。`/var/tmp` 与 `/private/var/tmp` 同理补上：它是 macOS 自带
+ * bash 3.2 的 heredoc 临时目录（编译期写死，`TMPDIR` 改不动），与 seatbelt 边界的
+ * `TEMP_WRITE_ROOTS` 保持同一套名单，否则两边对「什么算临时目录」的口径会漂移。
  */
-const TEMP_ROOTS: readonly string[] = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
+const TEMP_ROOTS: readonly string[] = [
+	"/tmp",
+	"/private/tmp",
+	"/var/folders",
+	"/private/var/folders",
+	"/var/tmp",
+	"/private/var/tmp",
+];
 
 /**
  * 守卫必须保护自己的路径后缀 / 文件名。
