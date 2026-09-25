@@ -26,12 +26,25 @@ How you work in any project on this machine. A project's own AGENTS.md/CLAUDE.md
 
 ## Delegation
 
-- Invoke subagents only when the user explicitly asks for delegation. Task size, complexity, tool-call count, or a wish to parallelize never authorizes spawning one on your own.
-- Investigation is done inline by default: read, grep, run the check yourself. Do not outsource reading or research to a child agent unless the user asked for that.
-- A delegated task the user did authorize still runs under every rule here — its child obeys the same blast-radius, authorization, and destructive-action limits; delegation moves the work, not the discipline.
+- **Gate.** Invoke subagents only when the user's current request asks for delegation, or an applicable project instruction or skill asks for it. Task size, complexity, tool-call count, or a wish to parallelize never authorizes spawning one on your own — and neither does a request for depth, thoroughness, research, investigation, or detailed analysis.
+- Investigation is done inline by default: read, grep, run the check yourself. Do not outsource reading or research to a child agent unless delegation was authorized.
+- **Once authorized, plan before you delegate.** Form a short plan, split the work into what blocks your next step and what can run beside it, and decide what you do locally right now — never hand off the blocking step and then sit waiting on it.
+- Delegate bounded sidecar tasks that materially advance the goal without blocking your next local step. Keep work local when it is urgent, tightly coupled, or too hard to delegate well.
+- For coding work prefer a concrete code-change task with a clear write scope over read-only analysis; tell the child to edit files directly and to list the paths it changed in its final answer. Split parallel edits so their write sets are disjoint.
+- While a child runs, do meaningful non-overlapping work immediately, and do not redo what you delegated. When it returns, review its changes before integrating them.
+- Wait on a child only when your next step is genuinely blocked on its result; independent information-seeking tasks go out in parallel in the same round.
+- A delegated task still runs under every rule here — its child obeys the same blast-radius, authorization, and destructive-action limits; delegation moves the work, not the discipline.
 
 ## Skills
 
+Skills are discovered natively: every skill available in this session is listed in the `<available_skills>` section of the system prompt, each with a `name`, a `description` and a `location` (the absolute path of its `SKILL.md`). There is no `Skill` tool here — loading a skill means `read`ing that path.
+
+- **Trigger.** If the task clearly matches a skill's description, you **must** use that skill for that turn: `read` its `SKILL.md` before acting on the task, then follow it. If the user names a skill, use it. If several match, use the minimal set that covers the request and state the order. A skill that is not in `<available_skills>` is not installed — say so rather than inventing a path to `read`.
+- **Check first, even at 1%.** The skill check comes **before any response or action** — including clarifying questions, exploring the codebase, and checking files. If you catch yourself thinking "this is just a simple question", "let me look at the code first", "I need more context", or "this doesn't need a formal skill", that is the rationalization; stop and check. Read the current `SKILL.md` rather than working from memory — skills evolve.
+- **Announce.** Say in one line which skill you are using and why. If you skip a skill that obviously matches, say why instead of silently ignoring it.
+- **Process before implementation.** When several skills apply, the process skill sets the approach and the implementation skills carry it out: "let's build X" → `brainstorming` first; "fix this bug" → `systematic-debugging` first.
+- **Plan mode.** Before entering plan mode, if you have not brainstormed yet, load `brainstorming` and work through it (clarify point by point, offer 2-3 options with trade-offs). Inside plan mode its own file layout does not apply: write nothing to `docs/superpowers/specs/` and do not commit — every write is blocked there, and the design document is produced by `exit_plan_mode` into `.pi/plans/`. Its "ask one question at a time" is the `ask_user_question` tool here.
+- **Tool mapping.** Skills speak in actions, not tool names: "create a todo" → `task_set` / `task_update` / `task_get`; "dispatch a subagent" → `subagent` (call `subagents_enable` first when the tool is not visible yet; if it stays unavailable, do the work inline or say so — never invent a `Task` call); "verify completion" → the `/goal` command; "load a skill" → `read <absolute SKILL.md path>`.
 - The user's request wins over any skill's guidelines; a skill never authorizes work outside that request.
 - When a skill makes you pause, ask, or leave work unfinished, name it, quote the rule that required it, and report that in your final message.
 - A skill that gates implementation behind design approval (brainstorming and friends) fits architectural work; it neither widens nor narrows the plan gate in `## Uncertainty`.

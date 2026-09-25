@@ -1,7 +1,7 @@
 # Pi Coding Agent 全局配置模板
 
 pi（`@earendil-works/pi-coding-agent`）的全局配置与扩展脚本快照，作为本机 pi 环境的模板标准。
-本机装的是 pi **0.87.1** + `pi-web-access` **0.30.0** + `pi-subagents` **0.70.1**。
+本机装的是 pi **0.87.1** + `pi-web-access` **0.31.0** + `pi-subagents` **0.71.0**。
 
 pi 是接入本网关的第四个客户端：它走 `/v1/messages`（Anthropic Messages API），因此和 Claude Code
 一样绑定 **claude 路由**的模型。快照里只有一个自定义 provider `litellm-any`，指向本机 996 端口的
@@ -15,7 +15,7 @@ adapter（局域网别的机器用则换成网关主机 LAN IP）。
 | 本仓库 | 真实路径 |
 | --- | --- |
 | `AGENTS.md` | `~/.pi/agent/AGENTS.md`（机器全局行为规则） |
-| `AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md`（`AGENTS.md` 的蒸馏版核心铁律，约 2KB；`extensions/core-rules/` 读它并中途重注入。**缺失则扩展静默跳过**） |
+| `AGENTS.core.md` | `~/.pi/agent/AGENTS.core.md`（`AGENTS.md` 的蒸馏版核心铁律，约 6KB；`extensions/core-rules/` 读它并中途重注入。**缺失则扩展静默跳过**） |
 | `config/settings.json` | `~/.pi/agent/settings.json` |
 | `config/models.json` | `~/.pi/agent/models.json` |
 | `config/mcp.json` | `~/.pi/agent/mcp.json`（MCP 服务器；不装就没有 MCP 工具，`/mcp` 会给出提示） |
@@ -56,6 +56,8 @@ cp -R clients/pi/extensions/mcp                ~/.pi/agent/extensions/   # MCP�
 cp -R clients/pi/extensions/plan-mode          ~/.pi/agent/extensions/   # Claude Code 式 plan mode（改绑 shift+tab，见下文）
 cp -R clients/pi/extensions/sandbox-boundary   ~/.pi/agent/extensions/   # 删除边界闸（apply_patch 不走 shell，补 bash 沙箱管不到的那部分；write/edit 不拦；与 bash 沙箱共用三档授权与持久白名单）
 cp -R clients/pi/extensions/core-rules         ~/.pi/agent/extensions/   # 全局 AGENTS.md 蒸馏版的中途重注入（纯判定在 decision.ts）
+cp -R clients/pi/extensions/verify-loop        ~/.pi/agent/extensions/   # 验证闭环 + /goal 评估器（CC Stop hook / goal 同构；import ../recap/subagents.ts，依赖上一行已装 recap/）
+# superpowers 无扩展：技能发现是 pi 原生扫 ~/.agents/skills，触发规则已并入全局 AGENTS.md 的 ## Skills 一节（Codex 形态：原生发现 + 提示词强化，2026-09-26 删除 skill-router 后的形态）
 # destructive-guard 已于 2026-09-24 从 live 退役（被 seatbelt 能力边界取代），不再安装
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
@@ -353,6 +355,35 @@ agent，加 `workflowScript` 脚本化编排。工具名（`subagent` / `subagen
 `contact_supervisor` / `bg_wait` / `structured_output`）都不撞 litellm 的 `web_search` 特判，
 所以**不像 `pi-web-access` 那样需要改名**。
 
+### 委派闸门与 Codex 的对齐（2026-09-25 实测）
+
+`AGENTS.md` 的「非显式不委派」闸门**不是过度抑制，而是与 Codex 默认同档**：从 Codex 0.154.0 二进制
+（222MB Mach-O）`strings` 抽出 `spawn_agent` 工具的 prompt 原文——
+
+> Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask
+> for sub-agents, delegation, or parallel agent work. Requests for depth, thoroughness, research,
+> investigation, or detailed codebase analysis do not count as permission to spawn.
+
+三方同档：Codex 内置 prompt、pi-subagents 0.71.0 的 `SUBAGENT_SAFETY_GUIDANCE`
+（`src/extension/tool-description.js:9`）、本仓库 `AGENTS.md`。issue #12 说的「可检视子线程」指的是
+**检视面**（`/agent`、agents 面板、`SubAgentActivity`、`SubagentStart`/`SubagentStop` hooks），
+不是主动委派策略。
+
+与 Codex 的两处差异已在 2026-09-25 补齐：
+
+1. **授权来源**：Codex 认「用户显式要求 **或** 适用的 AGENTS.md/skill 指令」，旧规则只认用户原话——
+   `dispatching-parallel-agents` 这类技能、项目 AGENTS.md 里写明的委派指令永远无法授权委派。
+   现已对齐：项目指令/技能也可授权。
+2. **打法**：Codex 闸门后跟着一整套委派打法（先规划再委派、只委派不阻塞下一步的 sidecar 任务、
+   写集不相交、子代理直接改文件并汇报路径、不重做已委派的活、`wait_agent` 极少用），旧规则只有
+   闸门没有打法。现已补入 `AGENTS.md` 的 `## Delegation`。
+
+Codex 另有 proactive 档（`MultiAgentMode` 枚举：`custom` / `explicit` / `RequestOnly` /
+`proactive`，配置键 `features.multi_agent_v2.*`），本仓库**明确不采用**。官方文档
+（learn.chatgpt.com/docs/agent-configuration/subagents）也说当前版本「spawn agents after a direct
+request or applicable project or skill instruction」。检视面（FleetView / fleet inspector /
+async run artifacts）pi-subagents 已自带（`docs/observability.md`），无需自建。
+
 ### `tools:` 是严格白名单，但真正决定成败的是「子会话注册表里有没有这个名字」
 
 白名单本身的过滤规则（`child-tool-plan.ts`）：**核心内建名**（`PI_BUILTIN_TOOL_NAMES` =
@@ -461,7 +492,8 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `mcp/` | MCP 服务器 → pi 工具（`mcp__<server>__<tool>`）；自带 stdio / streamable HTTP / 旧版 SSE 三种传输与 `/mcp` 命令。配置、约束与验证方式见上一节 |
 | `simple-task/` | 轻量任务清单（`task_set` / `task_update` / `task_get`）。计划批准后模型认为该建清单就自己 `task_set`，扩展不再代它建（2026-09-24 起与 plan-mode 无耦合）。三个工具都带 `renderShell: "self"`（用户 2026-09-26 定，与 bash / read 块同一套壳）：整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的上下两条）；标题与结果都从**列 1** 起 —— 每行前置一个空格、不顶格（补回默认壳原本的那一列左边距，由 Text 的 `paddingX = 1` 画）；块上方只剩 pi self 模式固定的那一行留白。形状断言见 `render.test.ts`（3 个端到端用例，含「其他工具底色照旧」的对照） |
 | `plan-mode/` | Claude Code 式 plan mode（bypass → plan 两态）。`shift+tab` 切模式、`/plan`、`--plan` 启动即进；模型可自行调 `enter_plan_mode` 进入、用 `exit_plan_mode` 提交**一份完整方案文本**等用户批准；批准后模型把方案落成计划文档（`.pi/plans/`），写完自动收尾。详见下文 |
-| `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 2KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
+| `core-rules/` | 对抗全局 AGENTS.md 的注意力衰退：把蒸馏版核心铁律（`~/.pi/agent/AGENTS.core.md`，约 6KB，仓库镜像 `clients/pi/AGENTS.core.md`）在会话开始 / 压缩后 / 内容变更三个时机持久化注入到上下文末尾（用户消息之后），照 Codex 的 world-state diff 语义（不变不发、变了带替换声明）。判定在 `decision.ts`；`PI_CORE_RULES=off` 关闭 |
+| `verify-loop/` | **验证闭环 + 评估器**（补 issue #12 权重最高的一格空白），对齐 CC 的两个原生件，落在 pi 官方的 `agent_before_settle` 边界上（"the final actionable boundary: it can append entries and request one continuation"）。**(1) 闸**（CC 的 `type:"command"` Stop hook）：每次 settle（仅 `outcome==="completed"`，abort / error 不触发 —— CC 的 Stop / StopFailure 分流）检查本次 run（最后一条 user 消息之后）：有文件改动（`edit`/`write`/`apply_patch`/`multiedit`，非文档路径）但**改动之后没跑过任何 bash 命令** → 追加一条 `display:true` 的注入消息（用户可见 = CC 的 "Stop hook feedback"；同时以 user 角色进模型上下文）并 `continue:true` 强制续跑一轮。**拦截次数不用内存计数器，而是数投影里已注入的同类消息** —— `agent_start` 在每次边界续跑时都会再 fire（`runAgentLoopContinue` 里 emit），挂在它上面的复位会在续跑链里把计数清零、上限失效；从投影数则天然分支正确、resume 后仍正确、无可变状态，且注入消息是 `role:"custom"`（不是 user），不会切断 run 窗口 —— 整条续跑链共用一个窗口，正是 CC「同一 turn 内连续 block」的语义。上限默认 2（`PI_VERIFY_LOOP_CAP`；CC 的通用 8 是给任意用户 hook 的）。**verification 口径 = 任何 bash 调用**：2026-09-25 第一次活体冒烟量到误报 —— 模型改完 `probe.js` 跑的是 `node --input-type=module -e "import('./probe.js')…"`，真证据但不匹配任何测试形状，被闸第二次拦下；词法判不了「这条命令是不是*相关的*测试」（那是评估器的活），所以闸只问「改动之后有没有观察过实际状态」。`PI_VERIFY_PATTERN=strict` 恢复只认测试/构建/lint 形状，或给自定义正则。**(2) `/goal`**（CC 的会话级 prompt 评估器，手动设定、之后每轮自动评估）：`/goal <条件>`（≤4000 字符，CC 同限）存 `appendEntry` 并立即以条件为指令起一轮；此后每次 settle 先问子代理在不在跑（在 → 本轮跳过，CC 的 "background work defers evaluation"，复用 `recap/subagents.ts` 的 RPC），再发一次**不带工具**的独立模型调用（条件 + `serializeConversation(convertToLlm(投影))` 截尾，默认 120k 字符），解析三裁决 JSON（`met`/`not_met`/`impossible`，裸 / 包 code fence 都认）：未达成 → 理由注入续跑；达成 / 不可能 → 记录条目并清除。**fail-open**：评估失败 / 超时 / 解析不出 → 放行（CC 的 hook 失败同样不拦回合）。无进展检测（连续 2 轮续跑零工具调用 → 停循环、goal 保留，CC："stops the loop … with the goal still set"）与 8 次续跑上限（`PI_GOAL_CAP`，CC 的数字）同样从投影数。resume 恢复活跃 goal 但重置轮数计时（CC："carries the condition over but resets the turn count"）；已达成 / 已不可能的不恢复。评估模型 `PI_VERIFY_EVALUATOR_MODEL=provider/modelId`，缺省 `litellm-any/qwen3.8-flash`，再退回当前会话模型；已知成本 —— 这些路由的 thinking 是 `gateway/config.yaml` 钉死的，评估调用也付 thinking（实测 3-20s）。**与 CC 的唯一有意偏离**：CC 默认不装任何 hook（用户在 settings.json 配置）；这里没有 hooks 配置层，所以闸**默认 block 开启**、触发条件收得极窄，`PI_VERIFY_LOOP=off|notify|block` 一键切换。2026-09-25 活体验证（隔离 agent dir + SDK 驱动）：闸拦一次后模型补验证放行；`/goal VALUE=42` 驱动模型真改文件到 `met`（证据是命令输出）；只口头声称的一轮被判 `not_met` → 注入理由 → 真干活 → `met`；不可满足条件判 `impossible` 并清除。量到的一个 pi 限制（非本扩展 bug）：会触发回合的扩展命令（`/goal`，以及既有的 `/init`）在 `-p` print 模式下不生效 —— `session.prompt()` 在命令的 `sendUserMessage` 回合开始前就返回。91 个 `node --test` 用例：`gate.test.ts`（24）/ `goal.test.ts`（23）/ `evaluator.test.ts`（23）纯逻辑 + `index.test.ts`（21）走 pi 真加载器（假子代理总线 + 假 model registry） |
 | `bash-command-collapse/sandbox.ts` + `allowlist.ts` | bash 命令的 seatbelt 删除能力边界（`bash-command-collapse.ts` 的 `execute` 里包裹）与**三档授权**（用户 2026-09-24 定）：**永不删除**（身份/凭据/手写配置：`~/.zshrc`、`~/.gitconfig`、`~/.env`、`~/.bash_history`、`~/.envrc`、`~/.tool-versions` 等 home 一级文件（49 项），以及 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker`、`~/.azure`、`~/.gcloud`、`~/.terraform.d`、`~/.helm`、`~/.minikube`、`~/.password-store` 等子树（21 项）；**名字里可以带斜杠** —— `~/.config/gh`（`hosts.yml` 存 GitHub token）与 `~/.config/gcloud`（凭据库）是两条嵌套条目，2026-09-25 补，专门把「`~/.config` 整棵移出本档」之后落在两级的真凭据捞回来；代价是 `isSafeAllowlistRoot` / `isSafeSessionRoot` 的**祖先闸改为只查危险档**（用户 2026-09-25 选），否则 `~/.config` 会因「是 `~/.config/gh` 的祖先」而永远记不住 —— 安全上无损失，内核 deny 行在 allow 行之后无条件收回，`classifyOutsidePaths` 也先判 blocked 再判白名单，记住 `~/.config` 交不出 `~/.config/gh`；`~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 于 2026-09-25 移出本档 —— 它们是工具状态目录，含 lock/缓存/会话日志，整棵子树不给删连 pi 自己清理 stale lock 都会被内核拦死，现走普通档弹框可记住）——**不弹框、无任何放行选项**，白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（profile 在 allow 行之后另起一行 deny 收回，内核级强制）；**危险目录**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）每次删除必问、只支持会话级豁免（选项 `Deny` / `Allow once` / `Allow for this session`）；**普通目录**问一次（`Deny` / `Allow for this session（并记住该目录）` / `Allow once`），选中间那项后把目录范围写进持久白名单 `~/.pi/agent/sandbox-allowlist.json`（`PI_SANDBOX_ALLOWLIST` 可改位置），以后含 headless 都不再问。记住一个目录 = 把它并进 seatbelt profile 的 `file-write-unlink` 放行名单，删除在沙箱内直接成功。可删边界 = 项目目录 + 临时目录（`/tmp`、`/private/tmp`、`/var/folders`、`/private/var/folders`、`/var/tmp`、`/private/var/tmp`）+ **可再生缓存**（`~/.cache`、`~/.npm`、`~/.gradle/caches`、`~/.m2/repository`、`~/.cargo/registry`、`~/.bun/install/cache`、`~/.node-gyp`、`~/.Trash`、`~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` —— 删了能干净重建，静默放行；`~/Library/pnpm/store`、`~/.deno`、`~/.nvm` 含不可重建内容，**不在**名单）+ `PI_SANDBOX_EXTRA_WRITE`；`/var/tmp` 是 macOS 自带 bash 3.2 的 heredoc 临时目录（编译期写死、`TMPDIR` 改不动），不放行则沙箱内任何 heredoc 都 100% 失败。从失败输出里抽被拦路径用的是**排除法**（保留「行内绝对路径 token」兜底扫描，只排除含 `here document` 的行与行首 prog 是 shell / `sandbox-exec` 的行）而不是程序名白名单 —— 白名单会静默丢掉 python3 `PermissionError`、`find:`、`ln:` 这三类真实删除形状。**抽不出路径就不弹框**，原样报错并追加一行 `[沙箱]` 提示（出口是 `/sandbox-boundary allow <目录>`）；旧的「按整条命令会话级问一次、同意后沙箱外裸跑」降级路径已删。`/sandbox-boundary` 查看边界与白名单，`forget <path>` / `clear` / `allow <path>` 管理条目（`allow` 对永不删除路径直接拒）。完整口径与名单见仓库根 `CLAUDE.md` 的 `### Capability boundary` 一节 |
 | `sandbox-boundary/` | 同一道删除边界的非 shell 侧：`apply_patch` 的 `*** Delete File:` 行在 `tool_call` 钩子上拦截（write/edit 不拦），与 bash 侧共用同一套 `classifyOutsidePaths` 判定与同一个白名单单例，所以一边记住另一边立刻生效；命中白名单时静默放行但补一行 notify。永不删除路径整份 patch 一起拒（不给「批准其余部分」的机会）。与 bash 侧的区别：它在执行前就能拦、且已知全部目标路径，没有「命令重跑一次」的代价 |
 
@@ -587,6 +619,9 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   单独 `/reload`，互不 import、互不通信。计划批准后进度归模型自己 —— 它要建清单就调
   `task_set`，那是 simple-task 的普通工具调用，没有任何特殊路径。`simple-task/gap.ts`
   仍被 `recap/` 跨目录 import（那是另一个契约：widget 之间的空行判定，与任务清单无关）。
+  `recap/subagents.ts` 被 `verify-loop/` 跨目录 import（第三个契约：「现在有子代理在跑吗」
+  的 pi-subagents 进程内 RPC 探测 —— `/goal` 评估在子代理未结束时跳过本轮，CC 的
+  "background work defers evaluation"；探测 fail-open，recap 不装时 verify-loop 也不该装）。
 - **statusline 第二行（扩展 status 区）的显示位分配**：顺序由 `statusline/line.ts` 的
   `STATUS_PRIORITY` 决定 —— `plan-mode`（模式指示）**强制行首**，其余按注册顺序跟在后面：
   `cwd-statusline`（完整路径）、`rewind`（`◆ N checkpoints`），限 5 条。
@@ -595,7 +630,9 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   `simple-task` **不再占**这个区（它曾经在这里显示 `✔ n/N`，与自己在输入框上方的 widget 重复，
   已删除）—— 改回去之前先想想是不是又造了一份重复信息。状态行里 `▶ n/N` 的 N 与数字来自
   simple-task（见上文），所以这个区与那份清单是**两个不重复的口径**：一个说模式与进度比，
-  一个逐条列步骤。
+  一个逐条列步骤。`verify-loop` 的 `◎ /goal active`（key `verify-goal`，仅在 goal 活跃时挂）
+  也走这个区，注册顺序在字母序里排很后，被截断时先丢 —— 可接受：goal 活跃时输入框上方
+  的注入消息本身就在提醒。
 - **`simple-task/gap.ts` 的「看邻居」是靠*渲染邻居*实现的**：它没有枚举别人 widget 的接口，
   只能从 TUI 根往下找到装着自己的 Container，再看紧邻兄弟面向自己那一侧的渲染结果。于是
   `recap` 反过来渲染 `simple-task` 时就是**互递归**（无保护时实测递归到 depth 61+ 才被栈拦住）——
@@ -748,6 +785,13 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   已知限制：只跟踪 `edit` / `write` 两个工具（`bash` 写到根外无法解析），大于 8MB 的文件不拷。
 - `simple-task/` 的状态用 `pi.appendEntry` 骑在 session 日志里（**不往工作仓库写**），重建时必须读
   `ctx.sessionManager.getBranch()` 而不是 `getEntries()`，否则分支导航会把已丢弃分支上的状态复活。
+- `verify-loop/` 分两种存储，别混：**goal 本身**（条件 / 状态 / 已评估轮数 / 最近裁决）用
+  `pi.appendEntry("verify-loop-goal")` 骑 session 日志，`session_start` 从 `getBranch()` 重建 ——
+  所以 resume 自然恢复、新会话自然清除；而**计数器**（闸拦了几次、/goal 续跑几次、连续几轮无进展）
+  **不落盘也不进内存**，全部从模型可见投影（`event.context.contextMessages`）里数已注入的
+  `verify-loop` 消息得出 —— 理由见上面扩展表里那一行（`agent_start` 在每次边界续跑都会重发，
+  内存计数器会被清零）。注入消息本身是 `display:true` 的 `custom_message`，**会进模型上下文**
+  （这正是闸的作用机制），与 recap 的「不落盘不进上下文」是两种刻意不同的选择。
 - `recap/` **刻意不落盘、不进上下文**：不调 `appendEntry`，摘要只活在内存里，`/new` 或 `/resume`
   后不恢复（**刻意的，不是 bug**）。它探测子代理是否在跑走的是 pi-subagents 的进程内事件总线 RPC
   （`subagents:rpc:v1:request`），**不 import 它的任何文件** —— 独立安装的 npm 包，换台机器可能根本没装，

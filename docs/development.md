@@ -18,24 +18,25 @@ These come from pi's extension discovery and they decide where a file may live:
 Two consequences worth remembering:
 
 - `recap/index.ts` imports `../simple-task/gap.ts` across directories. Both must ship together.
+- `verify-loop/index.ts` imports `../recap/subagents.ts` across directories (the "is a subagent running" probe that defers `/goal` evaluation). Both must ship together.
 - `sandbox-boundary/index.ts` imports `../bash-command-collapse/sandbox.ts` and `../bash-command-collapse/allowlist.ts`. The seatbelt profile and the `apply_patch` gate are two halves of one delete boundary sharing one judgement and one allowlist, so a package that shipped only one of those directories would load an extension with no boundary and no memory.
 - `package.json`'s `pi.extensions: ["./extensions"]` resolves a directory with exactly these rules, so the manifest and the convention directory behave identically.
 
 ## Tests
 
 ```bash
-npm test        # node --test — 1131 tests, ~38 s
+npm test        # node --test — 1222 tests, ~38 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1131 tests, ~38 s
+node --test --test-concurrency=4      # 1222 tests, ~38 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
 
-**20 of the 1131 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
+**20 of the 1222 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 
@@ -63,14 +64,14 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 28 loaded by reading the startup list:
+Then check that all 29 loaded by reading the startup list:
 
 ```
 [Extensions]
   ask-user-question, auto-default-model, bash-command-collapse.ts, ... working-indicator
 ```
 
-A headless start cannot show you that list (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 28 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []` and `extensions.length === 28`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`).
+A headless start cannot show you that list (`-p` exits after one turn and prints only the answer), so the fastest machine check is the same loader the `render.test.ts` files use — `discoverAndLoadExtensions` against the 29 entries (`extensions/*.ts` plus `extensions/*/index.ts`), asserting `errors: []` and `extensions.length === 29`. It is also the cheapest way to catch a `ParseError` that `node --test` accepted, because it is pi's own loader and not node's. Point it at a real library entry the way those tests do (`PI_TEST_PI_ENTRY`).
 
 `/reload` re-reads the checkout, so the loop is: edit → `/reload` → look. That works for `pi -e` runs as well as for an installed package; you do not need to restart pi for extension edits. `settings.json` and `AGENTS.md` are read once at startup, so those do need a restart.
 
@@ -140,7 +141,7 @@ The two `rsync --delete` runs are deliberate: a snapshot sync must remove what u
 
 Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the three removed model keys; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
 
-Two things under `extensions/` are newer than the sync procedure above and belong in the checklist: `bash-command-collapse/sandbox.ts` and `allowlist.ts` are **live code** (imported by `sandbox-boundary/`), not test helpers, so deleting that directory breaks a second extension; and the persistent allowlist at `~/.pi/agent/sandbox-allowlist.json` is **machine-local state**, deliberately absent from `clients/pi/` — a sync must never copy it in either direction.
+Two things under `extensions/` are newer than the sync procedure above and belong in the checklist: `bash-command-collapse/sandbox.ts` and `allowlist.ts` are **live code** (imported by `sandbox-boundary/`), not test helpers, so deleting that directory breaks a second extension; `recap/subagents.ts` is likewise live code imported by `verify-loop/`; and the persistent allowlist at `~/.pi/agent/sandbox-allowlist.json` is **machine-local state**, deliberately absent from `clients/pi/` — a sync must never copy it in either direction.
 
 ## Publishing
 

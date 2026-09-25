@@ -1,6 +1,6 @@
 # Extensions reference
 
-28 extensions load from this package. Twelve are single files in `extensions/`, sixteen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+29 extensions load from this package. Twelve are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -14,6 +14,7 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/clear` | `clear-command` | — Alias of `/new`. |
 | `/destructive-guard` | `destructive-guard` | — Prints the current mode and this session's counts (checked / blocked / confirmed / allowed / notified). |
 | `/exit` | `exit-command` | — Alias of `/quit` (the argument-free form of the quit words). |
+| `/goal` | `verify-loop` | `<condition>` \| `clear` — Sets a completion condition evaluated after every turn by an independent model call; without arguments prints the active goal, `clear` (also `stop` / `off` / `reset` / `none` / `cancel`) removes it. |
 | `/init` | `init-command` | `[file.md] [extra instructions]` |
 | `/mcp` | `mcp` | — Status of every configured server: transport, tool count, protocol version, config source. |
 | `/mcp reload` | `mcp` | — Re-read the config files, reconnect and re-register tools. |
@@ -348,9 +349,34 @@ This extension pushes the distilled core back to the end. Codex solves the same 
 
 One decision (`decision.ts`) covers all three Codex triggers: scan the model-visible projection for this extension's own messages — absent means the session just started or compaction dropped it, present with a different hash means the content changed, same hash means skip. Nothing is sent when nothing changed. The file is read on every `before_agent_start`, so editing it takes effect on the next prompt — no `/reload`, no restart.
 
-The injected body is the distilled ~4.4 KB core, not the ~22 KB file: persistence, the destructive-action rules, the blast-radius table, authorization, the plan gate, delegation, communication and the git/shell bottom line. The full rules stay in the system prompt; this is the part that must not decay. **A missing `AGENTS.core.md` makes the extension skip silently** — it is an optional enhancement and should not make pi noisy at startup. It is shipped as [`config/AGENTS.core.md`](../config/AGENTS.core.md).
+The injected body is the distilled ~6 KB core, not the ~26 KB file: persistence, the destructive-action rules, the blast-radius table, authorization, the plan gate, delegation, the skill-trigger rules, communication and the git/shell bottom line. The full rules stay in the system prompt; this is the part that must not decay. **A missing `AGENTS.core.md` makes the extension skip silently** — it is an optional enhancement and should not make pi noisy at startup. It is shipped as [`config/AGENTS.core.md`](../config/AGENTS.core.md).
 
 - `PI_CORE_RULES=off` — disable the extension.
+
+### `verify-loop/` — the verification gate and `/goal`
+
+Completion claims used to rest entirely on the model's own report: it edits files, says "done, tests pass", and pi ends the turn with nothing checking that sentence. This extension turns that discipline into code, mirroring two Claude Code mechanisms on pi's `agent_before_settle` boundary — "the final actionable boundary: it can append entries and request one continuation".
+
+**(1) The gate** (Claude Code's `type: "command"` Stop hook). On every settle — only `outcome === "completed"`; abort and error skip, matching CC's Stop / StopFailure split — it scans the current run (everything after the last user message): if files were changed (`edit` / `write` / `apply_patch` / `multiedit`, non-document paths) but **no bash command ran after the change**, it appends a `display: true` injection message (visible to the user, like CC's "Stop hook feedback", and entering the model context as a user-role message) and returns `continue: true` to force one more turn.
+
+The block count is **not an in-memory counter**: it counts this extension's already-injected messages in the model-visible projection. `agent_start` re-fires on every boundary continuation (`runAgentLoopContinue` emits it), so a reset hooked to it would zero the counter mid-chain and defeat the cap; counting from the projection is branch-correct, survives resume, needs no mutable state, and the injected messages are `role: "custom"` (not user), so they do not cut the run window — the whole continuation chain shares one window, exactly CC's "consecutive blocks within one turn" semantics. The cap defaults to 2 (`PI_VERIFY_LOOP_CAP`; CC's generic 8 is for arbitrary user hooks).
+
+**The verification criterion is any bash call.** The first live smoke test (2026-09-25) measured a false positive: after editing `probe.js` the model ran `node --input-type=module -e "import('./probe.js')…"` — genuine evidence, but matching no test-runner shape, so the gate blocked a second time. A lexical gate cannot judge whether a command is a *relevant* test (that is the evaluator's job), so the gate only asks whether the actual state was observed after the change. `PI_VERIFY_PATTERN=strict` restores the test/build/lint-only pattern, or supply a custom regexp. The known cost, stated rather than fixed: an `ls` passes the gate — CC's command-type Stop hook is equally coarse.
+
+**(2) `/goal`** (CC's session-level prompt evaluator: set by hand, evaluated automatically afterwards). `/goal <condition>` (≤ 4000 characters, CC's limit) persists via `appendEntry` and immediately starts a turn with the condition as the instruction; on every later settle it first asks whether a subagent is still running (if so the turn is skipped — CC's "background work defers evaluation", reusing `recap/subagents.ts`'s RPC), then makes one **tool-less** independent model call (condition + `serializeConversation(convertToLlm(projection))` tail-truncated to 120k characters by default) and parses a three-verdict JSON (`met` / `not_met` / `impossible`, bare or fenced): not met → the reason is injected and the turn continues; met or impossible → an entry is recorded and the goal cleared. **Fail-open**: an evaluation failure, timeout or unparseable answer passes the turn through (CC's hooks likewise never block on their own failure). No-progress detection (2 consecutive continuations with zero tool calls → stop the loop, keep the goal — CC: "stops the loop … with the goal still set") and the 8-continuation cap (`PI_GOAL_CAP`, CC's number) are counted from the projection the same way. Resume restores an active goal but resets the turn count (CC: "carries the condition over but resets the turn count"); met / impossible goals are not restored. The evaluator model is `PI_VERIFY_EVALUATOR_MODEL=provider/modelId`, defaulting to `litellm-any/qwen3.8-flash` and falling back to the current session model.
+
+**The one deliberate divergence from CC**: CC ships no hooks by default (the user configures them in settings.json); pi has no hooks configuration layer, so the gate is **on (`block`) by default** with its trigger narrowed as far as it goes, and `PI_VERIFY_LOOP=off|notify|block` switches it. While a goal is active the statusline's second row shows `◎ /goal active` (key `verify-goal`).
+
+91 `node --test` cases: `gate.test.ts` (24), `goal.test.ts` (23) and `evaluator.test.ts` (23) are pure logic; `index.test.ts` (21) loads the real extension through pi's loader with a fake subagent bus and a fake model registry.
+
+- `PI_VERIFY_LOOP=off|notify|block` — the gate's force; default `block`.
+- `PI_VERIFY_LOOP_CAP` — consecutive-block cap; default `2`.
+- `PI_VERIFY_PATTERN=strict|<regexp>` — what counts as verification; default: any bash call.
+- `PI_VERIFY_DOC_EXT` — extensions whose edits are not mutations; default `.md,.txt` (empty string disables the exclusion).
+- `PI_GOAL_CAP` — `/goal` continuation cap; default `8`.
+- `PI_VERIFY_EVALUATOR_MODEL` — evaluator model `provider/modelId`; default `litellm-any/qwen3.8-flash`, then the session model.
+- `PI_GOAL_CONTEXT_CHARS` — conversation character budget for the evaluator; default `120000`.
+- `PI_GOAL_TIMEOUT_MS` — evaluation call timeout; default `45000`.
 
 ### `auto-default-model/` — persistent model switches
 
@@ -431,6 +457,9 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_EXIT_WORDS` | `exit,quit,bye` | `exit-command` | Comma-separated quit words; `off` disables the input interception. |
 | `PI_FENCELESS_CODE=off` | on | `fenceless-code-block` | Keep Markdown code fences. |
 | `PI_FOLDER_HISTORY_INJECT` | `100` | `folder-history` | History entries injected from previous sessions. |
+| `PI_GOAL_CAP` | `8` | `verify-loop` | `/goal` continuation cap (CC's number). |
+| `PI_GOAL_CONTEXT_CHARS` | `120000` | `verify-loop` | Conversation character budget sent to the `/goal` evaluator. |
+| `PI_GOAL_TIMEOUT_MS` | `45000` | `verify-loop` | `/goal` evaluation call timeout. |
 | `PI_LOGO=off` | on | `startup-logo` | Do not install the startup header. |
 | `PI_PLAN_MODE=off` | on | `plan-mode` | Disable plan mode entirely. |
 | `PI_PLAN_MODE_AUTO=off` | on | `plan-mode` | Do not register the model's `enter_plan_mode` tool; `shift+tab` and `/plan` still work. |
@@ -443,6 +472,11 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_SPINNER_RAINBOW=off` | on | `working-indicator` | Disable the rainbow spinner. |
 | `PI_STATUSLINE_BOOT_SUPPRESS=off` | on | `statusline` | Do not silence pi's built-in footer during the boot window, before this statusline is installed. |
 | `PI_STATUSLINE_FREEZE=off` | on | `statusline` | Disable the footer freeze that hides the one-frame flash on session switch. |
+| `PI_VERIFY_DOC_EXT` | `.md,.txt` | `verify-loop` | File extensions whose edits do not count as mutations for the gate; an empty string disables the exclusion. |
+| `PI_VERIFY_EVALUATOR_MODEL` | `litellm-any/qwen3.8-flash` | `verify-loop` | Evaluator model for `/goal` as `provider/modelId`; falls back to the current session model. |
+| `PI_VERIFY_LOOP` | `block` | `verify-loop` | The verification gate's force: `off` disables it, `notify` reports without forcing a continuation, `block` (default) injects and continues. |
+| `PI_VERIFY_LOOP_CAP` | `2` | `verify-loop` | Consecutive gate blocks before the turn is let through. |
+| `PI_VERIFY_PATTERN` | any bash call | `verify-loop` | `strict` only accepts test/build/lint shapes; any other value is compiled as a case-insensitive regexp. |
 | `PI_SUBAGENT_LOG_GUARD` | `drop` | `subagent-log-guard` | `notify` shows the diagnostics through `ctx.ui.notify`; `off` disables the guard. |
 | `PI_USER_MESSAGE_BAR=off` | on | `user-message-bar` | Do not draw the `▎` bar into user message boxes. |
 | `PI_USER_MESSAGE_BAR_COLOR` | `accent` | `user-message-bar` | Theme slot the bar takes its color from (fallbacks `selectedBg` → `toolDiffAdded` → `text`); a background slot such as `selectedBg` is converted to a foreground. `PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded` restores the added-line green. |
@@ -459,6 +493,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 - **`shift+tab` is shared.** `plan-mode` consumes it before the editor sees it and rebinds the thinking-level cycle to `ctrl+shift+t`; while a turn is streaming the key still reaches `app.thinking.cycle`.
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
+- **`verify-loop` imports `recap/subagents.ts`.** The `/goal` evaluator skips its turn while a subagent is still running (CC's "background work defers evaluation"), and that probe is the pi-subagents in-process RPC `recap` already implements; the probe fails open, but `verify-loop` should not be installed without `recap`.
 - **`sandbox-boundary` imports `bash-command-collapse/sandbox.ts` and `allowlist.ts`.** The bash seatbelt profile and the `apply_patch` gate are two halves of one boundary and share one judgement plus one allowlist singleton, so those three must be installed together; installing `sandbox-boundary` alone would leave it with no boundary and no memory.
 - **`plan-mode` and `simple-task` are independent.** Until 2026-09-24 they shared the `plan-mirror.ts` contract and had to be installed together; an approved plan is now a document and progress is the model's own business, so nothing links them. `plan-mode` still writes the plan file with the `write` tool while its `tool_call` hook pins that path.
 - **Three `tool_call` hooks coexist.** `plan-mode` rejects write-shaped commands while planning and pins the `write` tool to the approved plan path; `sandbox-boundary` checks `apply_patch` deletes; `destructive-guard` judges delete targets at all times. They are independent gates with different scopes, and a command can be refused by any of them. The lexical gate and the OS boundary overlap on purpose where they do — one is a pattern match that runs anywhere, the other only exists on macOS.
@@ -475,6 +510,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `~/.pi/folder-history/<path-with-dashes>.jsonl` | `folder-history` | Command history per working directory. |
 | Session log (via `appendEntry`) | `simple-task` | Task list state; discarded with the session, never written to the repo. |
 | Session log (via `appendEntry`) | `plan-mode` | Plan phase and the plan text; same lifetime, never written to the repo. |
+| Session log (via `appendEntry`) | `verify-loop` | The active `/goal` (condition, status, evaluated turns, last verdict), rebuilt from `getBranch()` on `session_start` — resume restores it, a new session starts clean. The counters (gate blocks, goal continuations, no-progress turns) are **neither persisted nor in memory**: they are counted from the injected `verify-loop` messages in the model-visible projection, because `agent_start` re-fires on every boundary continuation and would zero an in-memory counter. |
 | `.pi/plans/<date>-<slug>.md` | `plan-mode` | The approved plan document, written into the project by the model (pinned to that one path by a `tool_call` hook). Upstream adds `.pi/` to the project's `.gitignore` — a plan is a working artefact. |
 | `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | The persistent delete allowlist. Machine-local state, an authorization decision rather than configuration, so it is deliberately not in any snapshot. |
 | In memory only | `core-rules` | Nothing — the injected message goes into the session log, and the only in-memory state is the content hash scan. |
@@ -485,5 +521,5 @@ Every switch is an environment variable read at use time, not cached at load, so
 ## Adding, disabling and removing extensions
 
 - **Disable one** — `pi config` lists every resource from packages and local directories with an on/off toggle, in global or project scope. Or set the switch listed above when the extension has one.
-- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, plus `simple-task/` (whose `gap.ts` is imported by `recap`) and `bash-command-collapse/` (whose `sandbox.ts` and `allowlist.ts` are imported by `sandbox-boundary`).
+- **Remove one** — delete its file (or its directory) from the package, or copy the ones you want into `~/.pi/agent/extensions/` and stop installing the package. Deleting subdirectories is safe except for the directories other files import: the helper-only `thinking-collapse/`, `tool-diff/` and `prompt-editor/`, plus `simple-task/` (whose `gap.ts` is imported by `recap`), `recap/` (whose `subagents.ts` is imported by `verify-loop`) and `bash-command-collapse/` (whose `sandbox.ts` and `allowlist.ts` are imported by `sandbox-boundary`).
 - **Edit one** — work in a checkout and run pi against it; see [development.md](development.md).

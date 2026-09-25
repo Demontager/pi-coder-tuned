@@ -2,7 +2,7 @@
 
 # @bachi/pi-coder
 
-A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **28 extensions**, **3 themes**, and the global config files that make them work together.
+A complete [Pi](https://pi.dev) coding-agent environment packaged for npm: **29 extensions**, **3 themes**, and the global config files that make them work together.
 
 This is a working setup, not a collection of demos. Every extension is used daily, and each one documents the pi internals it depends on in its own file header — including the failure that motivated it and the things that look like they could be simplified but cannot be.
 
@@ -71,6 +71,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`theme-command.ts`](extensions/theme-command.ts) | `/theme` with live preview: arrow keys preview, Enter persists, Esc cancels. |
 | [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode. **Two phases** (`bypass` → `plan`): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning. The model's own `enter_plan_mode` carries all the routing criteria in its tool description and asks for **consent first** — a two-option dialog where `直接实施` (or Esc) skips planning. `exit_plan_mode` submits the plan for approval — full markdown, a `slug` that names the document and an optional summary — and the three-way dialog either writes `.pi/plans/<date>-<slug>.md` and implements it, writes the document only, or rejects. There is no execute phase and no progress table of its own; the model builds a task list itself if one is warranted. |
 | [`core-rules/`](extensions/core-rules/) | Re-pushes the distilled global rules (`~/.pi/agent/AGENTS.core.md`, shipped as [`config/AGENTS.core.md`](config/AGENTS.core.md)) to the **end** of the context at session start, after a compaction and whenever the content changed — the full `AGENTS.md` sits at the front of the system prompt, where its recency decays. Nothing is injected when nothing changed. |
+| [`verify-loop/`](extensions/verify-loop/) | Verification discipline as code, mirroring two Claude Code mechanisms on pi's `agent_before_settle` boundary. **The gate**: when a turn settles after file changes with no bash command run after them, it injects a visible message and forces one more turn (cap 2, counted from the projection, not memory). **`/goal`**: a completion condition evaluated after every turn by one tool-less model call (`met` / `not_met` / `impossible`, fail-open), with no-progress detection, an 8-continuation cap and resume support. `PI_VERIFY_LOOP=off\|notify\|block` switches the gate. |
 | [`sandbox-boundary/`](extensions/sandbox-boundary/) | The non-shell half of the delete boundary: `bash` runs inside a seatbelt profile, but `write` / `edit` are direct `fs` calls, so `apply_patch`'s `*** Delete File:` lines are checked on the `tool_call` hook instead. Shares one whitelist and one persistent allowlist with the bash side. |
 | [`destructive-guard/`](extensions/destructive-guard/) | **Retired from the author's live environment** (the seatbelt capability boundary replaced the lexical blacklist); shipped here as the reference implementation. A `tool_call` gate that inspects arguments **before** execution: delete targets in `bash`/`powershell` are judged against the protected-root / ancestor / fallback / derived-path rules, plus `outside-workdir`, `self-protection` and `vcs-history-loss`; dangerous delete code inside `write`/`edit` content, and scripts about to be executed, are caught too. Block rejects outright, confirm asks once in the TUI and fails closed without one. `/destructive-guard` shows the mode and this session's counts. |
 | [`init-command.ts`](extensions/init-command.ts) | Claude Code style `/init`: update `CLAUDE.md`, else `AGENTS.md`, else create `AGENTS.md`. |
@@ -85,7 +86,7 @@ All three are laid out side by side in the [palette reference](https://raw.githa
 
 ### Commands
 
-`/ask` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
+`/ask` `/bash-preview` `/bash-timeout` `/clear` `/destructive-guard` `/exit` `/goal` `/init` `/mcp` `/plan` `/plan-status` `/recap` `/rewind` `/sandbox-boundary` `/tasks` `/theme`
 
 Esc Esc opens `/rewind` (requires `doubleEscapeAction: "none"`, which the shipped config sets).
 
@@ -105,6 +106,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_READ_COLLAPSE=off` | on | Keep pi's built-in `read` title row. |
 | `PI_SANDBOX=off` | on | Disable the delete boundary (both the bash seatbelt profile and the `apply_patch` gate); also off automatically off macOS. `PI_SANDBOX_EXTRA_WRITE` adds delete roots, `PI_SANDBOX_ALLOWLIST` moves the persistent allowlist file. |
 | `PI_SUBAGENT_LOG_GUARD=notify` | `drop` | Show `[pi-subagents]` diagnostics through `ctx.ui.notify` instead of dropping them. |
+| `PI_VERIFY_LOOP` | `block` | The verification gate's force: `off` disables it, `notify` reports without forcing a continuation. `PI_VERIFY_PATTERN=strict` narrows "verification" to test/build/lint shapes; `PI_VERIFY_EVALUATOR_MODEL` picks the `/goal` evaluator model. |
 
 ## Global config files
 
@@ -142,16 +144,16 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | Install, verify, upgrade, uninstall, and the local-checkout workflow. |
 | [docs/configuration.md](docs/configuration.md) | Every shipped config file, what was removed from the snapshot, and why. |
-| [docs/extensions.md](docs/extensions.md) | Reference for all 28 extensions: commands, switches, caveats, storage. |
+| [docs/extensions.md](docs/extensions.md) | Reference for all 29 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1131 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1222 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1131 tests
+npm test        # node --test, 1222 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

@@ -149,7 +149,8 @@ const ENTER_TOOL_DESCRIPTION = `进入 plan mode（只读探索）：先把方�
 
 ## 注意
 - 这个工具需要用户同意：调用后会弹框，用户可以选「直接实施」否掉它。所以拿不准就调——误判的代价是用户按一次键，不是白做一轮。
-- 用户自己按 shift+tab / /plan / --plan 进入时不弹框（那已经是用户的决定）。`;
+- 用户自己按 shift+tab / /plan / --plan 进入时不弹框（那已经是用户的决定）。
+- 进 plan 前还没 brainstorm 过的话，先 read brainstorming 技能的 SKILL.md（路径在系统提示词的 <available_skills> 清单里）并按它走：逐条澄清需求、给 2-3 个方案带取舍。plan mode 里它的文件布局不适用：不写 docs/superpowers/specs/、不 commit（一切写操作都被拦），设计产物由 exit_plan_mode 提交后统一落 .pi/plans/；技能里的「逐条提问」在这里就是 ask_user_question 工具。`;
 
 interface PersistedState {
 	phase: PlanState["phase"];

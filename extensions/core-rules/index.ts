@@ -42,8 +42,8 @@
  *
  * ## 注入什么
  *
- * 不是 19KB 的全局 AGENTS.md 全文，而是蒸馏版 `~/.pi/agent/AGENTS.core.md`（约 2KB）：
- * 破坏性动作三规则、blast radius 分级、授权范围、计划门、委派纪律、git/shell 底线。
+ * 不是 26KB 的全局 AGENTS.md 全文，而是蒸馏版 `~/.pi/agent/AGENTS.core.md`（约 6KB）：
+ * 破坏性动作三规则、blast radius 分级、授权范围、计划门、委派纪律、技能触发规则、git/shell 底线。
  * 全文仍在 system prompt 里，这份只是把最不能衰减的那几条推到末尾。
  * 文件缺失就静默跳过（不报错、不注入）—— 它是可选增强，不该让 pi 启动变吵。
  *
