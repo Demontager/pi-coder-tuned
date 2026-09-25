@@ -207,8 +207,9 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	//   ② **没有上下边界空行与左右 padding**（都是那个 Box 画的）。
 	// 与 bash（bash-command-collapse.ts）/ read（read-path-collapse.ts）块同一套观感：
 	// 块上方只剩 pi self 模式固定的那一行留白（render() 里 `lines.push("")`），下方紧贴
-	// 下一条消息。renderCall / renderResult 返回的 Text 本来就是 `new Text(…, 0, 0)`
-	//（零 padding、无 bgFn），所以不需要再包 Box。
+	// 下一条消息。renderCall / renderResult 返回的 Text 用 `new Text(…, 1, 0)`：
+	// **paddingX = 1** 补回默认壳 `Box(1, 1)` 原本提供的那一列左边距 —— 每行前置一个空格、
+	// 不顶格（用户 2026-09-26 定）；**paddingY = 0** 保持上下不留空行；无 bgFn，所以不包 Box。
 	pi.registerTool({
 		name: "task_set",
 		label: "Task Set",
@@ -258,7 +259,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			const count = Array.isArray(args?.tasks) ? args.tasks.length : 0;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("task_set ")) + theme.fg("muted", `${count} task(s)`),
-				0,
+				1,
 				0,
 			);
 		},
@@ -266,7 +267,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			const data = result.details as ToolDetails | undefined;
 			const count = data?.state.tasks.length ?? 0;
 			const text = count === 0 ? "Task list cleared." : `Task list ready: ${count} task(s)`;
-			return new Text(theme.fg("success", "✔ ") + theme.fg("muted", text), 0, 0);
+			return new Text(theme.fg("success", "✔ ") + theme.fg("muted", text), 1, 0);
 		},
 	});
 
@@ -308,7 +309,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			return new Text(
 				theme.fg("toolTitle", theme.bold("task_update ")) +
 					theme.fg("muted", `#${args?.id ?? "?"} → ${args?.status ?? "?"}`),
-				0,
+				1,
 				0,
 			);
 		},
@@ -317,7 +318,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			const first = result?.content?.[0];
 			const text =
 				first && "text" in first && typeof first.text === "string" ? first.text : "updated";
-			return new Text(theme.fg("success", "✔ ") + theme.fg("muted", text), 0, 0);
+			return new Text(theme.fg("success", "✔ ") + theme.fg("muted", text), 1, 0);
 		},
 	});
 
@@ -338,7 +339,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			};
 		},
 		renderCall(_args, theme) {
-			return new Text(theme.fg("toolTitle", theme.bold("task_get")), 0, 0);
+			return new Text(theme.fg("toolTitle", theme.bold("task_get")), 1, 0);
 		},
 		renderResult(result, _options, theme) {
 			const data = result.details as ToolDetails | undefined;
@@ -346,7 +347,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			const { done } = data ? countByStatus(data.state) : { done: 0 };
 			return new Text(
 				theme.fg("success", "✔ ") + theme.fg("muted", count === 0 ? "No active task list" : `${done}/${count} done`),
-				0,
+				1,
 				0,
 			);
 		},

@@ -13,10 +13,11 @@
  *   - 三个工具（`task_set` / `task_update` / `task_get`）都声明 `renderShell: "self"`；
  *   - 整块**没有任何底色**（pending / 成功 / 失败三种底都不画 —— 与 bash / read 块同一手法：
  *     selfRenderContainer 是纯 Container，bgFn 套不上去，扩展自己也不画）；
- *   - 整块**没有上下边界空行与左右 padding**（pi 默认壳 `Box(1, 1)` 画的那些全没了）：
+ *   - 整块**没有上下边界空行**（pi 默认壳 `Box(1, 1)` 的上下两条全没了）：
  *     块的第 0 行是 pi self 模式固定的那一行留白（`render()` 里 `lines.push("")`），
  *     第 1 行就是工具标题本身，最后一行是结果本身；
- *   - 标题与结果正文都从**列 0** 起（没有默认壳的左 padding）；
+ *   - 标题与结果正文都从**列 1** 起（每行前置一个空格、不顶格 —— 用户 2026-09-26 定：
+ *     补回默认壳原本提供的那一列左边距，由 Text 的 `paddingX = 1` 画）；
  *   - 其他工具照旧走默认壳（有底色）—— 有专门的对照断言。
  * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
  */
@@ -233,7 +234,7 @@ test("整块没有任何底色（pending / 成功 / 失败三种底都不画）"
 	assert.equal(other.render(79).some(hasBg), true, "其他工具的底色必须还在");
 });
 
-test("无边界空行：标题是块的第一行、结果是最后一行，正文顶格列 0", { skip }, () => {
+test("无边界空行：标题是块的第一行、结果是最后一行，正文在列 1（每行前置一个空格）", { skip }, () => {
 	for (const [name, sample] of Object.entries(SAMPLES)) {
 		for (const [label, lines] of [
 			["执行中", renderBlock(name, sample.args)],
@@ -242,13 +243,15 @@ test("无边界空行：标题是块的第一行、结果是最后一行，正�
 			const visible = lines.map(plain);
 			// 首行是 pi self 模式的固定留白（render() 里 lines.push("")），它不是块的一部分
 			assert.equal(visible[0], "", `${name} ${label}：第 0 行是 pi 的固定留白`);
-			// 块的第一行就是工具标题，顶格列 0（没有默认壳的左 padding）
-			assert.equal(visible[1]!.startsWith(name), true, `${name} ${label}：第 1 行就该是顶格的标题：${JSON.stringify(visible)}`);
+			// 块的第一行就是工具标题：前置**恰好一个**空格（不顶格，也不是两格）
+			assert.equal(visible[1]!.startsWith(` ${name}`), true, `${name} ${label}：第 1 行该是「空格 + 标题」：${JSON.stringify(visible)}`);
+			assert.notEqual(visible[1]!.startsWith(`  ${name}`), true, `${name} ${label}：不该有两个前导空格：${JSON.stringify(visible[1])}`);
 			// 最后一行是内容本身（没有下边界空行）
 			assert.notEqual(visible[visible.length - 1]!.trim(), "", `${name} ${label}：最后一行不该是空行：${JSON.stringify(visible)}`);
-			// 结果行也顶格列 0
+			// 结果行同样前置一个空格、不顶格
 			if (visible.length > 2) {
-				assert.equal(visible[2]!.startsWith(" ") || visible[2]!.trim() === "", false, `${name} ${label}：结果行不该有左缩进：${JSON.stringify(visible[2])}`);
+				assert.equal(visible[2]!.startsWith(" ") && visible[2]!.trim() !== "", true, `${name} ${label}：结果行该前置一个空格：${JSON.stringify(visible[2])}`);
+				assert.notEqual(visible[2]!.startsWith("  "), true, `${name} ${label}：结果行不该有两个前导空格：${JSON.stringify(visible[2])}`);
 			}
 		}
 	}
