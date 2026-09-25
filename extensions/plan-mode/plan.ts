@@ -352,7 +352,7 @@ export function inspectBashCommand(command: string): BashVerdict {
 	for (const simple of splitSimpleCommands(scanned)) {
 		const writes = simple.writes.filter((target) => !HARMLESS_WRITE_TARGETS.has(target));
 		if (writes.length > 0) {
-			return blocked(`重定向写入到 ${writes.map(quote).join(", ")}`);
+			return blocked(`Redirection writes to ${writes.map(quote).join(", ")}`);
 		}
 		const verdict = inspectSimpleCommand(simple);
 		if (!verdict.ok) return verdict;
@@ -366,7 +366,7 @@ function inspectSimpleCommand(simple: SimpleCommand): BashVerdict {
 
 	for (const arg of args) {
 		if (!WRITE_FLAGS.has(arg)) continue;
-		return blocked(`命令 \`${head}\` 带写参数 ${arg}`);
+		return blocked(`Command \`${head}\` has write argument ${arg}`);
 	}
 
 	if (WRITE_COMMANDS.has(head)) {
@@ -375,40 +375,40 @@ function inspectSimpleCommand(simple: SimpleCommand): BashVerdict {
 			if (!action || action === "status" || action === "show" || action === "list-units" || action === "is-active") {
 				return { ok: true };
 			}
-			return blocked(`命令 \`${head} ${action}\``);
+			return blocked(`Command \`${head} ${action}\``);
 		}
 		// `make --dry-run` / `-n` 只打印要跑什么，不改任何东西
 		if (head === "make" && args.some((arg) => arg === "--dry-run" || arg === "--just-print" || arg === "-n")) {
 			return { ok: true };
 		}
-		return blocked(`命令 \`${head}\``);
+		return blocked(`Command \`${head}\``);
 	}
 
 	if (head === "git") {
 		const sub = args.find((arg) => !arg.startsWith("-"));
 		if (!sub || !GIT_WRITE_SUBCOMMANDS.has(sub)) return { ok: true };
 		// `git branch -a` / `git config --get` 是读操作，明确放行；没带这些开关的写子命令不在 git 的写表里。
-		return blocked(`命令 \`git ${sub}\``);
+		return blocked(`Command \`git ${sub}\``);
 	}
 
 	if (PACKAGE_MANAGERS.has(head)) {
 		const sub = args.find((arg) => !arg.startsWith("-"));
 		if (!sub || !PACKAGE_WRITE_SUBCOMMANDS.has(sub)) return { ok: true };
-		return blocked(`命令 \`${head} ${sub}\``);
+		return blocked(`Command \`${head} ${sub}\``);
 	}
 
-	if (SYSTEM_PACKAGE_MANAGERS.has(head)) return blocked(`命令 \`${head}\``);
+	if (SYSTEM_PACKAGE_MANAGERS.has(head)) return blocked(`Command \`${head}\``);
 
 	// `sed` / `perl` / `awk` 只在带原地编辑开关时算写
 	if (head === "sed" || head === "perl") {
 		if (args.some((arg) => arg === "-i" || arg.startsWith("-i.") || arg === "--in-place")) {
-			return blocked(`命令 \`${head} -i\``);
+			return blocked(`Command \`${head} -i\``);
 		}
 	}
 
 	// `find … -delete` / `-exec rm` 这类写操作挂在参数上
 	if (head === "find" && args.some((arg) => arg === "-delete" || arg === "-exec" || arg === "-execdir")) {
-		return blocked("命令 `find` 带写动作（-delete / -exec）");
+		return blocked("Command `find` has a write action (-delete / -exec)");
 	}
 
 	// `truncate` 之类已在上表；这里兜住 `>| file` 之外的少见形状不额外处理。
@@ -437,7 +437,7 @@ function unwrap(words: readonly string[]): { head: string; args: string[] } {
 }
 
 function blocked(reason: string): BashVerdict {
-	return { ok: false, reason: `plan 阶段不执行写操作：${reason}` };
+	return { ok: false, reason: `Writes are not permitted during planning: ${reason}` };
 }
 
 function quote(text: string): string {

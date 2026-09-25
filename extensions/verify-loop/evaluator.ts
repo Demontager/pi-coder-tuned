@@ -42,7 +42,8 @@ export const DEFAULT_CONTEXT_CHARS = 120_000;
  * 超长时**截头留尾**：最近的对话才是判定依据。
  */
 export function buildEvaluatorPrompt(condition: string, conversation: string, maxChars = DEFAULT_CONTEXT_CHARS): string {
-	const trimmed = conversation.length > maxChars ? `…（更早的对话已截断）\n${conversation.slice(-maxChars)}` : conversation;
+	const trimmed = conversation.length > maxChars ? `… (earlier conversation truncated)
+${conversation.slice(-maxChars)}` : conversation;
 	return `Completion condition to judge:
 <condition>
 ${condition}
@@ -73,7 +74,7 @@ export function parseVerdict(text: string): { verdict: Verdict; reason: string }
 	const record = parsed as { verdict?: unknown; reason?: unknown };
 	const verdict = normalizeVerdict(typeof record.verdict === "string" ? record.verdict : "");
 	if (verdict === undefined) return undefined;
-	const reason = typeof record.reason === "string" && record.reason.trim() !== "" ? record.reason.trim() : "(评估器未给出理由)";
+	const reason = typeof record.reason === "string" && record.reason.trim() !== "" ? record.reason.trim() : "(evaluator provided no reason)";
 	return { verdict, reason: reason.slice(0, 1000) };
 }
 

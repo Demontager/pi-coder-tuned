@@ -311,7 +311,7 @@ test("单例按解析后的路径去重：尾斜杠与 `.` 段拿到同一个实
 	}
 });
 
-test("单例键是词法的：/var 与 /private/var 两种拼写拿到两个实例（可接受的取舍）", () => {
+test("单例键是词法的：/var 与 /private/var 两种拼写拿到两个实例（可接受的取舍）", { skip: process.platform !== "darwin" ? "Requires macOS /var symlink" : false }, () => {
 	// 这不是缺陷而是取舍：缓存键用 resolvePath（词法），不跳符号链接。
 	// macOS 上 os.tmpdir() 就是 /var/folders/…，而它的 realpath 是 /private/var/folders/…，
 	// 所以这两种拼写确实会拿到两个实例。但两个扩展算路径的代码完全相同

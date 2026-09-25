@@ -1,6 +1,18 @@
 # Changelog
 
-All notable changes to this package. The extensions themselves are snapshot copies from the author's pi environment; their individual histories live in that repository.
+## pi-coder-tuned 0.1.0
+
+- Forked from jayli/pi-coder 2.1.3 (`d68d965`), preserving MIT attribution.
+- English user-facing extension literals, prompts, and matching test expectations.
+- Local recap excerpts make no authentication or inference call; automatic loopback
+  detection plus `PI_RECAP_MODE=extract|model` overrides.
+- Exact used/total context-token counts alongside percentage.
+- Omit Git branch/diff placeholders outside repositories.
+- Portable test setup for Linux versus macOS and true-color render assertions.
+
+## Upstream history
+
+The following entries describe the original package before the fork.
 
 ## 2.1.3 — 2026-09-26
 

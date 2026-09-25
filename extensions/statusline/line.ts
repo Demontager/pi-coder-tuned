@@ -15,7 +15,7 @@ export interface StatuslineTheme {
 export interface StatuslineSource {
 	model: { id?: string } | undefined;
 	thinkingLevel?: string;
-	getContextUsage(): { percent: number | null | undefined } | undefined;
+	getContextUsage(): { tokens?: number | null; contextWindow?: number; percent: number | null | undefined } | undefined;
 }
 
 /** footerData 里需要的部分。 */
@@ -150,13 +150,19 @@ function formatModelSegment(theme: StatuslineTheme, source: StatuslineSource): s
 }
 
 function formatContextSegment(theme: StatuslineTheme, source: StatuslineSource): string {
-	const percent = readContextUsage(source)?.percent ?? null;
+	const usage = readContextUsage(source);
+	const percent = typeof usage?.percent === "number" && Number.isFinite(usage.percent) ? usage.percent : null;
 	const percentText = percent === null ? "?" : `${percent.toFixed(1)}%`;
-	return `${dim(theme, "Ctx")} ${theme.fg(contextColor(percent), percentText)}`;
+	const tokens = usage?.tokens;
+	const capacity = usage?.contextWindow ?? readModel(source)?.contextWindow;
+	const count = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) && value >= 0
+		? Math.round(value).toLocaleString("en-US") : "?";
+	const counts = tokens != null || capacity != null ? `${count(tokens)}/${count(capacity)} ` : "";
+	return `${dim(theme, "Ctx")} ${dim(theme, counts)}${theme.fg(contextColor(percent), percentText)}`;
 }
 
 function formatBranchSegment(theme: StatuslineTheme, branch: string | null): string {
-	if (!branch) return dim(theme, `${BRANCH_ICON} no git`);
+	if (!branch) return "";
 	return `${dim(theme, BRANCH_ICON)} ${theme.fg("accent", branch)}`;
 }
 
@@ -165,7 +171,7 @@ function formatDiffSegment(
 	branch: string | null,
 	diffStat: DiffStat | undefined,
 ): string {
-	if (!branch) return dim(theme, "(no git)");
+	if (!branch) return "";
 	return `${dim(theme, "(")}${theme.fg("success", `+${diffStat?.added ?? 0}`)}${dim(theme, ",")}${theme.fg("error", `-${diffStat?.deleted ?? 0}`)}${dim(theme, ")")}`;
 }
 
@@ -190,7 +196,7 @@ function contextColor(percent: number | null): string {
 /** ctx 的 getter 在会话被换掉后可能抛（stale ctx），状态栏不值得为此挂掉渲染。 */
 function readContextUsage(
 	source: StatuslineSource,
-): { percent: number | null | undefined } | undefined {
+): ReturnType<StatuslineSource["getContextUsage"]> {
 	try {
 		return source.getContextUsage();
 	} catch {

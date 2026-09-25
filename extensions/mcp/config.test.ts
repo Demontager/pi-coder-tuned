@@ -124,7 +124,7 @@ describe("loadMcpConfig", () => {
 		writeFileSync(join(project, ".mcp.json"), "{ not json");
 		const result = loadMcpConfig({ cwd: project, homeDir: home, env: {} });
 		assert.equal(result.issues.length, 1);
-		assert.match(result.issues[0]?.message ?? "", /不是合法 JSON/);
+		assert.match(result.issues[0]?.message ?? "", /Invalid JSON/);
 	});
 
 	it("缺少 mcpServers 字段时给出可读的 issue", () => {
@@ -257,7 +257,7 @@ describe("headersCommand（动态请求头）", () => {
 		const { server, issues } = normalizeEntry({ command: "/bin/x", headersHelper: "cmd" });
 		assert.equal(server?.transport, "stdio");
 		assert.equal(issues.length, 1);
-		assert.match(issues[0]?.message ?? "", /只对 http\/sse/);
+		assert.match(issues[0]?.message ?? "", /only applies to http\/sse/);
 	});
 });
 

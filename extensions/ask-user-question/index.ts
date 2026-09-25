@@ -154,12 +154,12 @@ function demoParams(): AskParams {
 	return {
 		questions: [
 			{
-				question: "这份问卷的交互形态，你更希望是哪一种？",
-				header: "交互形态",
+				question: "Which interaction style would you prefer for this questionnaire?",
+				header: "Interaction style",
 				options: [
-					{ label: "覆盖编辑器区 (Recommended)", description: "ctx.ui.custom() 非 overlay：问卷接管输入框位置，实现最简、渲染最稳" },
-					{ label: "浮层 overlay", description: "浮在对话上方，答题时仍能看见 transcript，但要处理折叠/焦点" },
-					{ label: "顺序对话框", description: "逐题走宿主原生 select/input，没有总览页，RPC 宿主就是这条路径" },
+					{ label: "Replace editor area (Recommended)", description: "Non-overlay ctx.ui.custom(): questionnaire replaces the editor; simplest implementation and stable rendering" },
+					{ label: "Overlay", description: "Float above the conversation; keep the transcript visible, with additional focus/layout handling" },
+					{ label: "Sequential dialogs", description: "Native select/input dialogs, one question at a time; no overview page; also used by RPC hosts" },
 				],
 			},
 			{

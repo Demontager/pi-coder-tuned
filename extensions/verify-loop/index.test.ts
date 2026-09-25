@@ -292,7 +292,7 @@ test(
 		assert.equal(draft?.customType, VERIFY_LOOP_CUSTOM_TYPE);
 		assert.equal(draft?.details?.kind, "gate");
 		assert.equal(draft?.display, true, "CC 的 Stop hook feedback 用户可见");
-		assert.match(draft?.content ?? "", /没有跑过任何命令/);
+		assert.match(draft?.content ?? "", /no command was run/);
 		assert.match(draft?.content ?? "", /src\/a\.js/);
 	},
 );
@@ -528,7 +528,7 @@ test(
 		const messages = [user("开始"), assistantText("完成了")];
 		const result = await settleWithGoal(harness, messages);
 		assert.equal(result, undefined, "评估失败应放行");
-		assert.ok(harness.notifies.some((text) => text.includes("评估失败")));
+		assert.ok(harness.notifies.some((text) => text.includes("evaluation failed")));
 	},
 );
 
@@ -566,7 +566,7 @@ test(
 		assert.equal(result?.continue, undefined, "到上限不再续跑");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-cap");
-		assert.match(draft?.content ?? "", /条件仍保留/);
+		assert.match(draft?.content ?? "", /condition is retained/);
 	},
 );
 
@@ -589,7 +589,7 @@ test(
 		assert.equal(result?.continue, undefined, "无进展不再续跑");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-halted");
-		assert.match(draft?.content ?? "", /无进展/);
+		assert.match(draft?.content ?? "", /no progress/);
 		assert.equal(harness.evaluations.length, 0, "halt 判定在评估之前，不花模型调用");
 	},
 );

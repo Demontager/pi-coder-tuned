@@ -103,59 +103,59 @@ function resolveTarget(cwd: string, file: string | undefined): InitTarget {
  *     Claude Code 的 /init 提示词里最起作用的那几条，照搬。
  */
 function buildPrompt(target: InitTarget, cwd: string, extra: string): string {
-	const action = target.exists ? "更新" : "创建";
+	const action = target.exists ? "Update" : "Create";
 	const lines = [
-		`请分析这个代码库，然后${action}记忆文件 \`${target.display}\`（绝对路径：\`${target.path}\`）。`,
+		`Analyze this codebase, then ${action} the memory file \`${target.display}\` (absolute path: \`${target.path}\`）。`,
 		"",
-		"这个文件会被 pi 在**之后的每次会话**自动加载（从工作目录逐层向上读 `AGENTS.md` / `CLAUDE.md`，同目录下有 `AGENTS.override.md` 时以它为准），读者是「下一次在这个仓库里干活的 agent」。",
-		`项目根目录：\`${cwd}\``,
+		"Pi automatically loads this file in **every subsequent session**, reading AGENTS.md / CLAUDE.md up from the working directory, with AGENTS.override.md taking precedence in the same directory. Write for the next agent working in this repository.",
+		`Project root: \`${cwd}\``,
 		"",
 		target.exists
-			? "该文件**已存在**：先 read 它，再决定改什么 —— 保留仍然正确的内容、删掉与代码不符的、补上缺的。不要为了重写而重写，也不要丢掉已有的踩坑记录。"
-			: "该文件**还不存在**：从零写一份。",
+			? "The file **already exists**: read it first. Keep accurate content, remove outdated content, and add missing information. Avoid unnecessary rewrites and retain existing troubleshooting notes."
+			: "The file **does not exist yet**: create it.",
 		"",
-		"先自己探查仓库（README、依赖与构建清单如 package.json / pyproject.toml / Makefile / Cargo.toml、CI 配置、测试目录、主要源码），**只写你验证过的事实**：命令要真的存在、路径要真的对，没把握就不写，不要臆造。",
+		"Explore the repository first (README, dependency/build manifests, CI, tests, and main source). **Write only verified facts**: commands must exist and paths must be correct. Omit uncertain claims rather than inventing them.",
 		"",
-		"要写进去的（按价值排序）：",
-		"1. **常用命令**：装依赖 / 构建 / 跑测试（含只跑单个测试的写法）/ lint / 格式化 / 本地起服务；注明在哪个目录执行、有哪些前置条件。命令放代码块，能直接复制。",
-		"2. **架构与代码地图**：主要模块各自负责什么、一条典型请求或一次典型构建是怎么流过去的、关键约定与分层、外部依赖、哪些文件是生成物（不要手改）。",
-		"3. **这个仓库特有的坑**：非显然的行为、必须遵守的流程（提交信息格式、需要同时改的几处配置、必须保持同步的镜像文件）、容易踩错的地方。",
+		"Include, in priority order:",
+		"1. **Common commands**: install dependencies, build, test (including individual tests), lint, format, and start local services. State working directories and prerequisites. Use copyable code blocks.",
+		"2. **Architecture and code map**: module responsibilities, typical request/build flow, conventions and layers, external dependencies, and generated files that should not be edited manually.",
+		"3. **Repository-specific pitfalls**: non-obvious behavior, required workflows (commit format, linked configurations, synchronized copies), and common mistakes.",
 		"",
-		"不要写：",
-		"- 通用开发建议（「写单元测试」「不要提交密钥」「给出清晰的报错」这类谁都知道的话）。",
-		"- 目录树罗列 / 逐文件清单，或把 README 复述一遍。",
-		"- 只跟当前任务有关的临时信息。",
+		"Do not include:",
+		"- Generic development advice such as writing unit tests, not committing secrets, or providing clear errors.",
+		"- Directory trees, exhaustive file lists, or a repetition of the README.",
+		"- Temporary information relevant only to the current task.",
 		"",
-		"写法：",
-		"- 语言与风格跟随该文件现有内容；新文件用中文（除非这仓库的文档清一色是英文）。紧凑，宁缺毋滥。",
+		"Writing style:",
+		"- Follow the existing file's language and style; use English for new files. Be concise and prefer useful facts over filler.",
 	];
 	if (!target.explicit) {
 		lines.push(
-			"- 如果 `AGENTS.md` 与 `CLAUDE.md` 同时存在、或其中一个是另一个的符号链接，**只改上面指定的这一个**，不要把内容抄进另一个。",
+			"- If AGENTS.md and CLAUDE.md both exist, or one symlinks to the other, **edit only the specified file**; do not duplicate its contents into the other.",
 		);
 	}
 	lines.push(
-		"- 仓库里若有别的 agent 记忆文件（`.cursorrules` / `.cursor/rules/` / `.github/copilot-instructions.md` / `.claude/`），可以读来补漏，但不要改它们。",
-		"- 用 write / edit 工具写到上面那个绝对路径（不要用 bash 的 cat / heredoc 落盘）。",
-		"- 完成后用一两句话说明改了什么。",
+		"- You may read other agent instructions (.cursorrules, .cursor/rules/, .github/copilot-instructions.md, .claude/) for missing information, but do not modify them.",
+		"- Use write / edit tools at the absolute path above, not Bash cat/heredocs.",
+		"- Finish with one or two sentences describing the changes.",
 	);
-	if (extra) lines.push("", `这次 /init 的附加要求：${extra}`);
+	if (extra) lines.push("", `Additional requirements for this /init: ${extra}`);
 	return lines.join("\n");
 }
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("init", {
-		description: "分析仓库并生成/更新记忆文件（有 CLAUDE.md 就更新它，否则 AGENTS.md）",
+		description: "Analyze the repository and create/update its memory file (CLAUDE.md if present, otherwise AGENTS.md)",
 		handler: async (args, ctx) => {
 			const { file, extra } = parseArgs(args);
 			// 判定必须发生在「发消息」那一刻：agent 正在跑时先等它结束（见文件头 ①）。
 			if (!ctx.isIdle()) {
-				if (ctx.hasUI) ctx.ui.notify("等当前回合结束再开始 /init …", "info");
+				if (ctx.hasUI) ctx.ui.notify("Waiting for the current turn to finish before starting /init…", "info");
 				await ctx.waitForIdle();
 			}
 			const target = resolveTarget(ctx.cwd, file);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`${target.exists ? "更新" : "创建"} ${target.display}（${target.path}）…`, "info");
+				ctx.ui.notify(`${target.exists ? "Update" : "Create"} ${target.display}（${target.path}）…`, "info");
 			}
 			pi.sendUserMessage(buildPrompt(target, ctx.cwd, extra));
 		},

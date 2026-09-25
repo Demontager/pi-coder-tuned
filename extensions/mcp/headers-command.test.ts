@@ -55,13 +55,13 @@ describe("parseHeadersOutput", () => {
 		const { headers, warnings } = parseHeadersOutput('{"Authorization":"","X-Ok":"y"}');
 		assert.deepEqual(headers, { "X-Ok": "y" });
 		assert.equal(warnings.length, 1);
-		assert.match(warnings[0] ?? "", /Authorization 的值为空/);
+		assert.match(warnings[0] ?? "", /Authorization value is empty/);
 	});
 
 	it("非法头名记 warning 并丢弃", () => {
 		const { headers, warnings } = parseHeadersOutput('{"Bad Header":"x","Good":"y"}');
 		assert.deepEqual(headers, { Good: "y" });
-		assert.match(warnings[0] ?? "", /非法字符/);
+		assert.match(warnings[0] ?? "", /invalid characters/);
 	});
 
 	it("空输出 = 无头（不是错误）", () => {
@@ -73,7 +73,7 @@ describe("parseHeadersOutput", () => {
 			() => parseHeadersOutput(`不给你解析 ${SECRET}`),
 			(error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				assert.match(message, /无法解析/);
+				assert.match(message, /Could not parse/);
 				assert.ok(!message.includes(SECRET), "错误信息里不能出现命令输出");
 				return true;
 			},
@@ -81,8 +81,8 @@ describe("parseHeadersOutput", () => {
 	});
 
 	it("JSON 数组 / 裸标量 → 报错（不当成头行处理）", () => {
-		assert.throws(() => parseHeadersOutput("[1,2]"), /无法解析/);
-		assert.throws(() => parseHeadersOutput("42"), /无法解析/);
+		assert.throws(() => parseHeadersOutput("[1,2]"), /Could not parse/);
+		assert.throws(() => parseHeadersOutput("42"), /Could not parse/);
 	});
 });
 
@@ -100,7 +100,7 @@ describe("resolveCommandHeaders", () => {
 			() => resolveCommandHeaders({ command: "node -e 'console.error(\"token 过期了\"); process.exit(3)'" }),
 			(error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				assert.match(message, /退出码非 0/);
+				assert.match(message, /nonzero status/);
 				assert.match(message, /token 过期了/);
 				return true;
 			},
@@ -115,7 +115,7 @@ describe("resolveCommandHeaders", () => {
 					{},
 				),
 			(error: unknown) => {
-				assert.match(error instanceof Error ? error.message : "", /超时/);
+				assert.match(error instanceof Error ? error.message : "", /timed out/);
 				return true;
 			},
 		);
@@ -162,7 +162,7 @@ describe("describeHeaderNames / headersSignature", () => {
 	});
 
 	it("无头时给一个明确的占位", () => {
-		assert.equal(describeHeaderNames({}), "(无)");
+		assert.equal(describeHeaderNames({}), "(none)");
 	});
 
 	it("签名与键序无关（用于判断头是否真的变了）", () => {

@@ -170,7 +170,7 @@ export class McpClient {
 			await transport.close().catch(() => {});
 			if (error instanceof McpError || error instanceof McpConnectionError) throw error;
 			const message = error instanceof Error ? error.message : String(error);
-			throw new McpConnectionError(`${config.name}: ${client.transportLabel} 连接失败：${message}`);
+			throw new McpConnectionError(`${config.name}: ${client.transportLabel} connection failed: ${message}`);
 		}
 	}
 
@@ -217,7 +217,7 @@ export class McpClient {
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		this.rejectAll(new McpConnectionError(`${this.serverName}: 连接已关闭`));
+		this.rejectAll(new McpConnectionError(`${this.serverName}: connection closed`));
 		await this.transport.close().catch(() => {});
 	}
 
@@ -228,7 +228,7 @@ export class McpClient {
 	private notify(message: JsonRpcNotification): void {
 		if (this.closed) return;
 		void this.transport.send(message).catch((error) => {
-			this.diagnostician(`通知 ${message.method} 发送失败：${error instanceof Error ? error.message : String(error)}`);
+			this.diagnostician(`Notification ${message.method} could not be sent: ${error instanceof Error ? error.message : String(error)}`);
 		});
 	}
 
@@ -237,9 +237,9 @@ export class McpClient {
 		params: unknown,
 		options: { signal?: AbortSignal; timeoutMs: number },
 	): Promise<JsonRpcResponse> {
-		if (this.closed) return Promise.reject(new McpConnectionError(`${this.serverName}: 连接已关闭`));
+		if (this.closed) return Promise.reject(new McpConnectionError(`${this.serverName}: connection closed`));
 		if (options.signal?.aborted) {
-			return Promise.reject(new McpConnectionError(`${this.serverName}: 请求在发送前已被取消`));
+			return Promise.reject(new McpConnectionError(`${this.serverName}: request cancelled before sending`));
 		}
 		const id = this.nextId;
 		this.nextId += 1;
@@ -251,7 +251,7 @@ export class McpClient {
 				pending.timer = setTimeout(() => {
 					if (!this.pending.delete(id)) return;
 					this.sendCancel(id, `timeout after ${options.timeoutMs}ms`);
-					reject(new McpError(REQUEST_TIMEOUT_CODE, `${this.serverName}: ${method} 超时（${options.timeoutMs}ms）`));
+					reject(new McpError(REQUEST_TIMEOUT_CODE, `${this.serverName}: ${method} timed out (${options.timeoutMs}ms）`));
 				}, options.timeoutMs);
 				pending.timer.unref?.();
 			}
@@ -259,7 +259,7 @@ export class McpClient {
 				pending.abortListener = () => {
 					if (!this.pending.delete(id)) return;
 					this.sendCancel(id, "client aborted");
-					reject(new McpConnectionError(`${this.serverName}: ${method} 已取消`));
+					reject(new McpConnectionError(`${this.serverName}: ${method} cancelled`));
 				};
 				options.signal.addEventListener("abort", pending.abortListener, { once: true });
 			}
@@ -286,7 +286,7 @@ export class McpClient {
 			return;
 		}
 		if (!response) {
-			pending.reject(new McpConnectionError(`${this.serverName}: ${pending.method} 没有拿到响应`));
+			pending.reject(new McpConnectionError(`${this.serverName}: ${pending.method} received no response`));
 			return;
 		}
 		if ("error" in response) {
@@ -316,10 +316,10 @@ export class McpClient {
 				.send({
 					jsonrpc: "2.0",
 					id: request.id,
-					error: { code: JSONRPC_METHOD_NOT_FOUND, message: `pi 未实现服务端请求 ${request.method}` },
+					error: { code: JSONRPC_METHOD_NOT_FOUND, message: `Pi does not implement server request ${request.method}` },
 				})
 				.catch(() => {});
-			this.diagnostician(`忽略服务端请求 ${request.method}（未实现）`);
+			this.diagnostician(`Ignoring server request ${request.method} (not implemented)`);
 			return;
 		}
 
@@ -384,7 +384,7 @@ class StdioTransport implements McpTransport {
 					this.handlers.onMessage(parseJsonRpcMessage(line));
 				} catch (error) {
 					this.diagnostician(
-						`stdout 上的数据不是 JSON-RPC，已忽略：${line.slice(0, 200)}（${error instanceof Error ? error.message : String(error)}）`,
+						`Ignoring non-JSON-RPC data on stdout: ${line.slice(0, 200)}（${error instanceof Error ? error.message : String(error)}）`,
 					);
 				}
 			}
@@ -401,13 +401,13 @@ class StdioTransport implements McpTransport {
 		});
 
 		this.child.on("error", (error) => {
-			this.handlers.onClose(new McpConnectionError(`${config.name}: 子进程启动失败：${error.message}`));
+			this.handlers.onClose(new McpConnectionError(`${config.name}: subprocess failed to start: ${error.message}`));
 		});
 		this.child.on("exit", (code, signal) => {
 			if (this.closed) return;
 			this.handlers.onClose(
 				new McpConnectionError(
-					`${config.name}: 子进程退出（code=${code ?? "null"} signal=${signal ?? "null"}）${this.stderrTail()}`,
+					`${config.name}: subprocess exited (code=${code ?? "null"} signal=${signal ?? "null"}）${this.stderrTail()}`,
 				),
 			);
 		});
@@ -415,7 +415,7 @@ class StdioTransport implements McpTransport {
 
 	async send(message: JsonRpcMessage): Promise<void> {
 		const child = this.child;
-		if (!child || this.closed) throw new McpConnectionError(`${this.config.name}: 子进程不可用`);
+		if (!child || this.closed) throw new McpConnectionError(`${this.config.name}: subprocess unavailable`);
 		await new Promise<void>((resolve, reject) => {
 			child.stdin.write(encodeStdioFrame(message), (error) => (error ? reject(error) : resolve()));
 		});
@@ -482,7 +482,7 @@ class DynamicHeaderResolver {
 
 	/** 头命令的最近一次失败原因（成功或无命令时为 undefined）。 */
 	errorSuffix(): string {
-		return this.failure ? `（头命令失败：${this.failure}）` : "";
+		return this.failure ? ` (header command failed: ${this.failure}）` : "";
 	}
 
 	async ensure(signal?: AbortSignal): Promise<void> {
@@ -500,17 +500,17 @@ class DynamicHeaderResolver {
 				{ command, timeoutMs: this.config.headersCommandTimeoutMs },
 				{ signal },
 			);
-			for (const warning of result.warnings) this.report(`头命令：${warning}`);
+			for (const warning of result.warnings) this.report(`Header command: ${warning}`);
 			const nextSignature = headersSignature(result.headers);
 			const changed = nextSignature !== this.signature;
 			this.dynamic = result.headers;
 			this.signature = nextSignature;
 			this.failure = undefined;
-			this.report(`${reason}头命令取到 ${result.names.length} 个头（${describeHeaderNames(result.headers)}）`);
+			this.report(`${reason}Header command returned ${result.names.length} headers (${describeHeaderNames(result.headers)}）`);
 			return changed;
 		} catch (error) {
 			this.failure = error instanceof Error ? error.message : String(error);
-			this.report(`头命令失败：${this.failure}（改用静态 headers 继续）`);
+			this.report(`Header command failed: ${this.failure} (continuing with static headers)`);
 			return false;
 		}
 	}
@@ -540,7 +540,7 @@ class StreamableHttpTransport implements McpTransport {
 	}
 
 	async send(message: JsonRpcMessage): Promise<void> {
-		if (this.closed) throw new McpConnectionError(`${this.config.name}: 连接已关闭`);
+		if (this.closed) throw new McpConnectionError(`${this.config.name}: connection closed`);
 		const isRequest = "method" in message && "id" in message;
 		const controller = new AbortController();
 		this.inFlight.add(controller);
@@ -550,7 +550,7 @@ class StreamableHttpTransport implements McpTransport {
 
 			// 401/403：头可能是过期的（命令去取新 token），重跑一次；只有头真的变了才值得重试。
 			if (isRequest && (response.status === 401 || response.status === 403)) {
-				const changed = await this.dynamicHeaders.refresh(`HTTP ${response.status} 后`, controller.signal);
+				const changed = await this.dynamicHeaders.refresh(`HTTP ${response.status} afterward`, controller.signal);
 				if (changed) {
 					await response.arrayBuffer().catch(() => undefined);
 					response = await this.post(message, controller.signal);
@@ -582,7 +582,7 @@ class StreamableHttpTransport implements McpTransport {
 
 			const text = await safeReadText(response);
 			if (!text.trim()) {
-				throw new McpConnectionError(`${this.config.name}: HTTP 响应为空（期望 JSON-RPC 响应）`);
+				throw new McpConnectionError(`${this.config.name}: empty HTTP response (expected JSON-RPC)`);
 			}
 			this.handlers.onMessage(parseJsonRpcMessage(text));
 		} finally {
@@ -601,7 +601,7 @@ class StreamableHttpTransport implements McpTransport {
 
 	private async consumeSseBody(response: Response): Promise<void> {
 		const body = response.body;
-		if (!body) throw new McpConnectionError(`${this.config.name}: SSE 响应没有 body`);
+		if (!body) throw new McpConnectionError(`${this.config.name}: SSE response has no body`);
 		const reader = body.getReader();
 		const decoder = new TextDecoder();
 		const sse = createSseDecoder();
@@ -617,7 +617,7 @@ class StreamableHttpTransport implements McpTransport {
 					try {
 						message = parseJsonRpcMessage(data);
 					} catch (error) {
-						this.options.onDiagnostic?.(`SSE 事件不是 JSON-RPC：${String(error)}`, this.config.name);
+						this.options.onDiagnostic?.(`SSE event is not JSON-RPC: ${String(error)}`, this.config.name);
 						continue;
 					}
 					this.handlers.onMessage(message);
@@ -696,7 +696,7 @@ class LegacySseTransport implements McpTransport {
 				});
 				if (!response.ok || !response.body) {
 					throw new McpConnectionError(
-						`${this.config.name}: SSE 连接失败 HTTP ${response.status}${this.dynamicHeaders.errorSuffix()}`,
+						`${this.config.name}: SSE connection failed, HTTP ${response.status}${this.dynamicHeaders.errorSuffix()}`,
 					);
 				}
 				const reader = response.body.getReader();
@@ -716,22 +716,22 @@ class LegacySseTransport implements McpTransport {
 						try {
 							this.handlers.onMessage(parseJsonRpcMessage(data));
 						} catch (error) {
-							this.options.onDiagnostic?.(`SSE 事件不是 JSON-RPC：${String(error)}`, this.config.name);
+							this.options.onDiagnostic?.(`SSE event is not JSON-RPC: ${String(error)}`, this.config.name);
 						}
 					}
 				}
-				if (!this.closed) this.handlers.onClose(new McpConnectionError(`${this.config.name}: SSE 流已关闭`));
+				if (!this.closed) this.handlers.onClose(new McpConnectionError(`${this.config.name}: SSE stream closed`));
 			} catch (error) {
 				if (this.closed) return;
 				const failure = error instanceof Error ? error : new Error(String(error));
 				if (!this.endpoint) rejectReady(failure);
-				else this.handlers.onClose(new McpConnectionError(`${this.config.name}: SSE 流中断：${failure.message}`));
+				else this.handlers.onClose(new McpConnectionError(`${this.config.name}: SSE stream interrupted: ${failure.message}`));
 			}
 		})();
 
 		// 等不到 endpoint 就不必挂死：用 config.timeoutMs 做上限。
 		const timer = setTimeout(
-			() => rejectReady(new McpConnectionError(`${this.config.name}: 等待 SSE endpoint 超时`)),
+			() => rejectReady(new McpConnectionError(`${this.config.name}: timed out waiting for SSE endpoint`)),
 			this.config.timeoutMs,
 		);
 		timer.unref?.();
@@ -739,7 +739,7 @@ class LegacySseTransport implements McpTransport {
 	}
 
 	async send(message: JsonRpcMessage): Promise<void> {
-		if (this.closed) throw new McpConnectionError(`${this.config.name}: 连接已关闭`);
+		if (this.closed) throw new McpConnectionError(`${this.config.name}: connection closed`);
 		await this.ready;
 		const isRequest = "method" in message && "id" in message;
 		const controller = new AbortController();
@@ -748,7 +748,7 @@ class LegacySseTransport implements McpTransport {
 			let response = await this.post(message, controller.signal);
 			// 与 streamable HTTP 同一套：401/403 重跑一次头命令，头变了才重试（GET 流不重建）。
 			if (isRequest && (response.status === 401 || response.status === 403)) {
-				const changed = await this.dynamicHeaders.refresh(`HTTP ${response.status} 后`, controller.signal);
+				const changed = await this.dynamicHeaders.refresh(`HTTP ${response.status} afterward`, controller.signal);
 				if (changed) {
 					await response.arrayBuffer().catch(() => undefined);
 					response = await this.post(message, controller.signal);

@@ -104,7 +104,7 @@ describe("stdio transport", () => {
 		const client = await connectStdio({ timeoutMs: 250 }, diagnostics);
 		await assert.rejects(
 			() => client.callTool("delay", { ms: 3000 }),
-			(error: unknown) => error instanceof McpError && /超时/.test(error.message),
+			(error: unknown) => error instanceof McpError && /timed out/.test(error.message),
 		);
 		// fixture 收到 notifications/cancelled 会往 stderr 写一行，经 onDiagnostic 回到这里。
 		await waitFor(() => diagnostics.some((line) => line.startsWith("cancelled request")));
@@ -116,7 +116,7 @@ describe("stdio transport", () => {
 		const controller = new AbortController();
 		const pending = client.callTool("delay", { ms: 3000 }, { signal: controller.signal });
 		setTimeout(() => controller.abort(), 50);
-		await assert.rejects(pending, (error: unknown) => error instanceof McpConnectionError && /已取消/.test(error.message));
+		await assert.rejects(pending, (error: unknown) => error instanceof McpConnectionError && /cancelled/.test(error.message));
 		await waitFor(() => diagnostics.some((line) => line.startsWith("cancelled request")));
 	});
 
@@ -157,7 +157,7 @@ describe("stdio transport", () => {
 					handshakeTimeoutMs: 3000,
 				}),
 			(error: unknown) =>
-				error instanceof McpConnectionError && /子进程启动失败|连接失败/.test(error.message),
+				error instanceof McpConnectionError && /subprocess failed to start|connection failed/.test(error.message),
 		);
 	});
 });
@@ -250,7 +250,7 @@ describe("streamable HTTP transport", () => {
 		});
 		await assert.rejects(
 			() => McpClient.connect({ ...http.config, name: "empty" }, { handshakeTimeoutMs: 2000 }),
-			(error: unknown) => error instanceof McpConnectionError && /为空/.test(error.message),
+			(error: unknown) => error instanceof McpConnectionError && /empty HTTP response/.test(error.message),
 		);
 	});
 });
@@ -393,7 +393,7 @@ describe("dynamic headers (headersCommand)", () => {
 		assert.equal(client.serverInfo.name, "gated");
 		assert.ok(
 			// fixture 往 stderr 写的是 "token 服务连不上"，runCommand 把它拼进错误信息。
-			diagnostics.some((line) => line.includes("头命令失败") && line.includes("token 服务连不上")),
+			diagnostics.some((line) => line.includes("Header command failed") && line.includes("token 服务连不上")),
 			`诊断里应记录头命令失败：${diagnostics.join(" | ")}`,
 		);
 	});
@@ -410,7 +410,7 @@ describe("dynamic headers (headersCommand)", () => {
 			(error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
 				assert.match(message, /HTTP 401/);
-				assert.match(message, /头命令失败/);
+			assert.match(message, /header command failed/i);
 				return true;
 			},
 		);

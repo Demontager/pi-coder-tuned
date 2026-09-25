@@ -254,12 +254,12 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 			kind === "gate"
 				? theme.fg("warning", "⚠ verify-loop:")
 				: kind === "goal-met"
-					? theme.fg("success", "◎ goal 达成:")
+					? theme.fg("success", "◎ goal achieved:")
 					: kind === "goal-impossible"
-						? theme.fg("error", "◎ goal 不可能:")
+						? theme.fg("error", "◎ goal impossible:")
 						: kind === "goal-halted" || kind === "goal-cap"
-							? theme.fg("warning", "◎ goal 已停:")
-							: theme.fg("accent", "◎ goal 未达成:");
+							? theme.fg("warning", "◎ goal stopped:")
+							: theme.fg("accent", "◎ goal pending:");
 		const body = typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("\n");
 		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
 		box.addChild(new Text(`${label}\n${body}`, 0, 0));
@@ -269,7 +269,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 	// ── /goal 命令 ─────────────────────────────────────────────────────────
 
 	pi.registerCommand("goal", {
-		description: "设定完成条件，每轮结束由独立模型评估（/goal 查状态，/goal clear 清除）",
+		description: "Set a completion condition evaluated by a separate model after each turn (/goal for status, /goal clear to remove)",
 		handler: async (args, ctx) => {
 			const text = args.trim();
 
@@ -281,7 +281,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 
 			if (CLEAR_ALIASES.has(text.toLowerCase())) {
 				if (goal.condition === "") {
-					ctx.ui.notify("没有设定 /goal", "info");
+					ctx.ui.notify("No /goal set", "info");
 					return;
 				}
 				const cleared = goal.condition;
@@ -346,7 +346,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		const verdict = await evaluate(ctx, messages, goal.condition);
 		if (verdict === undefined) {
 			// fail-open：评估器坏了不拦回合（CC 的 hook 失败同样不拦）。
-			if (ctx.hasUI) ctx.ui.notify("[verify-loop] /goal 评估失败，本轮放行", "warning");
+			if (ctx.hasUI) ctx.ui.notify("[verify-loop] /goal evaluation failed; allowing this turn to finish", "warning");
 			return undefined;
 		}
 
@@ -445,9 +445,11 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 /** /goal 设定后立刻起一轮的指令（CC：条件本身就是 directive）。 */
 export function buildGoalDirective(condition: string): string {
 	return (
-		`/goal 已设定完成条件，请朝它工作，直到条件达成：\n\n${condition}\n\n` +
-		`每轮结束后会有一个独立评估器只读对话内容判定条件是否达成 —— 它自己不能跑命令，` +
-		`所以**证据必须出现在你的输出里**（跑命令并贴出输出、展示文件内容）。` +
-		`条件达成前不要停下来等我确认。`
+		`/goal completion condition set; work until it is satisfied:
+
+${condition}\n\n` +
+		`After each turn, a separate evaluator reads the conversation to determine whether the condition is met. It cannot run commands, ` +
+		`so **evidence must appear in your output** (run commands and show their output or file contents).` +
+		`Do not stop to await my confirmation before the condition is satisfied.`
 	);
 }

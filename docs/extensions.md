@@ -1,5 +1,10 @@
 # Extensions reference
 
+**Fork note:** For pi-coder-tuned, the [README](../README.md) takes precedence:
+production UI is English, local recaps use request-free excerpts, and the footer
+shows exact used/total tokens with Git placeholders hidden outside repositories.
+The detailed descriptions below were inherited from upstream.
+
 29 extensions load from this package. Twelve are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.

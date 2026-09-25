@@ -164,9 +164,11 @@ export default function (pi: ExtensionAPI) {
 			return {
 				block: true,
 				reason:
-					`以下路径是永不删除的身份/凭据/手写配置，任何授权方式都不放行：\n` +
+					`These identity, credential, or manually maintained configuration paths cannot be deleted regardless of authorization:
+` +
 					classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
-					`\n如确需删除，请自己在终端执行（或 PI_SANDBOX=off 整体关掉这一层）。`,
+					`
+If deletion is necessary, perform it yourself in a terminal (or disable this layer with PI_SANDBOX=off).`,
 			};
 		}
 
@@ -174,7 +176,7 @@ export default function (pi: ExtensionAPI) {
 			// 全部命中边界内 / 持久白名单 / 会话豁免。命中白名单时补一行 notify，
 			// 否则用户会疑惑「怎么不问了」。（边界内的删除不 notify —— 那是绝大多数操作。）
 			if (classification.covered.length > 0 && ctx.hasUI) {
-				ctx.ui.notify(`删除目标已在白名单内，放行：${classification.covered.join("、")}`, "info");
+				ctx.ui.notify(`Deletion targets already allowlisted; allowed: ${classification.covered.join("、")}`, "info");
 			}
 			return undefined;
 		}
@@ -188,15 +190,17 @@ export default function (pi: ExtensionAPI) {
 			return {
 				block: true,
 				reason:
-					`删除目标在可删边界之外且未授权，非交互环境不予放行。\n` +
-					`目标：${pending.join("、")}\n可删边界：${roots}\n` +
-					`持久白名单：${allowlist().roots().length} 条（交互会话里 /sandbox-boundary allow <目录> 可预授权）`,
+					`Deletion targets are outside the boundary and unauthorized; denied in non-interactive mode.
+` +
+					`Target: ${pending.join("、")}
+Deletion boundary: ${roots}\n` +
+					`Persistent allowlist: ${allowlist().roots().length} entries (pre-authorize with /sandbox-boundary allow <directory> in an interactive session)`,
 			};
 		}
 
 		const foldPaths = (list: readonly string[], limit = 3): string => {
 			const shown = list.slice(0, limit).map((p) => `  ${p}`);
-			if (list.length > limit) shown.push(`  …还有 ${list.length - limit} 处`);
+			if (list.length > limit) shown.push(`  … plus ${list.length - limit} matches`);
 			return shown.join("\n");
 		};
 		const hasDangerous = classification.dangerous.length > 0;
@@ -206,35 +210,35 @@ export default function (pi: ExtensionAPI) {
 		let choice: string | undefined;
 		if (hasDangerous) {
 			const lines = [
-				"⚠️ 删除目标在可删边界之外（危险目录）",
+				"⚠️ Deletion targets outside the boundary (high-risk directories)",
 				"",
-				"危险路径（每次删除都会问，只能会话级豁免）：",
+				"High-risk paths (confirmation on each deletion; session-only exemptions):",
 				foldPaths(classification.dangerous.map((d) => `${d.path}（${d.reason}）`)),
 			];
 			if (classification.ordinary.length > 0) {
-				lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
+				lines.push("", "Also includes ordinary out-of-boundary paths (approve this time only; not remembered):", foldPaths(classification.ordinary));
 			}
-			lines.push("", `可删边界：${roots}`, "", "选 Deny 不会删任何东西。");
+			lines.push("", `Deletion boundary: ${roots}`, "", "Choose Deny to leave everything untouched.");
 			// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
 			choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 		} else {
 			const lines = [
-				"⚠️ 删除目标在可删边界之外",
+				"⚠️ Deletion targets outside the boundary",
 				"",
-				"要删：",
+				"Delete targets: ",
 				foldPaths(classification.ordinary),
 				"",
 				ordinaryScopes.length > 0
-					? `将记住：${ordinaryScopes.join("、")}（以后这些目录下的删除不再询问）`
-					: "这些路径算不出可安全记住的范围，只能逐次批准。",
+					? `Remember these paths: ${ordinaryScopes.join("、")} (future deletions within these directories will not prompt)`
+					: "No safe persistent scope can be determined for these paths; approve each request individually.",
 				"",
-				`可删边界：${roots}`,
+				`Deletion boundary: ${roots}`,
 				"",
-				"选 Deny 不会删任何东西。",
+				"Choose Deny to leave everything untouched.",
 			];
 			choice = await ctx.ui.select(lines.join("\n"), [
 				"Deny",
-				"Allow for this session（并记住该目录）",
+				"Allow for this session (and remember the directory)",
 				"Allow once",
 			]);
 		}
@@ -243,16 +247,16 @@ export default function (pi: ExtensionAPI) {
 			stats.blocked += pending.length;
 			return {
 				block: true,
-				reason: `用户拒绝删除可删边界之外的路径：${pending.join("、")}（可删边界：${roots}）`,
+				reason: `The user denied deletion outside the boundary: ${pending.join("、")} (deletion boundary: ${roots}）`,
 			};
 		}
 
-		if (choice === "Allow for this session（并记住该目录）") {
+		if (choice === "Allow for this session (and remember the directory)") {
 			const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
 			stats.remembered += remembered.length;
 			if (remembered.length > 0)
 				ctx.ui.notify(
-					`已永久记住 ${remembered.length} 个目录（重启后仍生效），以后其下的删除不再询问`,
+					`Permanently remembered ${remembered.length} directories (persists across restarts); future deletions within them will not prompt`,
 					"info",
 				);
 		} else if (choice === "Allow for this session") {
@@ -266,10 +270,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("sandbox-boundary", {
-		description: "显示可删边界与白名单；forget <path> 移除一条，clear 清空，allow <path> 预授权",
+		description: "Show deletion boundary and allowlist; forget <path> removes an entry, clear empties it, allow <path> pre-authorizes",
 		handler: (args, ctx) => {
 			if (!enabled) {
-				ctx.ui.notify("边界检查已关闭（PI_SANDBOX=off 或非 macOS 平台）。", "info");
+				ctx.ui.notify("Boundary checks are disabled (PI_SANDBOX=off or non-macOS platform).", "info");
 				return;
 			}
 			const boundary = boundaryFromEnv(ctx.cwd ?? process.cwd());
@@ -279,22 +283,22 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "forget") {
 				const target = rest.join(" ");
 				if (!target) {
-					ctx.ui.notify("用法：/sandbox-boundary forget <path>", "warning");
+					ctx.ui.notify("Usage: /sandbox-boundary forget <path>", "warning");
 					return;
 				}
 				const removed = store.forget(target);
-				ctx.ui.notify(removed ? `已移除白名单条目：${target}` : `白名单里没有这个条目：${target}`, removed ? "info" : "warning");
+				ctx.ui.notify(removed ? `Removed allowlist entry: ${target}` : `No such allowlist entry: ${target}`, removed ? "info" : "warning");
 				return;
 			}
 			if (sub === "clear") {
 				const n = store.clear();
-				ctx.ui.notify(n > 0 ? `已清空白名单（${n} 条）` : "白名单本来就是空的", "info");
+				ctx.ui.notify(n > 0 ? `Cleared allowlist (${n} entries)` : "The allowlist was already empty", "info");
 				return;
 			}
 			if (sub === "allow") {
 				const target = rest.join(" ");
 				if (!target) {
-					ctx.ui.notify("用法：/sandbox-boundary allow <path>", "warning");
+					ctx.ui.notify("Usage: /sandbox-boundary allow <path>", "warning");
 					return;
 				}
 				const scope = memoryScopeFor(target, pathEnv, boundary.cwd);
@@ -302,15 +306,15 @@ export default function (pi: ExtensionAPI) {
 					const never = neverDeleteReasonFor(target, pathEnv);
 					ctx.ui.notify(
 						never
-							? `这是永不删除的身份/凭据/手写配置，不能预授权：${target}`
-							: `这个路径算不出可安全记住的范围（太浅或本身危险）：${target}`,
+							? `Protected identity, credential, or manually maintained configuration data cannot be pre-authorized: ${target}`
+							: `Cannot determine a safe persistent scope (path is too shallow or high-risk): ${target}`,
 						"warning",
 					);
 					return;
 				}
 				const remembered = store.remember([scope], "command", pathEnv);
 				ctx.ui.notify(
-					remembered.length > 0 ? `已预授权：${scope}` : `${scope} 已在白名单里，或被安全闸挡下`,
+					remembered.length > 0 ? `Pre-authorized: ${scope}` : `${scope} is already allowlisted or was blocked by a safety check`,
 					"info",
 				);
 				return;
@@ -318,18 +322,18 @@ export default function (pi: ExtensionAPI) {
 
 			const entries = store.entries();
 			const lines = [
-				`可删边界：${writableRoots(boundary).join("、")}`,
-				`本会话计数：检查 ${stats.checked}，记住 ${stats.remembered}，确认 ${stats.confirmed}，拒绝 ${stats.blocked}`,
+				`Deletion boundary: ${writableRoots(boundary).join("、")}`,
+				`Session counts: checked ${stats.checked}, remembered ${stats.remembered}, confirmed ${stats.confirmed}, denied ${stats.blocked}`,
 				"",
-				`持久白名单（${store.filePath}）：${entries.length} 条`,
-				...(entries.length > 0 ? entries.map((e) => `  ${e.path}（${e.source}，${e.addedAt.slice(0, 10)}）`) : ["  （无）"]),
+				`Persistent allowlist (${store.filePath}）：${entries.length} entries`,
+				...(entries.length > 0 ? entries.map((e) => `  ${e.path}（${e.source}，${e.addedAt.slice(0, 10)}）`) : ["  (none)"]),
 				"",
-				`会话级豁免（重启失效）：${sessionScopes.roots().length ? sessionScopes.roots().join("、") : "（无）"}`,
+				`Session exemptions (expire on restart): ${sessionScopes.roots().length ? sessionScopes.roots().join("、") : "(none)"}`,
 				"",
-				"危险目录（系统根 / bin / 应用安装目录 / ~/Library / 含 .git）每次删除都问，只能会话级豁免。",
-				"永不删除（~/.zshrc、~/.ssh、~/.gnupg 等身份/凭据/手写配置）不弹框、无任何放行选项。",
-				"写入不拦（write / edit 边界外也放行）；bash 命令由 seatbelt 沙箱强制同一道删除边界。",
-				"子命令：forget <path> 移除一条 · clear 清空 · allow <path> 预授权。PI_SANDBOX=off 整体关闭。",
+				"High-risk directories (system roots / bin / application directories / ~/Library / paths containing .git) prompt on every deletion and only allow session exemptions.",
+				"Protected identity, credential, or manually maintained configurations (~/.zshrc, ~/.ssh, ~/.gnupg, etc.) are denied without approval options.",
+				"Writes are not blocked (write / edit also work outside the boundary); Bash commands have the same deletion boundary enforced by the seatbelt sandbox.",
+				"Subcommands: forget <path> removes an entry · clear empties the list · allow <path> pre-authorizes. PI_SANDBOX=off disables this layer.",
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},

@@ -110,7 +110,7 @@ export function toolDescription(serverName: string, tool: McpToolDescriptor): st
 	const parts: string[] = [];
 	if (tool.description?.trim()) parts.push(tool.description.trim());
 	const hints = annotationHints(tool.annotations);
-	const header = `MCP 工具（server: ${serverName}）${hints ? ` ${hints}` : ""}`;
+	const header = `MCP tool (server: ${serverName}）${hints ? ` ${hints}` : ""}`;
 	parts.push(header);
 	return parts.join("\n\n");
 }
@@ -118,10 +118,10 @@ export function toolDescription(serverName: string, tool: McpToolDescriptor): st
 function annotationHints(annotations: Record<string, unknown> | undefined): string {
 	if (!annotations) return "";
 	const hints: string[] = [];
-	if (annotations.readOnlyHint === true) hints.push("只读");
-	if (annotations.destructiveHint === true) hints.push("可能破坏数据");
-	if (annotations.idempotentHint === true) hints.push("幂等");
-	if (annotations.openWorldHint === true) hints.push("访问外部世界");
+	if (annotations.readOnlyHint === true) hints.push("read-only");
+	if (annotations.destructiveHint === true) hints.push("potentially destructive");
+	if (annotations.idempotentHint === true) hints.push("idempotent");
+	if (annotations.openWorldHint === true) hints.push("accesses external resources");
 	return hints.length > 0 ? `[${hints.join(" / ")}]` : "";
 }
 
@@ -181,9 +181,9 @@ export function mcpContentToPiContent(content: unknown[]): ContentMappingResult 
 				const image = toImageBlock(block);
 				if (image) {
 					blocks.push(image);
-					texts.push(`[图片 ${image.mimeType}]`);
+					texts.push(`[Image ${image.mimeType}]`);
 				} else {
-					const note = "[图片缺少 data/mimeType，无法传给模型]";
+					const note = "[Image lacks data/mimeType and cannot be passed to the model]";
 					notes.push(note);
 					texts.push(note);
 					blocks.push({ type: "text", text: note });
@@ -191,7 +191,7 @@ export function mcpContentToPiContent(content: unknown[]): ContentMappingResult 
 				break;
 			}
 			case "audio": {
-				const note = `[音频内容（${typeof block.mimeType === "string" ? block.mimeType : "未知类型"}）无法直接传给模型]`;
+				const note = `[Audio content (${typeof block.mimeType === "string" ? block.mimeType : "unknown type"}) cannot be passed directly to the model]`;
 				notes.push(note);
 				texts.push(note);
 				blocks.push({ type: "text", text: note });
@@ -205,16 +205,16 @@ export function mcpContentToPiContent(content: unknown[]): ContentMappingResult 
 				break;
 			}
 			case "resource_link": {
-				const uri = typeof block.uri === "string" ? block.uri : "(无 uri)";
+				const uri = typeof block.uri === "string" ? block.uri : "(no URI)";
 				const name = typeof block.name === "string" ? block.name : undefined;
-				const note = `[资源链接${name ? ` ${name}` : ""}: ${uri}]`;
+				const note = `[Resource link${name ? ` ${name}` : ""}: ${uri}]`;
 				notes.push(note);
 				texts.push(note);
 				blocks.push({ type: "text", text: note });
 				break;
 			}
 			default: {
-				const note = `[不支持的 MCP 内容块 ${String(block.type)}: ${stringifyUnknown(block).slice(0, 200)}]`;
+				const note = `[Unsupported MCP content block ${String(block.type)}: ${stringifyUnknown(block).slice(0, 200)}]`;
 				notes.push(note);
 				texts.push(note);
 				blocks.push({ type: "text", text: note });
@@ -228,11 +228,11 @@ export function mcpContentToPiContent(content: unknown[]): ContentMappingResult 
 
 function resourceToContent(rawResource: unknown): { content: PiToolContent[]; text: string; notes: string[] } {
 	if (typeof rawResource !== "object" || rawResource === null) {
-		const note = "[无效的 MCP resource 内容块]";
+		const note = "[Invalid MCP resource content block]";
 		return { content: [{ type: "text", text: note }], text: note, notes: [note] };
 	}
 	const resource = rawResource as Record<string, unknown>;
-	const uri = typeof resource.uri === "string" ? resource.uri : "(无 uri)";
+	const uri = typeof resource.uri === "string" ? resource.uri : "(no URI)";
 	const mimeType = typeof resource.mimeType === "string" ? resource.mimeType : undefined;
 
 	if (typeof resource.text === "string") {
@@ -247,12 +247,12 @@ function resourceToContent(rawResource: unknown): { content: PiToolContent[]; te
 			? toImageBlock({ data: resource.blob, mimeType })
 			: undefined;
 		if (image) {
-			return { content: [image], text: `[图片 ${mimeType}]`, notes: [] };
+			return { content: [image], text: `[Image ${mimeType}]`, notes: [] };
 		}
-		const note = `[二进制资源 ${uri}（${mimeType ?? "未知类型"}，${formatBytes(Math.floor((resource.blob.length * 3) / 4))}）未传给模型]`;
+		const note = `[Binary resource ${uri}（${mimeType ?? "unknown type"}，${formatBytes(Math.floor((resource.blob.length * 3) / 4))}) not passed to the model]`;
 		return { content: [{ type: "text", text: note }], text: note, notes: [note] };
 	}
-	const note = `[资源 ${uri} 没有 text/blob 内容]`;
+	const note = `[Resource ${uri} has no text/blob content]`;
 	return { content: [{ type: "text", text: note }], text: note, notes: [note] };
 }
 
@@ -315,8 +315,10 @@ export function truncateText(text: string, options: TruncateOptions = {}): Trunc
 	const keptBytes = Buffer.byteLength(head, "utf8");
 	return {
 		text:
-			`${head}\n\n[输出已截断：保留 ${formatBytes(keptBytes)} / ${totalBytes} 字节，` +
-			`${countLines(head)} / ${totalLines} 行。需要完整内容请缩小查询范围（时间区间 / limit / 关键词）后重试。]`,
+			`${head}
+
+[Output truncated: retained ${formatBytes(keptBytes)} / ${totalBytes} bytes, ` +
+			`${countLines(head)} / ${totalLines} lines. For complete results, narrow the query (time range / limit / keywords) and retry.]`,
 		truncated: true,
 		totalBytes,
 		totalLines,

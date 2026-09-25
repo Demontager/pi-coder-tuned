@@ -176,36 +176,44 @@ export function decideGoalGate(state: GoalState, messages: readonly GateMessage[
 /** 未达成时注入的续跑指令（CC：reason 作为下一轮的 guidance）。 */
 export function renderNotMetMessage(state: GoalState, reason: string, config: GoalConfig, continuations: number): string {
 	return (
-		`/goal 评估：条件尚未达成（已续跑 ${continuations + 1}/${config.cap} 次，累计评估 ${state.evaluatedTurns + 1} 轮）。\n` +
-		`条件：${state.condition}\n` +
-		`评估器给出的理由：${reason}\n` +
-		`请据此继续工作。注意：评估器只读对话内容、自己不能跑命令，所以**证据必须出现在你的输出里**` +
-		`（跑命令并贴出输出），否则下一轮仍会判未达成。`
+		`/goal evaluation: condition not yet met (continuations: ${continuations + 1}/${config.cap}, evaluated turns: ${state.evaluatedTurns + 1}).
+` +
+		`Condition: ${state.condition}\n` +
+		`Evaluator reason: ${reason}\n` +
+		`Continue working based on this feedback. The evaluator only reads the conversation and cannot run commands, so **evidence must appear in your output** ` +
+		`(run commands and show their output), otherwise the next evaluation will still fail.`
 	);
 }
 
 /** 达成 / 不可能时记录到 transcript 的条目（CC：records an achieved / failed entry）。 */
 export function renderTerminalMessage(state: GoalState, verdict: Verdict, reason: string): string {
 	if (verdict === "met") {
-		return `/goal 达成 ✔（累计评估 ${state.evaluatedTurns} 轮）\n条件：${state.condition}\n理由：${reason}`;
+		return `/goal achieved ✔ (evaluated turns: ${state.evaluatedTurns})
+Condition: ${state.condition}
+Reason: ${reason}`;
 	}
-	return `/goal 判定为不可能达成，已清除 ✘\n条件：${state.condition}\n理由：${reason}`;
+	return `/goal deemed impossible; cleared ✘
+Condition: ${state.condition}
+Reason: ${reason}`;
 }
 
 /** 无进展停循环（CC：stops the loop, prints a warning, goal still set）。 */
 export function renderHaltMessage(state: GoalState, streak: number): string {
 	return (
-		`/goal 已暂停：连续 ${streak} 轮没有任何工具调用，判定为无进展，把控制权交还给你。条件仍保留。\n` +
-		`条件：${state.condition}\n` +
-		`再发一条消息即恢复评估；或用 /goal clear 清除。`
+		`/goal paused: ${streak} consecutive turns without tool calls; no progress detected. Control returned to you; the condition is retained.
+` +
+		`Condition: ${state.condition}\n` +
+		`Send another message to resume evaluation, or use /goal clear to remove it.`
 	);
 }
 
 /** 到上限（CC：force-ends the turn after N consecutive blocks）。 */
 export function renderCapMessage(state: GoalState, config: GoalConfig): string {
 	return (
-		`/goal 已连续续跑 ${config.cap} 次仍未达成，停止自动循环、把控制权交还给你。条件仍保留。\n` +
-		`条件：${state.condition}\n用 /goal 查看状态，或 /goal clear 清除。`
+		`/goal continued ${config.cap} times without success; automatic looping stopped and control returned to you. The condition is retained.
+` +
+		`Condition: ${state.condition}
+Use /goal for status, or /goal clear to remove it.`
 	);
 }
 
@@ -268,15 +276,15 @@ export function reconstructGoal(entries: readonly unknown[]): GoalState {
 
 /** /goal 无参时的状态文本（CC status：条件、时长、轮数、最近理由）。 */
 export function renderStatus(state: GoalState, now: number, config: GoalConfig, continuations: number): string {
-	if (state.condition === "") return "没有设定 /goal。用法：/goal <完成条件>；/goal clear 清除。";
+	if (state.condition === "") return "No /goal set. Usage: /goal <completion condition>; /goal clear removes it.";
 	const minutes = state.setAt > 0 ? Math.max(0, Math.round((now - state.setAt) / 60_000)) : 0;
 	const lines = [
 		`◎ /goal ${state.status === "active" ? "active" : state.status}`,
-		`条件：${state.condition}`,
-		`已运行 ${minutes} 分钟，评估 ${state.evaluatedTurns} 轮，续跑 ${continuations}/${config.cap} 次`,
+		`Condition: ${state.condition}`,
+		`Running for ${minutes} minutes, evaluated ${state.evaluatedTurns} turns, continuations ${continuations}/${config.cap} times`,
 	];
 	if (state.lastVerdict !== undefined) {
-		lines.push(`最近裁决：${state.lastVerdict}${state.lastReason ? ` —— ${state.lastReason}` : ""}`);
+		lines.push(`Latest verdict: ${state.lastVerdict}${state.lastReason ? ` —— ${state.lastReason}` : ""}`);
 	}
 	return lines.join("\n");
 }

@@ -275,7 +275,7 @@ describe("bash 判定：写操作拦住", () => {
 	it("拒绝原因带 plan 阶段说明与具体命令（模型据此改道）", () => {
 		const verdict = inspectBashCommand("rm -rf dist");
 		assert.equal(verdict.ok, false);
-		assert.match(verdict.reason ?? "", /^plan 阶段不执行写操作/);
+		assert.match(verdict.reason ?? "", /^Writes are not permitted during planning/);
 		assert.match(verdict.reason ?? "", /rm/);
 	});
 

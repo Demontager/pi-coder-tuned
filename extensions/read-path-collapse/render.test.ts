@@ -26,6 +26,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path, { join } from "node:path";
 import test from "node:test";
+// These snapshots explicitly assert 24-bit ANSI colors, independent of the test terminal.
+process.env.COLORTERM = "truecolor";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "read-path-collapse.ts");

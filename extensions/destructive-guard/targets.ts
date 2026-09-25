@@ -370,14 +370,14 @@ export function evaluateTarget(raw: string, cwd: string, home: string): Finding 
 	});
 
 	// 显式的主目录 / 根的同义词：不等解析就能判死。
-	if (text === "/" ) return finding("block", "filesystem-root", "目标是文件系统根");
+	if (text === "/" ) return finding("block", "filesystem-root", "The target is the filesystem root");
 	if (text === "~" || text === "$HOME" || text === "${HOME}") {
-		return finding("block", "home-root", "目标是主目录本身");
+		return finding("block", "home-root", "The target is the home directory itself");
 	}
 
 	// 落点在删除目标上的兜底值：事故的直接成因。
 	if (/\?\?|\|\||\$\{[A-Za-z_][A-Za-z0-9_]*:-/.test(text)) {
-		return finding("confirm", "fallback-in-target", "删除目标里带了默认值兜底（取不到值时会落到默认路径）");
+		return finding("confirm", "fallback-in-target", "The deletion target has a fallback value (a missing value falls back to a default path)");
 	}
 
 	// 算出来的目标：dirname / basename / 变量 / 命令替换。
@@ -385,43 +385,43 @@ export function evaluateTarget(raw: string, cwd: string, home: string): Finding 
 		return finding(
 			"confirm",
 			"derived-target",
-			"删除目标是算出来的（变量 / $(…) / dirname 之类），执行前无法静态知道具体路径——请先把目标解析出来核对再删",
+			"The deletion target is computed (variable / $(…) / dirname, etc.) and cannot be determined statically. Resolve and verify the exact path before deleting",
 		);
 	}
 
 	const resolved = resolveLexical(text, cwd, home);
 	if (resolved === "") {
-		return finding("confirm", "derived-target", "删除目标无法静态解析（含变量或命令替换），执行前不知道具体路径");
+		return finding("confirm", "derived-target", "The deletion target cannot be resolved statically (variable or command substitution); the exact path is unknown before execution");
 	}
 
 	const depth = componentCount(resolved);
 	if (depth < 2) {
-		return finding("block", "top-level", `解析到 ${resolved}，只有 ${depth} 段路径（顶层目录不能作为删除目标）`, resolved);
+		return finding("block", "top-level", `Resolves to ${resolved}, with only ${depth} path components (top-level directories cannot be deletion targets)`, resolved);
 	}
 
 	if (resolved === home) {
-		return finding("block", "home-root", "目标是主目录本身", resolved);
+		return finding("block", "home-root", "The target is the home directory itself", resolved);
 	}
 
 	for (const root of HARD_ROOTS) {
 		if (root === "/") continue;
 		if (resolved === root) {
-			return finding("block", "protected-root", `目标是受保护的根目录 ${root}`, resolved);
+			return finding("block", "protected-root", `The target is the protected root ${root}`, resolved);
 		}
 		if (root.startsWith(resolved + "/")) {
-			return finding("block", "ancestor-of-protected", `${resolved} 是受保护目录 ${root} 的上级`, resolved);
+			return finding("block", "ancestor-of-protected", `${resolved} is an ancestor of the protected directory ${root}`, resolved);
 		}
 	}
 
 	for (const tree of SYSTEM_TREES) {
 		if (resolved === tree || resolved.startsWith(tree + "/")) {
-			return finding("confirm", "system-tree", `${resolved} 在系统目录 ${tree} 下`, resolved);
+			return finding("confirm", "system-tree", `${resolved} is inside the system directory ${tree}`, resolved);
 		}
 	}
 
 	for (const dir of VCS_DIRS) {
 		if (resolved === dir || resolved.endsWith("/" + dir)) {
-			return finding("confirm", "vcs-store", `${resolved} 是版本控制存储，删掉会丢掉只此一份的历史`, resolved);
+			return finding("confirm", "vcs-store", `${resolved} is version-control storage; deleting it loses the only copy of history`, resolved);
 		}
 	}
 
@@ -445,7 +445,7 @@ function evaluateSelfProtection(resolved: string, home: string): { rule: string;
 		if (resolved.endsWith(suffix.replace(/\/$/, ""))) {
 			return {
 				rule: "self-protection",
-				reason: `${resolved} 是 destructive-guard 自己的目录：删掉它等于当场解除这道门禁`,
+				reason: `${resolved} is destructive-guard's own directory; deleting it disables this guard`,
 			};
 		}
 	}
@@ -457,14 +457,14 @@ function evaluateSelfProtection(resolved: string, home: string): { rule: string;
 		if (SELF_PROTECTED_BASENAMES.includes(basename) && rest.split("/").filter(Boolean).length === 1) {
 			return {
 				rule: "self-protection",
-				reason: `${resolved} 是全局规则文件：destructive-guard 的判定口径就出自它，删掉等于抹掉依据`,
+				reason: `${resolved} is a global rules file used by destructive-guard; deleting it removes the policy source`,
 			};
 		}
 		for (const subtree of SELF_PROTECTED_AGENT_SUBTREES) {
 			if (rest === subtree || rest.startsWith(`${subtree}/`)) {
 				return {
 					rule: "self-protection",
-					reason: `${resolved} 在 pi 的 agent 目录${subtree} 下：那里是扩展、会话记录与 rewind 快照，删掉会同时毁掉门禁和它的恢复手段`,
+					reason: `${resolved} is in Pi's agent directory${subtree}: it contains extensions, session records, and rewind snapshots; deletion destroys both safeguards and recovery data`,
 				};
 			}
 		}
@@ -485,8 +485,8 @@ function evaluateOutsideWorkdir(
 	return {
 		rule: "outside-workdir",
 		reason:
-			`${resolved} 在工作目录（${cwd}）之外：从那里看不见爆炸半径，` +
-			`执行前请先确认这个具体路径（AGENTS.md ## Destructive actions 第三条断言）`,
+			`${resolved} is outside the working directory (${cwd}); the full impact is not visible from here. ` +
+			`Confirm the exact path before execution (AGENTS.md, Destructive actions, assertion 3)`,
 	};
 }
 
@@ -628,7 +628,7 @@ export function extractGitHistoryLoss(command: string): Finding[] {
 		if (sub === "reset" && args.some((arg) => arg === "--hard")) {
 			push(
 				"vcs-history-loss",
-				"git reset --hard 会丢掉工作区与暂存区里所有未提交的改动，而这些内容只此一份（stash / 提交都没有）",
+				"git reset --hard discards all uncommitted working-tree and staged changes, which have no saved stash or commit",
 			);
 			continue;
 		}
@@ -637,22 +637,22 @@ export function extractGitHistoryLoss(command: string): Finding[] {
 		// 只认带 `--` 分隔符的形态 —— `git checkout <branch>` / `git checkout -b <branch>` 是
 		// 切分支，不丢东西；`--` 是“后面是路径不是分支”的可靠信号。
 		if (sub === "checkout" && args.includes("--")) {
-			push("vcs-history-loss", "git checkout -- 会丢弃工作区里未提交的改动，而这些内容只此一份");
+			push("vcs-history-loss", "git checkout -- discards uncommitted working-tree changes that may have no other copy");
 			continue;
 		}
 
 		if (sub === "restore") {
-			push("vcs-history-loss", "git restore 会丢弃工作区/暂存区里未提交的改动，而这些内容只此一份");
+			push("vcs-history-loss", "git restore discards uncommitted working-tree/staged changes that may have no other copy");
 			continue;
 		}
 
 		if (sub === "stash" && (positional[1] === "drop" || positional[1] === "clear")) {
-			push("vcs-history-loss", `git stash ${positional[1]} 会丢掉 stash 里存着的工作，而 stash 往往就是唯一的副本`);
+			push("vcs-history-loss", `git stash ${positional[1]} discards stashed work; the stash may be its only copy`);
 			continue;
 		}
 
 		if (sub === "branch" && args.some((arg) => /^-[a-zA-Z]*D/.test(arg) || arg === "--delete" || arg === "--force")) {
-			push("vcs-history-loss", "git branch -D 会丢掉分支上未合入的提交，而这些提交可能只此一份");
+			push("vcs-history-loss", "git branch -D removes a branch with unmerged commits that may have no other reference");
 			continue;
 		}
 	}

@@ -155,7 +155,7 @@ function readConfigFile(path: string, issues: McpConfigIssue[]): Array<[string, 
 	try {
 		text = readFileSync(path, "utf8");
 	} catch (error) {
-		issues.push({ source: path, message: `无法读取：${error instanceof Error ? error.message : String(error)}` });
+		issues.push({ source: path, message: `Could not read: ${error instanceof Error ? error.message : String(error)}` });
 		return undefined;
 	}
 
@@ -163,22 +163,22 @@ function readConfigFile(path: string, issues: McpConfigIssue[]): Array<[string, 
 	try {
 		parsed = JSON.parse(text);
 	} catch (error) {
-		issues.push({ source: path, message: `不是合法 JSON：${error instanceof Error ? error.message : String(error)}` });
+		issues.push({ source: path, message: `Invalid JSON: ${error instanceof Error ? error.message : String(error)}` });
 		return undefined;
 	}
 
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-		issues.push({ source: path, message: "顶层必须是对象" });
+		issues.push({ source: path, message: "Top-level value must be an object" });
 		return undefined;
 	}
 
 	const servers = (parsed as { mcpServers?: unknown }).mcpServers;
 	if (servers === undefined) {
-		issues.push({ source: path, message: '缺少 "mcpServers" 字段' });
+		issues.push({ source: path, message: "Missing \"mcpServers\" field" });
 		return undefined;
 	}
 	if (typeof servers !== "object" || servers === null || Array.isArray(servers)) {
-		issues.push({ source: path, message: '"mcpServers" 必须是对象' });
+		issues.push({ source: path, message: "\"mcpServers\" must be an object" });
 		return undefined;
 	}
 
@@ -205,7 +205,7 @@ export function normalizeServerEntry(
 	};
 
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		return fail("server 条目必须是对象");
+		return fail("Server entry must be an object");
 	}
 	const entry = raw as Record<string, unknown>;
 
@@ -216,7 +216,7 @@ export function normalizeServerEntry(
 	const hasCommand = typeof entry.command === "string" && entry.command.trim() !== "";
 
 	if (rawType === "sse") {
-		if (!hasUrl) return fail('type: "sse" 需要 "url"');
+		if (!hasUrl) return fail("type: \"sse\" requires \"url\"");
 		return {
 			name,
 			transport: "sse",
@@ -247,13 +247,13 @@ export function normalizeServerEntry(
 			issues.push({
 				source,
 				server: name,
-				message: "headersCommand/headersHelper 只对 http/sse 服务器有效，stdio 已忽略",
+				message: "headersCommand/headersHelper only applies to http/sse servers; ignored for stdio",
 			});
 		}
 		const args = Array.isArray(entry.args)
 			? entry.args.map((value, index) => {
 					if (typeof value !== "string") {
-						issues.push({ source, server: name, message: `args[${index}] 必须是字符串，已跳过` });
+						issues.push({ source, server: name, message: `args[${index}] must be a string; skipped` });
 						return undefined;
 					}
 					return expandString(value, env, { source, server: name }, issues);
@@ -273,8 +273,8 @@ export function normalizeServerEntry(
 		};
 	}
 
-	if (rawType === "stdio" || rawType === "local") return fail('需要 "command"');
-	return fail('需要 "command"（stdio）或 "url"（http/sse）');
+	if (rawType === "stdio" || rawType === "local") return fail("Requires \"command\"");
+	return fail("Requires \"command\" (stdio) or \"url\" (http/sse)");
 }
 
 function normalizeTimeout(raw: unknown, fallback: number): number {
@@ -324,13 +324,13 @@ function normalizeStringRecord(
 ): Record<string, string> {
 	if (raw === undefined || raw === null) return {};
 	if (typeof raw !== "object" || Array.isArray(raw)) {
-		issues.push({ ...context, message: "env/headers 必须是字符串到字符串的对象" });
+		issues.push({ ...context, message: "env/headers must be an object mapping strings to strings" });
 		return {};
 	}
 	const result: Record<string, string> = {};
 	for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
 		if (typeof value !== "string") {
-			issues.push({ ...context, message: `${key} 的值必须是字符串，已跳过` });
+			issues.push({ ...context, message: `${key} must have a string value; skipped` });
 			continue;
 		}
 		result[key] = expandString(value, env, context, issues);
@@ -354,7 +354,7 @@ export function expandString(
 		const resolved = env[name];
 		if (resolved !== undefined && resolved !== "") return resolved;
 		if (fallback !== undefined) return fallback;
-		issues.push({ ...context, message: `环境变量 ${name} 未定义（保留 ${match} 原文）` });
+		issues.push({ ...context, message: `Environment variable ${name} is undefined (preserving ${match} literally)` });
 		return match;
 	});
 }

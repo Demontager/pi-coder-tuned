@@ -194,19 +194,19 @@ export function renderFindingsForHuman(findings: readonly Finding[], command = "
 	const shown = unique.slice(0, limit);
 	const blocks = shown.map((finding) => {
 		const lines: string[] = [];
-		lines.push(`  要删：${truncateMiddle(finding.target, 100)}`);
+		lines.push(`  Delete target: ${truncateMiddle(finding.target, 100)}`);
 		if (finding.resolved && finding.resolved !== finding.target) {
-			lines.push(`  实际路径：${finding.resolved}`);
+			lines.push(`  Resolved path: ${finding.resolved}`);
 		}
 		if (showSegment && finding.segment && finding.segment.trim() !== finding.target.trim()) {
-			lines.push(`  所在命令：${truncateMiddle(finding.segment.trim(), 100)}`);
+			lines.push(`  Command: ${truncateMiddle(finding.segment.trim(), 100)}`);
 		}
-		lines.push(`  为什么拦：${finding.reason}`);
+		lines.push(`  Why blocked: ${finding.reason}`);
 		return lines.join("\n");
 	});
 
 	const rest = unique.length - shown.length;
-	if (rest > 0) blocks.push(`  … 还有 ${rest} 处同类命中（选“取消”后让模型逐条列给你看）`);
+	if (rest > 0) blocks.push(`  … plus ${rest} similar matches (choose Cancel, then ask the model to list them)`);
 	return blocks.join("\n\n");
 }
 
@@ -220,7 +220,7 @@ export function truncateMiddle(text: string, max: number): string {
 /** 把写入侧的命中渲染成理由。 */
 export function renderWriteFindings(findings: readonly WriteFinding[]): string {
 	return findings
-		.map((finding) => `  第 ${finding.line} 行 [${finding.rule}] ${finding.reason}\n    ${finding.text}`)
+		.map((finding) => `  Line ${finding.line} [${finding.rule}] ${finding.reason}\n    ${finding.text}`)
 		.join("\n");
 }
 
@@ -228,10 +228,11 @@ export function renderWriteFindings(findings: readonly WriteFinding[]): string {
 export function renderWriteFindingsForHuman(findings: readonly WriteFinding[], limit = 3): string {
 	const shown = findings.slice(0, limit);
 	const blocks = shown.map(
-		(finding) => `  第 ${finding.line} 行：${truncateMiddle(finding.text.trim(), 100)}\n  为什么拦：${finding.reason}`,
+		(finding) => `  Line ${finding.line}: ${truncateMiddle(finding.text.trim(), 100)}
+  Why blocked: ${finding.reason}`,
 	);
 	const rest = findings.length - shown.length;
-	if (rest > 0) blocks.push(`  … 还有 ${rest} 处同类命中`);
+	if (rest > 0) blocks.push(`  … plus ${rest} similar matches`);
 	return blocks.join("\n\n");
 }
 
@@ -329,7 +330,8 @@ async function checkBashCommand(
 
 	if (mode === "notify") {
 		stats.notified += 1;
-		if (ctx.hasUI) ctx.ui.notify(`destructive-guard 本会拦下：\n${body}`, "warning");
+		if (ctx.hasUI) ctx.ui.notify(`destructive-guard would block:
+${body}`, "warning");
 		return undefined;
 	}
 
@@ -338,8 +340,9 @@ async function checkBashCommand(
 		return {
 			block: true,
 			reason:
-				`destructive-guard 拦下了这条删除：\n${rawBody}\n\n` +
-				`如果确实要删，请说明目标与理由，并改用能逐级确认的形式（先列出内容再删，或用可恢复的移动/改名）。`,
+				`destructive-guard blocked this deletion:
+${rawBody}\n\n` +
+				`If deletion is intended, explain the target and reason, then use incremental confirmation (list contents first, or use a reversible move/rename).`,
 		};
 	}
 
@@ -348,32 +351,36 @@ async function checkBashCommand(
 		stats.blocked += 1;
 		return {
 			block: true,
-			reason: `destructive-guard 拦下了这条删除（当前环境无法向你确认，按 fail-closed 拒绝）：\n${rawBody}`,
+			reason: `destructive-guard blocked this deletion (confirmation is unavailable in this environment; denied fail-closed):
+${rawBody}`,
 		};
 	}
 
 	const choice = await ctx.ui.select(
-		`⚠️ destructive-guard：这条命令里有删除动作，执行前需要你确认\n\n` +
+		`⚠️ destructive-guard: This command deletes files and requires confirmation
+
+` +
 			`${body}\n\n` +
-			`选“取消”不会删任何东西；选“先预览”会让模型先把要删的内容列出来给你看。`,
-		["取消", "先预览要删什么", "确认删除"],
+			`Cancel deletes nothing. Preview asks the model to list the deletion targets first.`,
+		["Cancel", "Preview deletion targets", "Confirm deletion"],
 	);
-	if (choice === "确认删除") {
+	if (choice === "Confirm deletion") {
 		stats.confirmed += 1;
 		return undefined;
 	}
-	if (choice === "先预览要删什么") {
+	if (choice === "Preview deletion targets") {
 		stats.previewed += 1;
 		return {
 			block: true,
 			reason:
-				`destructive-guard：用户要求先预览。请不要直接执行这条删除，` +
-				`先用只读命令（ls / find 不带 -delete / du / git clean -n）把将要删除的具体路径列出来给用户看，` +
-				`得到确认后再改用字面路径执行。命中原因：\n${rawBody}`,
+				`destructive-guard: The user requested a preview. Do not execute this deletion yet. ` +
+				`Use read-only commands (ls / find without -delete / du / git clean -n) to show the exact deletion targets. ` +
+				`After confirmation, execute using literal paths. Reasons:
+${rawBody}`,
 		};
 	}
 	stats.blocked += 1;
-	return { block: true, reason: "destructive-guard：用户取消了这条删除。" };
+	return { block: true, reason: "destructive-guard: The user cancelled this deletion." };
 }
 
 /** shell 侧与文本侧合起来的最严一档。 */
@@ -427,7 +434,7 @@ async function checkScriptTargets(
 
 		if (mode === "notify") {
 			stats.notified += 1;
-			if (ctx.hasUI) ctx.ui.notify(`destructive-guard 本会拦下即将运行的脚本 ${script.path}：\n${body}`, "warning");
+			if (ctx.hasUI) ctx.ui.notify(`destructive-guard would block the script ${script.path}：\n${body}`, "warning");
 			continue;
 		}
 
@@ -436,20 +443,23 @@ async function checkScriptTargets(
 			return {
 				block: true,
 				reason:
-					`destructive-guard 拦下了即将运行的脚本 ${script.path}：它里面有危险的删除调用。\n${rawBody}\n\n` +
-					`请先把目标改成字面路径、核对解析后的绝对路径，再运行。`,
+					`destructive-guard blocked the script ${script.path}: it contains dangerous deletion calls.
+${rawBody}\n\n` +
+					`First use literal targets and verify the resolved absolute paths, then run the script.`,
 			};
 		}
 
 		const choice = await ctx.ui.select(
-			`⚠️ destructive-guard：即将运行的脚本里有危险的删除调用\n\n` +
-				`文件：${script.path}\n\n${body}\n\n` +
-				`这是 2026-09-23 事故的形态（危险代码早写进脚本，运行那一步看起来无害）。`,
-			["取消", "确认运行"],
+			`⚠️ destructive-guard: The script about to run contains dangerous deletion calls
+
+` +
+				`File: ${script.path}\n\n${body}\n\n` +
+				`This matches the 2026-09-23 incident: dangerous code was written into a script earlier, while the execution command looked harmless.`,
+			["Cancel", "Confirm run"],
 		);
-		if (choice !== "确认运行") {
+		if (choice !== "Confirm run") {
 			stats.blocked += 1;
-			return { block: true, reason: `destructive-guard：用户取消了运行 ${script.path}。` };
+			return { block: true, reason: `destructive-guard: The user cancelled running ${script.path}。` };
 		}
 		stats.confirmed += 1;
 	}
@@ -480,12 +490,12 @@ export default function (pi: ExtensionAPI) {
 		description: "Show destructive-guard status and what it has caught this session",
 		handler: async (_args, ctx) => {
 			const lines = [
-				`模式：${mode}${mode === "notify" ? "（只通知，不拦）" : ""}${mode === "block" ? "（confirm 也直接拒）" : ""}`,
-				`本会话检查过 ${stats.checked} 次删除动作`,
-				`拒绝 ${stats.blocked} · 要求先预览 ${stats.previewed} · 确认后放行 ${stats.confirmed} · 放行 ${stats.allowed} · 仅通知 ${stats.notified}`,
-				`运行前审过的脚本 ${stats.runtimeChecked} 个 · 读不到而跳过 ${stats.runtimeSkipped} 个 · 只记录未拦 ${stats.noted} 处`,
+				`Mode: ${mode}${mode === "notify" ? " (notify only; do not block)" : ""}${mode === "block" ? " (also deny actions that require confirmation)" : ""}`,
+				`Checked ${stats.checked} deletion actions this session`,
+				`Denied ${stats.blocked} · preview requested ${stats.previewed} · confirmed ${stats.confirmed} · allowed ${stats.allowed} · notified ${stats.notified}`,
+				`Scripts inspected before execution: ${stats.runtimeChecked} · unreadable/skipped: ${stats.runtimeSkipped} · logged without blocking: ${stats.noted} matches`,
 				"",
-				"环境变量：PI_DESTRUCTIVE_GUARD = off | on | block | notify",
+				"Environment variable: PI_DESTRUCTIVE_GUARD = off | on | block | notify",
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
@@ -551,33 +561,36 @@ export default function (pi: ExtensionAPI) {
 
 		if (mode === "notify") {
 			stats.notified += 1;
-			if (ctx.hasUI) ctx.ui.notify(`destructive-guard 本会拦下这段写入：\n${renderWriteFindingsForHuman(findings)}`, "warning");
+			if (ctx.hasUI) ctx.ui.notify(`destructive-guard would block this write:
+${renderWriteFindingsForHuman(findings)}`, "warning");
 			return undefined;
 		}
 
 		if (worstSeverity(findings) === "block" || mode === "block" || !ctx.hasUI) {
 			stats.blocked += 1;
 			const why = [
-				"destructive-guard 拦下了写入：这段代码里的删除调用有危险形态。",
+				"destructive-guard blocked this write: the code contains dangerous deletion patterns.",
 				renderWriteFindings(findings),
 				"",
-				"这不是“不许删文件”，而是这几个写法本身就会算错目标（" +
-					"2026-09-23 的一次事故正是 fs.rmSync(path.dirname(x ?? \"/tmp\")) " +
-					"退化成 rm -rf /）。",
-				"请改成：字面目标 + 删除前核对解析后的绝对路径 + 命中保护表就中止。",
+				"Deleting files is allowed, but these patterns can calculate the wrong target (" +
+					"in the 2026-09-23 incident, fs.rmSync(path.dirname(x ?? \"/tmp\")) " +
+					"became equivalent to rm -rf /).",
+				"Use literal targets, verify resolved absolute paths before deletion, and abort when a protected path matches.",
 			].join("\n");
 			return { block: true, reason: why };
 		}
 
 		const choice = await ctx.ui.select(
-			`⚠️ destructive-guard：要写进${writeTargetLabel(event.input)}的代码里有危险的删除调用\n\n` +
+			`⚠️ destructive-guard: Code being written to ${writeTargetLabel(event.input)} contains dangerous deletion calls
+
+` +
 				`${renderWriteFindingsForHuman(findings)}\n\n` +
-				`这不是“不许删文件”，而是这几个写法本身就会算错目标（事故里就是 dirname(x ?? "/tmp") 退化成 rm -rf /）。`,
-			["取消", "确认写入"],
+				`Deleting files is allowed, but these patterns can calculate the wrong target (in the incident, dirname(x ?? "/tmp") led to rm -rf /).`,
+			["Cancel", "Confirm write"],
 		);
-		if (choice !== "确认写入") {
+		if (choice !== "Confirm write") {
 			stats.blocked += 1;
-			return { block: true, reason: `destructive-guard：用户取消了这段写入。` };
+			return { block: true, reason: `destructive-guard: The user cancelled this write.` };
 		}
 		stats.confirmed += 1;
 		return undefined;
@@ -586,13 +599,13 @@ export default function (pi: ExtensionAPI) {
 
 /** 写入目标的展示名（弹框里告诉用户是哪个文件）。 */
 export function writeTargetLabel(input: unknown): string {
-	if (typeof input !== "object" || input === null) return "文件";
+	if (typeof input !== "object" || input === null) return "the file";
 	const record = input as Record<string, unknown>;
 	for (const key of ["path", "file_path", "filePath", "filename"]) {
 		const value = record[key];
 		if (typeof value === "string" && value !== "") return ` ${value}`;
 	}
-	return "文件";
+	return "the file";
 }
 
 /** 写入目标路径（判“不可执行目标”用）。取不到就返回 undefined。 */

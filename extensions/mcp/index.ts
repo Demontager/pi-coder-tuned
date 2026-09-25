@@ -67,10 +67,10 @@ export default function (pi: ExtensionAPI) {
 		if (problems > 0) {
 			const ready = runtime.servers.filter((server) => server.status === "ready").length;
 			const detail = [
-				`MCP：${runtime.servers.length} 个 server，${ready} 个就绪`,
-				...failures.map((server) => `${server.config.name}: ${server.error ?? "连接失败"}`),
+				`MCP：${runtime.servers.length} servers, ${ready} ready`,
+				...failures.map((server) => `${server.config.name}: ${server.error ?? "connection failed"}`),
 				...runtime.issues.map((issue) => `${issue.server ?? issue.source}: ${issue.message}`),
-				"用 /mcp 查看详情",
+				"Use /mcp for details",
 			].join("\n");
 			ctx.ui.notify(detail, "warning");
 		}
@@ -81,24 +81,24 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mcp", {
-		description: "MCP 服务器状态；/mcp reload 重连；/mcp <server> 看单个 server 详情",
+		description: "MCP server status; /mcp reload reconnects; /mcp <server> shows server details",
 		handler: async (args, ctx) => {
 			const argument = args.trim();
 			if (argument === "reload") {
-				if (runtime) ctx.ui.notify(`正在重连 ${runtime.servers.length} 个 MCP server…`, "info");
+				if (runtime) ctx.ui.notify(`Reconnecting ${runtime.servers.length} MCP servers…`, "info");
 				await stopRuntime();
 				runtime = await startRuntime(pi, ctx);
 				ctx.ui.notify(formatStatus(runtime, ctx), runtimeHasProblems(runtime) ? "warning" : "info");
 				return;
 			}
 			if (!runtime) {
-				ctx.ui.notify("MCP 尚未初始化（本会话启动时没有可用配置）", "warning");
+				ctx.ui.notify("MCP is not initialized (no usable configuration at session start)", "warning");
 				return;
 			}
 			if (argument) {
 				const server = runtime.servers.find((candidate) => candidate.config.name === argument);
 				if (!server) {
-					ctx.ui.notify(`没有名为 "${argument}" 的 MCP server。用 /mcp 查看已配置的 server。`, "warning");
+					ctx.ui.notify(`No MCP server named "${argument}". Use /mcp to list configured servers.`, "warning");
 					return;
 				}
 				ctx.ui.notify(formatServerDetail(server), server.status === "error" ? "error" : "info");
@@ -115,7 +115,7 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<Mc
 		config,
 		status: config.enabled ? "error" : "disabled",
 		tools: [],
-		error: config.enabled ? undefined : "配置里已禁用（enabled: false）",
+		error: config.enabled ? undefined : "Disabled in configuration (enabled: false)",
 		diagnostics: [],
 	}));
 
@@ -166,7 +166,7 @@ function registerTools(pi: ExtensionAPI, state: ServerState): void {
 				const client = state.client;
 				if (!client || client.isClosed) {
 					throw new Error(
-						`MCP server "${config.name}" 未连接${state.error ? `（${state.error}）` : ""}。运行 /mcp reload 重连。`,
+						`MCP server "${config.name}" is not connected${state.error ? `（${state.error}）` : ""}. Run /mcp reload to reconnect.`,
 					);
 				}
 				const started = Date.now();
@@ -179,7 +179,8 @@ function registerTools(pi: ExtensionAPI, state: ServerState): void {
 
 				if (result.isError) {
 					throw new Error(
-						`MCP 工具 ${config.name}/${tool.name} 返回错误：\n${truncated.text || "(无输出)"}`,
+						`MCP tool ${config.name}/${tool.name} returned an error:
+${truncated.text || "(no output)"}`,
 					);
 				}
 
@@ -205,7 +206,7 @@ function registerTools(pi: ExtensionAPI, state: ServerState): void {
  * 未截断时保持 MCP 给的块顺序（文本与图片的相对位置有意义），截断时退化成「一段文本 + 图片」。
  */
 function buildToolContent(blocks: PiToolContent[], truncatedText: string, truncated: boolean): PiToolContent[] {
-	if (blocks.length === 0) return [{ type: "text", text: "(MCP 工具返回空内容)" }];
+	if (blocks.length === 0) return [{ type: "text", text: "(MCP tool returned empty content)" }];
 	if (!truncated) return blocks;
 	return [{ type: "text", text: truncatedText }, ...blocks.filter((block) => block.type === "image")];
 }
@@ -224,9 +225,9 @@ function runtimeHasProblems(rt: McpRuntime): boolean {
 function formatStatus(rt: McpRuntime, ctx: ExtensionContext): string {
 	const ready = rt.servers.filter((server) => server.status === "ready");
 	const toolCount = ready.reduce((total, server) => total + server.tools.length, 0);
-	const lines: string[] = [`MCP：${ready.length}/${rt.servers.length} 个 server 就绪，共 ${toolCount} 个工具`];
+	const lines: string[] = [`MCP：${ready.length}/${rt.servers.length} servers ready, ${toolCount} tools total`];
 	if (rt.servers.length === 0) {
-		lines.push(`(未发现配置。写一个 ~/.pi/agent/mcp.json 或项目根的 .mcp.json，然后 /mcp reload)`);
+		lines.push(`(No configuration found. Create ~/.pi/agent/mcp.json or .mcp.json in the project root, then run /mcp reload)`);
 	}
 	for (const server of rt.servers) {
 		const mark = server.status === "ready" ? "●" : server.status === "disabled" ? "○" : "✗";
@@ -243,8 +244,8 @@ function formatStatus(rt: McpRuntime, ctx: ExtensionContext): string {
 	for (const issue of rt.issues) {
 		lines.push(`⚠ ${issue.server ? `${issue.server}: ` : ""}${issue.message}${issue.server ? "" : ` (${issue.source})`}`);
 	}
-	if (rt.sources.length > 0) lines.push(`配置：${rt.sources.join("  ")}`);
-	lines.push(`工作目录：${rt.cwd}`);
+	if (rt.sources.length > 0) lines.push(`Configuration: ${rt.sources.join("  ")}`);
+	lines.push(`Working directory: ${rt.cwd}`);
 	return lines.join("\n");
 }
 
@@ -253,25 +254,25 @@ function formatServerDetail(server: ServerState): string {
 	lines.push(`${server.config.name}（${server.config.transport}，${server.status}）`);
 	const client = server.client;
 	if (client) {
-		lines.push(`server: ${client.serverInfo.name ?? "?"} ${client.serverInfo.version ?? ""} · 协议 ${client.protocolVersion}`);
-		lines.push(`连接: ${client.transportLabel}`);
-		lines.push(`能力: ${Object.keys(client.capabilities).join(", ") || "(无)"}`);
+		lines.push(`server: ${client.serverInfo.name ?? "?"} ${client.serverInfo.version ?? ""} · protocol ${client.protocolVersion}`);
+		lines.push(`Connection: ${client.transportLabel}`);
+		lines.push(`Capabilities: ${Object.keys(client.capabilities).join(", ") || "(none)"}`);
 	}
-	if (server.error) lines.push(`错误: ${server.error}`);
+	if (server.error) lines.push(`Error: ${server.error}`);
 	if (server.config.transport !== "stdio" && server.config.headersCommand) {
 		// 只展示命令本身（用户自己写的配置），头的**值**任何情况下都不打印。
 		const command = server.config.headersCommand;
-		lines.push(`头命令: ${command.length > 100 ? `${command.slice(0, 100)}…` : command}`);
+		lines.push(`Header command: ${command.length > 100 ? `${command.slice(0, 100)}…` : command}`);
 	}
 	if (server.tools.length > 0) {
-		lines.push(`工具（${server.tools.length}）:`);
+		lines.push(`Tools (${server.tools.length}）:`);
 		for (const tool of server.tools) {
 			const short = tool.description?.replace(/\s+/g, " ").slice(0, 60) ?? "";
 			lines.push(`  mcp__${server.config.name}__${tool.name}${short ? ` — ${short}` : ""}`);
 		}
 	}
 	if (server.diagnostics.length > 0) {
-		lines.push(`最近诊断（${server.diagnostics.length} 行）:`);
+		lines.push(`Recent diagnostics (${server.diagnostics.length} lines):`);
 		for (const line of server.diagnostics.slice(-8)) lines.push(`  ${firstLine(line).slice(0, 160)}`);
 	}
 	return lines.join("\n");

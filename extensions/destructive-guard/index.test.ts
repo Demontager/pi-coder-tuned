@@ -85,7 +85,7 @@ interface Harness {
  * `session_start` 再读一次，所以要测模式开关必须走这条路（改环境变量后重开一个 harness）。
  */
 async function loadHarness(options: { hasUI?: boolean; selectAnswer?: string } = {}): Promise<Harness> {
-	const { hasUI = true, selectAnswer = "取消" } = options;
+	const { hasUI = true, selectAnswer = "Cancel" } = options;
 	const pi = (await import(pathToFileURL(piEntry!).href)) as {
 		discoverAndLoadExtensions: (
 			configuredPaths: string[],
@@ -249,7 +249,7 @@ test("非交互环境 fail closed（confirm 也拒）", { skip }, async () => {
 });
 
 test("有 UI 时 confirm 档会问一次，回答“取消”则拦", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "取消" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(guard.selects.length, 1, "应该弹了一次确认");
@@ -260,7 +260,7 @@ test("有 UI 时 confirm 档会问一次，回答“取消”则拦", { skip }, 
 });
 
 test("有 UI 时回答“确认删除”则放行", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "确认删除" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Confirm deletion" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(guard.selects.length, 1);
@@ -271,25 +271,25 @@ test("有 UI 时回答“确认删除”则放行", { skip }, async () => {
 });
 
 test("有 UI 时回答“先预览要删什么”则拦下并要求模型先列清单", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "先预览要删什么" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Preview deletion targets" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(verdict.block, true, "预览也是拦下（不直接执行）");
-		assert.match(verdict.reason ?? "", /先用只读命令/, "理由里要告诉模型先列清单");
+		assert.match(verdict.reason ?? "", /Use read-only commands/, "理由里要告诉模型先列清单");
 	} finally {
 		guard.cleanup();
 	}
 });
 
 test("弹框选项里“取消”是默认项（第一个）", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "取消" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(guard.selects.length, 1);
 		// 弹框正文必须包含“要删”与“为什么拦”，不能只有原始命令。
-		assert.match(guard.selects[0]!, /要删：/);
-		assert.match(guard.selects[0]!, /为什么拦：/);
-		assert.match(guard.selects[0]!, /不会删任何东西/);
+		assert.match(guard.selects[0]!, /Delete target: /);
+		assert.match(guard.selects[0]!, /Why blocked: /);
+		assert.match(guard.selects[0]!, /deletes nothing/);
 	} finally {
 		guard.cleanup();
 	}
@@ -353,38 +353,38 @@ test("弹框正文：命令替换目标不再显示成碎片", () => {
 	const findings = inspectBash('rm -rf $(dirname "$LOG")', CWD, HOME);
 	assert.equal(findings.length, 1, "应该只命中一个目标，不是三个碎片");
 	const text = renderFindingsForHuman(findings, 'rm -rf $(dirname "$LOG")');
-	assert.ok(text.includes('要删：$(dirname "$LOG")'), "目标应该完整显示");
+	assert.ok(text.includes('Delete target: $(dirname "$LOG")'), "目标应该完整显示");
 	// 修复前这两个碎片会各自成为一行目标。
-	assert.ok(!text.includes("要删：$(dirname\n"), "不该把 $(dirname 单独当目标");
-	assert.ok(!text.includes('要删："$LOG")'), "不该把 \"$LOG\") 单独当目标");
+	assert.ok(!text.includes("Delete target: $(dirname\n"), "不该把 $(dirname 单独当目标");
+	assert.ok(!text.includes('Delete target: "$LOG")'), "不该把 \"$LOG\") 单独当目标");
 });
 
 test("弹框正文：能解析的目标显示实际路径", () => {
 	const findings = inspectBash("rm -rf /usr/local/lib/foo", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf /usr/local/lib/foo");
-	assert.ok(text.includes("要删：/usr/local/lib/foo"));
-	assert.ok(text.includes("为什么拦"));
+	assert.ok(text.includes("Delete target: /usr/local/lib/foo"));
+	assert.ok(text.includes("Why blocked"));
 });
 
 test("弹框正文：单段命令不重复显示“所在命令”，链式命令才显示", () => {
 	const single = inspectBash("rm -rf /usr/local/lib/foo", CWD, HOME);
-	assert.ok(!renderFindingsForHuman(single, "rm -rf /usr/local/lib/foo").includes("所在命令"));
+	assert.ok(!renderFindingsForHuman(single, "rm -rf /usr/local/lib/foo").includes("Command:"));
 
 	const chained = inspectBash('cd /tmp && rm -rf $(dirname "$X")', CWD, HOME);
-	assert.ok(renderFindingsForHuman(chained, 'cd /tmp && rm -rf $(dirname "$X")').includes("所在命令"));
+	assert.ok(renderFindingsForHuman(chained, 'cd /tmp && rm -rf $(dirname "$X")').includes("Command:"));
 });
 
 test("弹框正文：重复命中去重、超限时折叠", () => {
 	const findings = inspectBash("rm -rf $A $B $C $D $E", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf $A $B $C $D $E", 3);
-	assert.ok(text.includes("… 还有 2 处同类命中"));
-	assert.ok(!text.includes("要删：$D"), "超过上限的条目不该展开");
+	assert.ok(text.includes("… plus 2 similar matches"));
+	assert.ok(!text.includes("Delete target: $D"), "超过上限的条目不该展开");
 });
 
 test("弹框正文：同一目标重复命中只说一次", () => {
 	const findings = inspectBash("rm -rf $A; rm -rf $A", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf $A; rm -rf $A");
-	assert.equal(text.match(/要删：/g)?.length, 1);
+	assert.equal(text.match(/Delete target: /g)?.length, 1);
 });
 
 test("truncateMiddle 中间省略保留头尾", () => {
@@ -398,14 +398,14 @@ test("truncateMiddle 中间省略保留头尾", () => {
 test("writeTargetLabel 从写入参数里取文件名", () => {
 	assert.equal(writeTargetLabel({ path: "verify.mjs" }), " verify.mjs");
 	assert.equal(writeTargetLabel({ file_path: "/tmp/a.mjs" }), " /tmp/a.mjs");
-	assert.equal(writeTargetLabel({ content: "x" }), "文件");
-	assert.equal(writeTargetLabel(null), "文件");
+	assert.equal(writeTargetLabel({ content: "x" }), "the file");
+	assert.equal(writeTargetLabel(null), "the file");
 });
 
 // ---- 闸三：运行脚本前把文件读进来判（2026-09-23 事故形态的唯一拦截点）----
 
 test("闸三：即将运行的脚本里有事故形态 → 拦", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "取消" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const script = path.join(guard.cwd, "verify-a.mjs");
 		fs.writeFileSync(
@@ -414,7 +414,7 @@ test("闸三：即将运行的脚本里有事故形态 → 拦", { skip }, async
 		);
 		const verdict = await guard.call("bash", { command: "node verify-a.mjs" });
 		assert.equal(verdict.block, true, "命令词无害、危险在文件里，必须靠闸三拦");
-		assert.match(verdict.reason ?? "", /即将运行的脚本|取消/);
+		assert.match(verdict.reason ?? "", /script|cancelled/);
 	} finally {
 		guard.cleanup();
 	}
@@ -441,7 +441,7 @@ test("闸三：读不到的脚本不拦（护栏不是沙箱）", { skip }, asyn
 });
 
 test("闸三：内联代码里的脚本调用也被抽出", { skip }, async () => {
-	const guard = await loadHarness({ hasUI: true, selectAnswer: "取消" });
+	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const script = path.join(guard.cwd, "a.mjs");
 		fs.writeFileSync(script, 'fs.rmSync(path.dirname(x ?? "/tmp"), { recursive: true });');

@@ -1685,9 +1685,12 @@ export default function (pi: ExtensionAPI) {
 				//
 				// 交互与非交互（headless）走同一条路：原样报错 + 一行 `[沙箱]` 提示。
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 认不出被拦的具体路径，未弹确认框；` +
-						`如确认要删，可用 /sandbox-boundary allow <目录> 授权后重试。` +
-						`\n可删边界：${writableRoots(boundary).join("、")}`,
+					`${denialMessage}
+
+[Sandbox] Could not identify the blocked path; no confirmation dialog was shown. ` +
+						`If deletion is intended, authorize it with /sandbox-boundary allow <directory>, then retry.` +
+						`
+Deletion boundary: ${writableRoots(boundary).join("、")}`,
 				);
 			}
 
@@ -1703,9 +1706,13 @@ export default function (pi: ExtensionAPI) {
 			// 交互与 headless 同一条路 —— 本来就没有「批准」这个动作可给。
 			if (classification.blocked.length > 0) {
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 以下路径是永不删除的身份/凭据/手写配置，任何授权方式都不放行：\n` +
+					`${denialMessage}
+
+[Sandbox] These identity, credential, or manually maintained configuration paths are protected from deletion, regardless of authorization:
+` +
 						classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
-						`\n如确需删除，请自己在终端执行（或 PI_SANDBOX=off 整体关掉这一层）。`,
+						`
+If deletion is necessary, perform it yourself in a terminal (or disable this layer with PI_SANDBOX=off).`,
 				);
 			}
 
@@ -1721,8 +1728,10 @@ export default function (pi: ExtensionAPI) {
 					const message = err instanceof Error ? err.message : String(err);
 					if (looksLikeSandboxDenial(message)) {
 						throw new Error(
-							`${message}\n\n[沙箱] 已按白名单加宽仍被拒绝，可能是路径识别有误。` +
-								`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+							`${message}
+
+[Sandbox] Still denied after expanding the allowlist; path detection may be incorrect. ` +
+								`Use /sandbox-boundary allow <directory> to authorize the path manually, then retry.`,
 						);
 					}
 					throw err;
@@ -1734,17 +1743,20 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx?.hasUI) {
 				const denied = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 这条命令要删除可删边界之外且未授权的路径，非交互环境不予升级。\n` +
-						`目标：${denied.join("、")}\n` +
-						`可删边界：${writableRoots(boundary).join("、")}\n` +
-						`持久白名单：${allowlist().roots().length} 条（/sandbox-boundary 查看）`,
+					`${denialMessage}
+
+[Sandbox] This command deletes unauthorized paths outside the deletion boundary; escalation is unavailable in non-interactive mode.
+` +
+						`Target: ${denied.join("、")}\n` +
+						`Deletion boundary: ${writableRoots(boundary).join("、")}\n` +
+						`Persistent allowlist: ${allowlist().roots().length} entries (view with /sandbox-boundary)`,
 				);
 			}
 
 			const hasDangerous = classification.dangerous.length > 0;
 			const foldPaths = (paths: readonly string[], limit = 3): string => {
 				const shown = paths.slice(0, limit).map((p) => `  ${p}`);
-				if (paths.length > limit) shown.push(`  …还有 ${paths.length - limit} 处`);
+				if (paths.length > limit) shown.push(`  … plus ${paths.length - limit} matches`);
 				return shown.join("\n");
 			};
 			// 弹框前先算好「将记住的范围」，在弹框里明示 —— 用户批准的是这个范围，
@@ -1758,46 +1770,48 @@ export default function (pi: ExtensionAPI) {
 				// （要永久记住它们得在没有危险路径的命令里单独走普通弹框）。
 				// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
 				const lines = [
-					`⚠️ ${ESCALATION_TITLE}（危险目录）`,
+					`⚠️ ${ESCALATION_TITLE} (high-risk directory)`,
 					"",
-					`命令：${truncateToWidth(command, 160)}`,
+					`Command: ${truncateToWidth(command, 160)}`,
 					"",
-					"危险路径（每次删除都会问，只能会话级豁免）：",
+					"High-risk paths (confirmation on each deletion; session-only exemptions):",
 					foldPaths(classification.dangerous.map((d) => `${d.path}（${d.reason}）`)),
 				];
 				if (classification.ordinary.length > 0) {
-					lines.push("", "同批还有普通边界外路径（本次批准，不记住）：", foldPaths(classification.ordinary));
+					lines.push("", "Also includes ordinary out-of-boundary paths (approve this time only; not remembered):", foldPaths(classification.ordinary));
 				}
-				lines.push("", "同意后命令会重新执行一次（已执行过的部分会重复）。", "选 Deny 不会删任何东西。");
+				lines.push("", "Approval reruns the command, including any parts that already executed.", "Choose Deny to leave everything untouched.");
 				choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 			} else {
 				const lines = [
 					`⚠️ ${ESCALATION_TITLE}`,
 					"",
-					`命令：${truncateToWidth(command, 160)}`,
+					`Command: ${truncateToWidth(command, 160)}`,
 					"",
-					"要删（可删边界之外）：",
+					"Delete targets (outside the deletion boundary):",
 					foldPaths(classification.ordinary),
 					"",
 					ordinaryScopes.length > 0
-						? `将记住：${ordinaryScopes.join("、")}（以后这些目录下的删除不再询问）`
-						: "这些路径算不出可安全记住的范围，只能逐次批准。",
+						? `Remember these paths: ${ordinaryScopes.join("、")} (future deletions within these directories will not prompt)`
+						: "No safe persistent scope can be determined for these paths; approve each request individually.",
 					"",
-					"同意后命令会重新执行一次（已执行过的部分会重复）。",
-					"选 Deny 不会删任何东西。",
+					"Approval reruns the command, including any parts that already executed.",
+					"Choose Deny to leave everything untouched.",
 				];
 				choice = await ctx.ui.select(lines.join("\n"), [
 					"Deny",
-					"Allow for this session（并记住该目录）",
+					"Allow for this session (and remember the directory)",
 					"Allow once",
 				]);
 			}
 
 			if (choice === undefined || choice === "Deny") {
 				throw new Error(
-					`${denialMessage}\n\n[沙箱] 用户拒绝删除可删边界之外的路径：` +
+					`${denialMessage}
+
+[Sandbox] The user denied deletion outside the boundary: ` +
 						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join("、") +
-						`（可删边界：${writableRoots(boundary).join("、")}）`,
+						` (deletion boundary: ${writableRoots(boundary).join("、")}）`,
 				);
 			}
 
@@ -1808,11 +1822,11 @@ export default function (pi: ExtensionAPI) {
 			// - `Allow for this session`（危险分支）→ 危险路径的会话范围进会话集合，重启即失效
 			// - `Allow once` → 只加宽这一次重跑的 profile，不进任何记忆
 			const onceRoots: string[] = [];
-			if (choice === "Allow for this session（并记住该目录）") {
+			if (choice === "Allow for this session (and remember the directory)") {
 				const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
 				if (remembered.length > 0)
 					ctx.ui.notify(
-						`已永久记住 ${remembered.length} 个目录（重启后仍生效），以后其下的删除不再询问`,
+						`Permanently remembered ${remembered.length} directories (persists across restarts); future deletions within them will not prompt`,
 						"info",
 					);
 				// 被安全闸挡掉的范围（算不出可记范围的）仍要放行这一次
@@ -1835,8 +1849,10 @@ export default function (pi: ExtensionAPI) {
 				const message = err instanceof Error ? err.message : String(err);
 				if (looksLikeSandboxDenial(message)) {
 					throw new Error(
-						`${message}\n\n[沙箱] 已按批准的范围加宽仍被拒绝，可能还有别的路径被拦或路径识别有误。` +
-							`可用 /sandbox-boundary allow <目录> 手动授权后重试。`,
+						`${message}
+
+[Sandbox] Still denied after expanding the approved scope; other paths may be blocked or path detection may be incorrect. ` +
+							`Use /sandbox-boundary allow <directory> to authorize the path manually, then retry.`,
 					);
 				}
 				throw err;
@@ -2022,18 +2038,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("bash-preview", {
-		description: "bash 输出预览行数：off（pi 内置 5 行）| <行数 1-50>",
+		description: "Bash output preview: off (Pi default: 5 lines) | <line count 1-50>",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
 			if (arg === "off") {
 				previewLines = 5; // pi 的 BASH_PREVIEW_LINES，等于不裁
-				ctx.ui.notify("bash 输出预览已恢复 pi 内置的 5 行", "info");
+				ctx.ui.notify("Bash output preview restored to Pi's default of 5 lines", "info");
 				return;
 			}
 
 			if (arg === "") {
-				ctx.ui.notify(`当前输出预览：前 ${previewLines} 行（pi 内置是 5 行，超出部分带 earlier lines 提示）`, "info");
+				ctx.ui.notify(`Current output preview: first ${previewLines} lines (Pi default: 5; omitted content is indicated by 'earlier lines')`, "info");
 				return;
 			}
 
@@ -2042,26 +2058,26 @@ export default function (pi: ExtensionAPI) {
 			const parsed = Number(arg);
 			const next = clampPreviewLines(parsed);
 			if (next !== parsed) {
-				ctx.ui.notify("用法：/bash-preview off | <行数 1-50 的整数>", "warning");
+				ctx.ui.notify("Usage: /bash-preview off | <integer 1-50>", "warning");
 				return;
 			}
 
 			previewLines = next;
-			ctx.ui.notify(`bash 输出预览已改为前 ${previewLines} 行`, "info");
+			ctx.ui.notify(`Bash output preview changed to the first ${previewLines} lines`, "info");
 		},
 	});
 
 	// 只读查看当前生效的期限：默认值、上限、以及 env 有没有覆盖。
 	// 值在 execute 里每次调用时重算，所以这里显示的永远是下一次执行的真实期限。
 	pi.registerCommand("bash-timeout", {
-		description: "查看 bash 执行期限（默认 / 上限 / env 覆盖）",
+		description: "Show Bash timeouts (default / maximum / environment overrides)",
 		handler: async (_args, ctx) => {
 			const override = (name: string) => {
 				const value = readTimeoutEnvMs(name);
-				return value === undefined ? "未设置" : `${name}=${value}ms`;
+				return value === undefined ? "unset" : `${name}=${value}ms`;
 			};
 			ctx.ui.notify(
-				`默认 ${defaultTimeoutSeconds()}s，上限 ${maxTimeoutSeconds()}s；env：${override("BASH_DEFAULT_TIMEOUT_MS")} / ${override("BASH_MAX_TIMEOUT_MS")}（改完需重启 pi）`,
+				`Default ${defaultTimeoutSeconds()}s, maximum ${maxTimeoutSeconds()}s；env：${override("BASH_DEFAULT_TIMEOUT_MS")} / ${override("BASH_MAX_TIMEOUT_MS")} (restart Pi after changes)`,
 				"info",
 			);
 		},

@@ -75,8 +75,8 @@ function runCommand(spec: HeadersCommandSpec, signal?: AbortSignal): Promise<str
 					reject(
 						new Error(
 							timedOut
-								? `头命令超时（${spec.timeoutMs ?? DEFAULT_HEADERS_COMMAND_TIMEOUT_MS}ms）`
-								: `头命令退出码非 0${detail}`,
+								? `Header command timed out (${spec.timeoutMs ?? DEFAULT_HEADERS_COMMAND_TIMEOUT_MS}ms）`
+								: `Header command exited with a nonzero status${detail}`,
 						),
 					);
 					return;
@@ -110,7 +110,7 @@ export function parseHeadersOutput(raw: string): { headers: Record<string, strin
 	if (fromLines) return { headers: fromLines, warnings };
 
 	throw new Error(
-		`头命令输出无法解析为请求头（${Buffer.byteLength(text, "utf8")} 字节；内容已省略以免泄露密钥）`,
+		`Could not parse header command output (${Buffer.byteLength(text, "utf8")} bytes; content omitted to protect secrets)`,
 	);
 }
 
@@ -134,15 +134,15 @@ function tryParseJsonHeaders(text: string, warnings: string[]): Record<string, s
 	for (const [name, value] of Object.entries(source)) {
 		if (typeof value !== "string") {
 			// 数字/bool（如 expires_in）很常见，静默丢弃；对象/数组说明写错了，提一句。
-			if (typeof value === "object" && value !== null) warnings.push(`头 ${name} 的值不是字符串，已丢弃`);
+			if (typeof value === "object" && value !== null) warnings.push(`Header ${name} value is not a string; discarded`);
 			continue;
 		}
 		if (value.trim() === "") {
-			warnings.push(`头 ${name} 的值为空，已丢弃`);
+			warnings.push(`Header ${name} value is empty; discarded`);
 			continue;
 		}
 		if (!HEADER_NAME_PATTERN.test(name)) {
-			warnings.push(`头名 ${name} 含非法字符，已丢弃`);
+			warnings.push(`Header name ${name} contains invalid characters; discarded`);
 			continue;
 		}
 		headers[name] = value;
@@ -163,7 +163,7 @@ function tryParseHeaderLines(text: string, warnings: string[]): Record<string, s
 		if (!HEADER_NAME_PATTERN.test(name)) return undefined;
 		matched += 1;
 		if (!value) {
-			warnings.push(`头 ${name} 的值为空，已丢弃`);
+			warnings.push(`Header ${name} value is empty; discarded`);
 			continue;
 		}
 		headers[name] = value;
@@ -186,7 +186,7 @@ export function mergeHeaders(
  */
 export function describeHeaderNames(headers: Record<string, string>): string {
 	const names = Object.keys(headers);
-	return names.length > 0 ? names.join(", ") : "(无)";
+	return names.length > 0 ? names.join(", ") : "(none)";
 }
 
 /** 用于判断"重跑命令后头有没有变化"：只有变了才值得重试一次请求。 */

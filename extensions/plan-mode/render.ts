@@ -50,9 +50,9 @@ export function formatPlanStatus(theme: PlanTheme, source: PlanStatusSource): st
 	if (source.phase === "plan") {
 		const label = theme.fg("warning", "⏸");
 		if (source.docWriting) {
-			return `${label} ${theme.fg("warning", "plan")} ${theme.fg("accent", "· 写文档中")}`;
+			return `${label} ${theme.fg("warning", "plan")} ${theme.fg("accent", "· writing document")}`;
 		}
-		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· 待批准")}`;
+		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· awaiting approval")}`;
 		return `${label} ${theme.fg("warning", "plan")}`;
 	}
 	// bypass：用 `toolDiffRemoved`（删除行前景色）而不是 `dim` —— 那个槽在三套皮肤里

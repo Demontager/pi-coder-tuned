@@ -86,10 +86,10 @@ describe("formatMainLine", () => {
 		assert.equal(formatMainLine(plain, sourceOf(), gitOf("main"), stateOf()), `${DOC} | \u15cc main | (+0,-0)`);
 	});
 
-	it("replaces both git segments outside a repo", () => {
+	it("omits both git segments outside a repo", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(), gitOf(null), stateOf({ diffStat: { added: 9, deleted: 9 } })),
-			`${DOC} | \u15cc no git | (no git)`,
+			DOC,
 		);
 	});
 
@@ -135,7 +135,7 @@ describe("formatMainLine", () => {
 	it("survives a missing model", () => {
 		assert.equal(
 			formatMainLine(plain, sourceOf(null, null), gitOf(null), stateOf()),
-			"⚡️ no-model/xhigh | Ctx ? | \u15cc no git | (no git)",
+			"⚡️ no-model/xhigh | Ctx ?",
 		);
 	});
 
@@ -186,9 +186,16 @@ describe("formatMainLine", () => {
 	it("paints labels and separators dim, model / branch / percent by role", () => {
 		assert.equal(
 			formatMainLine(painted, sourceOf(0), gitOf("main"), stateOf({ diffStat: { added: 1, deleted: 2 } })),
-			"⚡️ accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) success(0.0%)dim( | )" +
+			"⚡️ accent(qwen3.8-flash)dim(/)syntaxFunction(xhigh)dim( | )dim(Ctx) dim()success(0.0%)dim( | )" +
 				"dim(\u15cc) accent(main)dim( | )dim(()success(+1)dim(,)error(-2)dim())",
 		);
+	});
+
+	it("shows exact used/total token counts beside the percentage without no-git placeholders", () => {
+		const source = { ...sourceOf(2.9), getContextUsage: () => ({ tokens: 7602, contextWindow: 262144, percent: 2.9 }) };
+		assert.equal(formatMainLine(plain, source, gitOf(null), stateOf()), "⚡️ qwen3.8-flash/xhigh | Ctx 7,602/262,144 2.9%");
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: null, contextWindow: 262144, percent: null }) }, gitOf(null), stateOf()), /Ctx \?\/262,144 \?$/);
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 0, contextWindow: 262144, percent: 0 }) }, gitOf(null), stateOf()), /Ctx 0\/262,144 0\.0%$/);
 	});
 
 	it("shifts the context colour at 70% and 90%", () => {

@@ -27,9 +27,9 @@ const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "
 const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
 
 /** 审批对话框的三个选项（与 index.ts 里的常量同值）。 */
-const CHOICE_EXECUTE = "写计划文档并实施";
-const CHOICE_DOC_ONLY = "只写计划文档";
-const CHOICE_REJECT = "打回";
+const CHOICE_EXECUTE = "Write plan and implement";
+const CHOICE_DOC_ONLY = "Write plan only";
+const CHOICE_REJECT = "Request changes";
 
 /**
  * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
@@ -523,12 +523,12 @@ test("enter_plan_mode 工具让模型自己进 plan，并回一段说明", { ski
 
 		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
 
-		assert.match(result.content[0]!.text, /已进入 plan mode/);
+		assert.match(result.content[0]!.text, /Entered plan mode/);
 		assert.match(result.content[0]!.text, /exit_plan_mode/, "要告诉模型怎么出去");
 		assert.ok(!harness.getActiveTools().includes("write"), "进 plan 后写工具必须停用");
 		// 模型路径要先过同意弹框（默认回车 = 接受）
 		assert.equal(rec.selectTitles.length, 1, "模型路径应弹一次同意框");
-		assert.match(rec.selectTitles[0]!, /模型请求进入 plan mode/, "弹框要说明是模型请求的");
+		assert.match(rec.selectTitles[0]!, /model requests plan mode/, "弹框要说明是模型请求的");
 		assert.ok(rec.selectTitles[0]!.includes("要改多个文件"), "弹框里要能看到模型给的理由");
 	} finally {
 		workspace.cleanup();
@@ -540,12 +540,12 @@ test("同意框选「直接实施」：不进 plan、写工具仍在、告诉模
 	try {
 		const rec = recorder();
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
-		const harness = await startSession(extension, rec, { selectResult: "直接实施" });
+		const harness = await startSession(extension, rec, { selectResult: "Implement directly" });
 
 		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
 
-		assert.match(result.content[0]!.text, /没有进入 plan mode/, "必须明确说没进");
-		assert.match(result.content[0]!.text, /不要再调用/, "要阻止模型反复重试");
+		assert.match(result.content[0]!.text, /without entering plan mode/, "必须明确说没进");
+		assert.match(result.content[0]!.text, /do not call again/, "要阻止模型反复重试");
 		assert.ok(harness.getActiveTools().includes("write"), "否决后写工具不能被动");
 		assert.equal(rec.selectTitles.length, 1, "只弹这一次");
 	} finally {
@@ -562,7 +562,7 @@ test("同意框按 esc：等同否决（CC 的 must consent）", { skip, timeout
 
 		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
 
-		assert.match(result.content[0]!.text, /没有进入 plan mode/);
+		assert.match(result.content[0]!.text, /without entering plan mode/);
 		assert.ok(harness.getActiveTools().includes("write"), "esc 后写工具不能被动");
 	} finally {
 		workspace.cleanup();
@@ -607,7 +607,7 @@ test("PI_PLAN_MODE_CONSENT=off：不弹框直接进（回到旧行为）", { ski
 
 		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
 
-		assert.match(result.content[0]!.text, /已进入 plan mode/);
+		assert.match(result.content[0]!.text, /Entered plan mode/);
 		assert.equal(rec.selectTitles.length, 0, "CONSENT=off 时不该弹框");
 		assert.ok(!harness.getActiveTools().includes("write"), "应直接进 plan");
 	} finally {
@@ -626,13 +626,13 @@ test("工具描述带完整路由判据：正面条件 + 豁免清单都在", { 
 		const tool = toolOf(extension, "enter_plan_mode");
 		const desc = (tool.definition as unknown as { description: string }).description;
 		// 正面条件（CC 的 7 条里的量化门槛与 ask_user_question 替代规则）
-		assert.match(desc, /2-3 个以上文件/, "多文件门槛要写清");
+		assert.match(desc, /more than 2-3 files/, "多文件门槛要写清");
 		assert.match(desc, /ask_user_question/, "要说明与 ask_user_question 的替代关系");
 		// 豁免清单（实测的两类误报来源，防将来被顺手删掉）
-		assert.match(desc, /具体、详细的指令/, "用户给了明确指令的小改要豁免");
-		assert.match(desc, /纯调研/, "纯调研 / 写报告要豁免");
+		assert.match(desc, /detailed unambiguous user instructions/, "用户给了明确指令的小改要豁免");
+		assert.match(desc, /pure research/, "纯调研 / 写报告要豁免");
 		// 同意机制的自述（拿不准就调的前提）
-		assert.match(desc, /需要用户同意/, "要告诉模型这个工具会被用户否决");
+		assert.match(desc, /Requires user consent/, "要告诉模型这个工具会被用户否决");
 	} finally {
 		workspace.cleanup();
 	}
@@ -668,7 +668,7 @@ test("提交计划：对话框是 select 三选一，标题里带计划全文", 
 		await submitPlan(extension, harness);
 
 		assert.equal(rec.selectTitles.length, 1, "应弹一次审批对话框");
-		assert.match(rec.selectTitles[0]!, /批准这个计划/, "标题要问批不批");
+		assert.match(rec.selectTitles[0]!, /Approve this plan/, "标题要问批不批");
 		assert.ok(rec.selectTitles[0]!.includes(PLAN), "对话框里要能看到计划全文");
 	} finally {
 		workspace.cleanup();
@@ -686,14 +686,14 @@ test("选「写计划文档并实施」：进写文档子态，write 放回、ed
 
 		const docPath = docPathFrom(result);
 		assert.match(docPath, /\/repo\/\.pi\/plans\/\d{4}-\d{2}-\d{2}-fix-two-files\.md$/, "路径由 cwd + 日期 + 英文 slug 组成");
-		assert.match(result.content[0]!.text, /批准/);
-		assert.match(result.content[0]!.text, /write 工具/, "要教模型用 write 落盘");
+		assert.match(result.content[0]!.text, /approved/);
+		assert.match(result.content[0]!.text, /write tool/, "要教模型用 write 落盘");
 
 		const tools = harness.getActiveTools();
 		assert.ok(tools.includes("write"), "子态要放回 write");
 		assert.ok(!tools.includes("edit"), "edit 仍摘着");
 		assert.ok(!tools.includes("powershell"), "powershell 仍摘着");
-		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行应显示写文档子态");
+		assert.match(rec.statuses.at(-1) ?? "", /writing document/, "状态行应显示写文档子态");
 
 		// 落盘条目里钉死了路径与路线（/resume 后不能重算）
 		const last = rec.entries.at(-1)!.data as Record<string, unknown>;
@@ -732,7 +732,7 @@ test("选「打回」或按 esc：留在 plan（只读），并要求模型改�
 
 			const result = await submitPlan(extension, harness);
 
-			assert.match(result.content[0]!.text, /没有批准/);
+			assert.match(result.content[0]!.text, /did not approve/);
 			assert.ok(!harness.getActiveTools().includes("write"), "打回后仍然是只读");
 			assert.match(rec.statuses.at(-1) ?? "", /plan/, "仍停在 plan 态");
 		} finally {
@@ -767,7 +767,7 @@ test("不在 plan 时调 exit_plan_mode：明确拒绝，不改变状态", { ski
 		const harness = await startSession(extension, rec);
 
 		const result = await callTool(extension, "exit_plan_mode", { plan: PLAN }, harness.ctx);
-		assert.match(result.content[0]!.text, /不在 plan mode/);
+		assert.match(result.content[0]!.text, /Not in plan mode/);
 		assert.equal(rec.selectTitles.length, 0, "不该弹审批框");
 	} finally {
 		workspace.cleanup();
@@ -783,7 +783,7 @@ test("空计划被拒绝", { skip, timeout: 30_000 }, async () => {
 		harness.ctx.__feedInput("\x1b[Z");
 
 		const result = await callTool(extension, "exit_plan_mode", { plan: "   " }, harness.ctx);
-		assert.match(result.content[0]!.text, /空的/);
+		assert.match(result.content[0]!.text, /empty/);
 		assert.equal(rec.selectTitles.length, 0);
 	} finally {
 		workspace.cleanup();
@@ -801,8 +801,8 @@ test("写文档子态里再调 exit_plan_mode：提醒去写文件，不再弹�
 
 		const result = await callTool(extension, "exit_plan_mode", { plan: PLAN }, harness.ctx);
 
-		assert.match(result.content[0]!.text, /写文档子态/);
-		assert.match(result.content[0]!.text, /不需要再调用/);
+		assert.match(result.content[0]!.text, /writing the plan document/);
+		assert.match(result.content[0]!.text, /do not call again/);
 		assert.equal(rec.selectTitles.length, 0, "子态里不该再弹审批框");
 	} finally {
 		workspace.cleanup();
@@ -835,7 +835,7 @@ test("写文档子态：write 只许写钉死的那个路径", { skip, timeout: 
 			harness.ctx,
 		)) as { block?: boolean; reason?: string };
 		assert.equal(blocked.block, true, "写别的文件必须拦下");
-		assert.match(blocked.reason ?? "", /只允许写计划文档/);
+		assert.match(blocked.reason ?? "", /Only the plan document/);
 		assert.ok((blocked.reason ?? "").includes(docPath), "拒绝原因里要给出正确路径");
 	} finally {
 		workspace.cleanup();
@@ -856,7 +856,7 @@ test("普通 plan 态（非子态）：write 被双保险拦下", { skip, timeou
 			harness.ctx,
 		)) as { block?: boolean; reason?: string };
 		assert.equal(blocked.block, true, "工具表已摘掉 write，钩子再拦一道");
-		assert.match(blocked.reason ?? "", /plan 阶段不能写文件/);
+		assert.match(blocked.reason ?? "", /Files cannot be written during planning/);
 	} finally {
 		workspace.cleanup();
 	}
@@ -891,7 +891,7 @@ test("write 成功且路径匹配：自动收尾回 bypass、还原工具表，�
 		assert.ok(replaced, "应替换 write 的普通成功文本");
 		const text = replaced.content[0]!.text;
 		assert.ok(text.includes(docPath), "收尾指令要报文档路径");
-		assert.match(text, /按这份文档实施/, "execute-with-doc 路线要让模型接着干");
+		assert.match(text, /Follow this document/, "execute-with-doc 路线要让模型接着干");
 		assert.match(text, /task_set/, "建不建清单由模型自己判断，但要提到这个工具");
 
 		assert.deepEqual(harness.getActiveTools(), before, "收尾后工具表回到进入前的样子");
@@ -928,9 +928,9 @@ test("doc-only 路线收尾：指令是「停下来」，不是「实施」", { 
 		)) as { content: Array<{ text: string }> };
 
 		const text = replaced.content[0]!.text;
-		assert.match(text, /现在就停下来/);
-		assert.match(text, /不要开始改任何代码/);
-		assert.ok(!text.includes("按这份文档实施"), "两条路线的指令不能串");
+		assert.match(text, /stop now/);
+		assert.match(text, /Do not change code/);
+		assert.ok(!text.includes("Follow this document"), "两条路线的指令不能串");
 		assert.match(rec.statuses.at(-1) ?? "", /⏵ bypass/, "doc-only 也回 bypass");
 	} finally {
 		workspace.cleanup();
@@ -956,7 +956,7 @@ test("write 失败 / 路径不对 / 不是 write：都不收尾", { skip, timeou
 			assert.equal(result, undefined, `${label}不该触发收尾`);
 			assert.ok(!harness.getActiveTools().includes("edit"), `${label}后仍是只读`);
 		}
-		assert.match(rec.statuses.at(-1) ?? "", /写文档中/, "状态行仍是写文档子态");
+		assert.match(rec.statuses.at(-1) ?? "", /writing document/, "状态行仍是写文档子态");
 	} finally {
 		workspace.cleanup();
 	}
@@ -1247,7 +1247,7 @@ test("用户自己配过 thinking cycle 时启动不碰文件", { skip, timeout:
 
 		const bindings = JSON.parse(fs.readFileSync(file, "utf8"));
 		assert.equal(bindings["app.thinking.cycle"], "ctrl+alt+t", "用户的选择优先");
-		assert.ok(!rec.notifies.some((message) => message.includes("改绑")), "不该提醒");
+		assert.ok(!rec.notifies.some((message) => message.includes("remap")), "不该提醒");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		workspace.cleanup();
@@ -1266,7 +1266,7 @@ test("上次改绑过（已绑到 fallback）时启动也静默", { skip, timeou
 
 		await sessionStart(extension, { reason: "startup" }, harness.ctx);
 
-		assert.ok(!rec.notifies.some((message) => message.includes("改绑")), "已经绑过就不该再提醒");
+		assert.ok(!rec.notifies.some((message) => message.includes("remap")), "已经绑过就不该再提醒");
 	} finally {
 		delete process.env.PI_CODING_AGENT_DIR;
 		workspace.cleanup();

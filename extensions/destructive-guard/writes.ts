@@ -216,24 +216,24 @@ function classifyRegion(region: string): { rule: string; reason: string } | unde
 	if (FALLBACK.test(region)) {
 		return {
 			rule: "fallback-in-delete",
-			reason: "删除调用的参数里有兜底值（`??` / `||`）：取不到值时会把实参换成默认路径，而这个默认路径往往不是你想删的",
+			reason: "The deletion argument uses a fallback (`??` / `||`); a missing value substitutes a default path that may not be the intended target",
 		};
 	}
 	if (PATH_OPS.test(region)) {
 		const op = PATH_OPS.exec(region)?.[1] ?? "dirname";
 		return {
 			rule: "derived-delete-target",
-			reason: `删除目标来自 ${op}() 的返回值，不是字面路径：解析结果必须显式核对后才能删`,
+			reason: `The deletion target comes from ${op}(), not a literal path; explicitly verify the resolved path before deleting`,
 		};
 	}
 	if (EXPANSION.test(region)) {
 		return {
 			rule: "derived-delete-target",
-			reason: "删除目标是变量 / 命令替换 / 模板串算出来的，执行前无法静态知道具体路径",
+			reason: "The deletion target is computed from a variable, command substitution, or template string; the exact path cannot be determined statically",
 		};
 	}
 	if (BARE_ROOT.test(region) || PARENT_SEGMENT.test(region.replace(/["'`]/g, " "))) {
-		return { rule: "root-or-parent-delete", reason: "删除目标是根目录或 `..` 上跳" };
+		return { rule: "root-or-parent-delete", reason: "The deletion target is a root directory or a parent traversal (`..`)" };
 	}
 	return undefined;
 }
@@ -367,7 +367,7 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 				push(
 					index + 1,
 					"shell-variable-target",
-					"shell 删除命令的目标是变量或上跳路径：变量为空时会退化成 `rm -rf /*` 这类形态",
+					"The shell deletion target is a variable or parent traversal; an empty variable can turn it into something like `rm -rf /*`",
 					literal,
 				);
 			}
@@ -376,7 +376,7 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 		if (POWERSHELL_DELETE.test(text)) {
 			const hasLiteral = /Remove-Item[^\n]*["'][A-Za-z]:[\\\/]|Remove-Item[^\n]*["']\//.test(text);
 			if (!hasLiteral) {
-				push(index + 1, "derived-delete-target", "Remove-Item -Recurse 的目标不是字面路径（变量或表达式）：递归删除前必须先把目标解析并核对");
+				push(index + 1, "derived-delete-target", "Remove-Item -Recurse uses a variable or expression, not a literal path; resolve and verify it before recursive deletion");
 			}
 		}
 	});

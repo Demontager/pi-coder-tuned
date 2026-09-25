@@ -255,11 +255,13 @@ export function renderGateMessage(decision: Extract<GateDecision, { action: "blo
 	const files = decision.mutations
 		.map((mutation) => mutation.path ?? `(${mutation.tool})`)
 		.filter((value, index, all) => all.indexOf(value) === index);
-	const fileList = files.length > 0 ? files.join("、") : "（未识别到具体路径）";
+	const fileList = files.length > 0 ? files.join("、") : "(no specific paths identified)";
 	return (
-		`你声称完成，但本次 run 的文件改动（${fileList}）之后没有跑过任何命令去观察实际结果。\n` +
-		`请运行能证明这次改动正确的命令（测试 / 构建 / lint，或直接跑一下改过的代码把结果打出来）` +
-		`并把输出贴出来；若确属无需验证的改动，明确说明原因。\n` +
-		`这是第 ${decision.attempt}/${decision.cap} 次拦截；达到上限后不再拦截。`
+		`You claimed completion, but after this run's file changes (${fileList}) no command was run to observe the actual result.
+` +
+		`Run a command demonstrating correctness (tests / build / lint, or execute the changed code and print the result) ` +
+		`and show its output. If verification is genuinely unnecessary, explain why.
+` +
+		`This is intervention ${decision.attempt}/${decision.cap}; interventions stop at the limit.`
 	);
 }

@@ -260,7 +260,7 @@ test("settings.json 坏掉时不当成写成功（notify 警告，文件保持�
 		assert.equal(notifications[0]?.type, "warning");
 		// 警告里要带上是哪个模型、以及 pi 记下的真实错误（解析失败原文），否则用户无从下手。
 		assert.match(notifications[0]?.message ?? "", /deepseek-flash/);
-		assert.match(notifications[0]?.message ?? "", /启动默认模型/);
+		assert.match(notifications[0]?.message ?? "", /startup default model/);
 		assert.equal(fs.readFileSync(path.join(workspace.agentDir, "settings.json"), "utf-8"), raw);
 	} finally {
 		workspace.cleanup();

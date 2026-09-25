@@ -30,13 +30,13 @@ test("buildEvaluatorPrompt: 超长对话截头留尾（最近的才是判定依�
 	const conversation = `${"早".repeat(500)}\n${"晚".repeat(500)}`;
 	const prompt = buildEvaluatorPrompt("条件", conversation, 600);
 	assert.ok(prompt.length < conversation.length + 200);
-	assert.match(prompt, /已截断/);
+	assert.match(prompt, /truncated/);
 	assert.match(prompt, /晚/);
 });
 
 test("buildEvaluatorPrompt: 不超长时不截断", () => {
 	const prompt = buildEvaluatorPrompt("条件", "短对话", DEFAULT_CONTEXT_CHARS);
-	assert.ok(!prompt.includes("已截断"));
+	assert.ok(!prompt.includes("truncated"));
 	assert.match(prompt, /短对话/);
 });
 
@@ -118,12 +118,12 @@ test("parseVerdict: 带 code fence 与前后杂字", () => {
 test("parseVerdict: 缺 reason 时给占位（不因为少字段就 fail）", () => {
 	const parsed = parseVerdict('{"verdict":"impossible"}');
 	assert.equal(parsed?.verdict, "impossible");
-	assert.match(parsed?.reason ?? "", /未给出理由/);
+	assert.match(parsed?.reason ?? "", /provided no reason/);
 });
 
 test("parseVerdict: 空 reason 也给占位", () => {
 	const parsed = parseVerdict('{"verdict":"met","reason":"   "}');
-	assert.match(parsed?.reason ?? "", /未给出理由/);
+	assert.match(parsed?.reason ?? "", /provided no reason/);
 });
 
 test("parseVerdict: 超长 reason 截断到 1000 字符", () => {

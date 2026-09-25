@@ -95,15 +95,15 @@ describe("toolDescription / toolPromptSnippet", () => {
 		});
 		assert.match(description, /检查微信状态/);
 		assert.match(description, /server: wechat-local/);
-		assert.match(description, /只读/);
+		assert.match(description, /read-only/);
 	});
 
 	it("没有描述时也能给出 server 归属", () => {
-		assert.match(toolDescription("s", { name: "t" }), /MCP 工具（server: s）/);
+		assert.match(toolDescription("s", { name: "t" }), /MCP tool \(server: s）/);
 	});
 
 	it("破坏性注解会提示模型", () => {
-		assert.match(toolDescription("s", { name: "t", annotations: { destructiveHint: true } }), /可能破坏数据/);
+		assert.match(toolDescription("s", { name: "t", annotations: { destructiveHint: true } }), /potentially destructive/);
 	});
 
 	it("snippet 是单行且限长", () => {
@@ -150,7 +150,7 @@ describe("mcpContentToPiContent", () => {
 
 	it("audio 降级成文本说明", () => {
 		const result = mcpContentToPiContent([{ type: "audio", data: "AA", mimeType: "audio/wav" }]);
-		assert.match((result.content[0] as { text: string }).text, /音频/);
+		assert.match((result.content[0] as { text: string }).text, /Audio/);
 	});
 
 	it("resource 带 text 时内容直出", () => {
@@ -183,7 +183,7 @@ describe("mcpContentToPiContent", () => {
 
 	it("未知内容块不静默丢弃", () => {
 		const result = mcpContentToPiContent([{ type: "wat", value: 1 }]);
-		assert.match((result.content[0] as { text: string }).text, /不支持的 MCP 内容块 wat/);
+		assert.match((result.content[0] as { text: string }).text, /Unsupported MCP content block wat/);
 	});
 
 	it("空数组 → 空内容（由调用方兜底）", () => {
@@ -204,7 +204,7 @@ describe("truncateText", () => {
 		assert.equal(result.truncated, true);
 		assert.match(result.text, /line 0/);
 		assert.doesNotMatch(result.text, /line 4/);
-		assert.match(result.text, /输出已截断/);
+		assert.match(result.text, /Output truncated/);
 		assert.equal(result.totalLines, 10);
 	});
 

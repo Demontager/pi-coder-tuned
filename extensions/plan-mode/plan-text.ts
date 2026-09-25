@@ -103,7 +103,7 @@ export function truncatePlanForDialog(plan: string, metrics: DialogMetrics, wrap
 	if (total <= budget) return lines.join("\n");
 
 	// 预算连「一行 + 提示行」都放不下（终端极矮）：只给提示行，保证不超预算。
-	if (budget <= HINT_LINES) return `… 计划共 ${lines.length} 行（终端太矮放不下，上翻终端可看全文）`;
+	if (budget <= HINT_LINES) return `… Plan has ${lines.length} lines (terminal too short; scroll up to read the full plan)`;
 
 	const usable = budget - HINT_LINES;
 	const kept: string[] = [];
@@ -126,7 +126,7 @@ export function truncatePlanForDialog(plan: string, metrics: DialogMetrics, wrap
 	}
 
 	const hidden = lines.length - fullyKept;
-	if (hidden > 0) kept.push(`… 还有 ${hidden} 行（上翻终端可看完整计划）`);
+	if (hidden > 0) kept.push(`… plus ${hidden} lines (scroll up to read the full plan)`);
 	return kept.join("\n");
 }
 
@@ -151,22 +151,17 @@ function truncateToColumns(text: string, maxColumns: number, wrap: WrapFn): stri
 export function buildPlanModeContext(cwd: string): string {
 	return `[PLAN MODE]
 
-你现在处于 plan mode：只读探索阶段。改动类工具（edit / write）已从你的工具表里摘掉，
-bash 里的写操作（重定向、rm / mv / sed -i / git commit / npm install 等）会被拦下并把
-原因回给你。这不代表你卡住了 —— 它代表现在应该先把方案想清楚。
+You are in read-only exploration. edit / write are unavailable, and Bash writes (redirection, rm, mv, sed -i, git commit, npm install, etc.) are blocked with an explanation. You are not stuck: develop the design first.
 
-工作目录：${cwd}
+Working directory: ${cwd}
 
-在 plan mode 里：
-- 尽管读：read / grep / find / ls / 只读 bash 都是通的，需要多少上下文就读多少
-- 需要用户拍板的选择用 ask_user_question 问，不要自己替他决定
-- 不要试图绕过限制（换个写法写文件、用 git 提交、装依赖都不行）
+In plan mode:
+- Read as much context as needed using read / grep / find / ls / read-only Bash.
+- Use ask_user_question for choices requiring user input.
+- Do not bypass restrictions by writing another way, committing, or installing dependencies.
 
-方案想清楚后，调用 exit_plan_mode 提交，参数 plan 是**给用户看的完整方案**（markdown）：
-要解决什么问题、现状与约束、打算改哪些文件各改什么、怎么验证。用户会拿它决定批准还是
-打回，所以别只写一串光秃秃的步骤标题 —— 把你探索到的背景写进去。同时给一个 slug
-（小写英文短名，3~5 个词，如 \`m5-entity-runtime\`），批准后计划文档会以它命名。
-提交后由用户决定；批准前你不会拿到写权限，所以不要提前说"我已经改好了"。`;
+When ready, call exit_plan_mode with a complete Markdown design: problem, current state and constraints, files and proposed changes, and verification. Include the background discovered during exploration, not just step headings. Supply a 3-5 word lowercase English slug, e.g. m5-entity-runtime, for the approved document filename.
+The user decides whether to approve. Write access is unavailable beforehand; do not claim changes are already made.`;
 }
 
 // =============================================================================
@@ -192,48 +187,46 @@ bash 里的写操作（重定向、rm / mv / sed -i / git commit / npm install �
  * 路线根本不该执行。
  */
 export function buildDocWriteContext(docPath: string, plan: string, summary?: string): string {
-	const summaryLine = typeof summary === "string" && summary.trim() !== "" ? summary.trim() : "（未提供总结）";
+	const summaryLine = typeof summary === "string" && summary.trim() !== "" ? summary.trim() : "(no summary provided)";
 	return `[WRITE PLAN DOC]
 
-用户批准了这个方案，并要求先把它落成一份计划文档。
+The user approved this design and requested a plan document first.
 
-**目标文件（就用这个路径，不要另选）**：\`${docPath}\`
-用 write 工具写它。这是本阶段唯一允许写入的文件 —— 其余仍是只读阶段：edit 不可用，
-bash 里的写操作（重定向、rm / mv / sed -i / git commit / npm install 等）照旧会被拦下。
-**不要开始改代码**，尤其不要以为「写了文档就等于开始实施」。
+**Target file (use this exact path)**: \`${docPath}\`
+Use the write tool. This is the only writable file in this phase. Everything else remains read-only: edit is unavailable and Bash writes are blocked.
+**Do not start changing code.** Writing the plan does not start implementation.
 
-方案总结：${summaryLine}
+Design summary: ${summaryLine}
 
-你提交的方案全文（整理成文档，不要压缩掉背景与取舍）：
+Full submitted design (format as a document; retain background and tradeoffs):
 
 ${plan}
 
-文档的读者是**零上下文的执行者**（可能是一个新会话，也可能是别人），所以结构大致是：
+Write for an implementer with **no prior context** (another session or person). Suggested structure:
 
 \`\`\`markdown
-# <方案标题>
+# <Plan title>
 
-## 总结
-<一段话说清楚要解决什么问题、怎么解决>
+## Summary
+<Problem and solution in one paragraph>
 
-## 背景
-<探索期查到的现状：相关文件现在怎么工作、为什么需要改、有哪些约束或坑>
+## Background
+<Current behavior, reasons for changes, constraints and pitfalls>
 
-## 涉及文件
-<逐个列出要改/要建的文件，各一句说明它负责什么>
+## Files
+<Files to change/create and their responsibilities>
 
-## 实施步骤
-<按顺序写清楚每一步做什么：改哪个函数、加什么字段、边界怎么处理>
+## Implementation steps
+<Ordered changes: functions, fields, edge cases>
 
-## 验证
-<怎么确认做完了：测试命令、期望看到什么、手工验证步骤>
+## Verification
+<Test commands, expected results, manual checks>
 
-## 风险与未决
-<已知取舍、没定的点、可能踩的坑；没有就写「无」>
+## Risks and open questions
+<Tradeoffs, unresolved points, pitfalls; None if absent>
 \`\`\`
 
-写完这一次 write 就结束 —— **不需要再调 exit_plan_mode 或任何别的工具**，扩展看到文件
-写出来会自动收尾并把下一步指令交给你。`;
+Stop after this write. **Do not call exit_plan_mode or other tools again.** The extension detects the saved document, finishes this phase, and provides the next instructions.`;
 }
 
 // =============================================================================
@@ -255,18 +248,16 @@ ${plan}
  */
 export function buildDocWrittenMessage(docMode: PlanDocMode, docPath: string): string {
 	if (docMode === "doc-only") {
-		return `计划文档已写好：\`${docPath}\`
+		return `Plan document saved: \`${docPath}\`
 
-用户选的是**只写文档、不实施**。写权限虽然已经恢复，但**现在就停下来**：把文档路径报告
-给用户，不要开始改任何代码、不要建任务清单、不要继续往下做。要实施的话用户会自己说。`;
+The user selected **document only, no implementation**. Although write access is restored, **stop now**: report the document path. Do not change code, create a task list, or continue. Wait for the user to request implementation.`;
 	}
-	return `计划文档已写好：\`${docPath}\`
+	return `Plan document saved: \`${docPath}\`
 
-用户已批准，写权限恢复。现在按这份文档实施：
-- 文档是这次规划的权威依据，需要回查背景、取舍理由或验证方式时读它（它不受上下文压缩影响）
-- 要不要建任务清单（\`task_set\`）由你自己判断：多步骤、跨文件、需要让用户看到进度时建，
-  一两步就能做完的事不必建
-- 做完按文档的「验证」一节确认，然后报告结果`;
+The user approved implementation; write access is restored. Follow this document:
+- It is the authoritative plan. Read it for background, tradeoffs, and verification; it survives context compaction.
+- Use task_set when useful for multi-step, cross-file work or progress visibility; omit it for one or two simple actions.
+- Perform the documented verification and report results.`;
 }
 
 /**
@@ -276,6 +267,5 @@ export function buildDocWrittenMessage(docMode: PlanDocMode, docPath: string): s
  * 而是「用户有意见，按意见改」。
  */
 export function buildRejectedMessage(): string {
-	return `用户没有批准这个计划，仍在 plan mode（只读）。请根据用户的下一条反馈调整方案；
-改好后再调用 exit_plan_mode 提交。`;
+	return `The user did not approve the plan. Remain in plan mode (read-only). Revise it based on the user's next feedback, then resubmit with exit_plan_mode.`;
 }

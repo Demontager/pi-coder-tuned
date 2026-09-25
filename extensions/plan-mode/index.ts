@@ -100,9 +100,9 @@ const EXIT_TOOL = "exit_plan_mode";
 const ENTRY_TYPE = "plan-mode";
 
 /** 审批对话框的三个选项（顺序即默认选中顺序：第一项是推荐路线）。 */
-const CHOICE_EXECUTE = "写计划文档并实施";
-const CHOICE_DOC_ONLY = "只写计划文档";
-const CHOICE_REJECT = "打回";
+const CHOICE_EXECUTE = "Write plan and implement";
+const CHOICE_DOC_ONLY = "Write plan only";
+const CHOICE_REJECT = "Request changes";
 
 /**
  * 同意弹框的两个选项（第一项是默认选中项 = 接受模型的请求）。
@@ -113,8 +113,8 @@ const CHOICE_REJECT = "打回";
  * CC 才敢把判据写松（还留了 “err on the side of planning”）—— 误判的代价被弹框吸收了。
  * 没有这道弹框时，判据一松就直接变成打扰（实测 15.5% 的用户指令进了 plan）。
  */
-const CONSENT_PLAN = "进 plan mode（只读探索）";
-const CONSENT_IMPL = "直接实施";
+const CONSENT_PLAN = "Enter plan mode (read-only exploration)";
+const CONSENT_IMPL = "Implement directly";
 
 /**
  * `enter_plan_mode` 的工具描述 = 全部路由判据。
@@ -124,33 +124,28 @@ const CONSENT_IMPL = "直接实施";
  * 这样判据在模型决定要不要调这个工具的那一刻正好在眼前，而且不会与 AGENTS.md 漂移。
  * 结构照 CC：什么时候用（7 条）/ 什么时候不用（4 条豁免）/ 例子 / 注意。
  */
-const ENTER_TOOL_DESCRIPTION = `进入 plan mode（只读探索）：先把方案讲清楚、等用户批准，再动手实施。
+const ENTER_TOOL_DESCRIPTION = `Enter plan mode (read-only exploration): explain the design, wait for approval, then implement.
 
-## 什么时候用
-非简单的实施类任务，命中任意一条就该用：
-1. 新功能：要加一块有意义的新能力（放哪、点了之后发生什么、错误怎么处理都还没定）
-2. 多种可行方案：同一目标有几条明显不同的路（缓存用 Redis / 内存 / 文件；实时用 WS / SSE / 轮询）
-3. 改动既有行为或结构：更新登录流程、重构某个组件——目标形态未定
-4. 架构取舍：要在模式或技术之间选一个
-5. 多文件：预计要动 2-3 个以上文件
-6. 需求不清：得先探索才知道范围（「让它更快」要先 profile；「修 checkout 的 bug」要先定位根因）
-7. 用户偏好决定走向：实现可以合理地分成几种——如果你正打算用 ask_user_question 问方案，就改用这个工具（先探索，再带着上下文给选项）
+## When to use
+Use for nontrivial implementation work involving any of:
+1. Meaningful new features whose placement, behavior, or error handling is undecided.
+2. Multiple substantially different approaches (Redis/memory/file caching; WS/SSE/polling).
+3. Changes to existing behavior or structure with an undecided target design.
+4. Architectural or technology tradeoffs.
+5. Changes across more than 2-3 files.
+6. Unclear requirements requiring exploration, profiling, or root-cause analysis.
+7. User preferences determining the approach: enter plan mode first, explore, then ask informed questions.
 
-## 什么时候不用
-只有这几类跳过：
-- 一两行的小修（错别字、明显的 bug、小调整）
-- 需求明确的单个函数
-- 用户已经给了具体、详细的指令（照做即可，方案没有分叉）
-- 纯调研 / 探索 / 审阅（「哪些文件负责路由」、「对比 A 和 B 写份报告」、「审一下这个文档」——产出是结论，不是改动）
+## When not to use
+Skip for small one/two-line fixes, a well-specified single function, detailed unambiguous user instructions, or pure research/exploration/review producing conclusions rather than changes.
 
-## 例子
-该用：「给应用加用户认证」（session vs JWT、token 存哪、中间件结构都要定）／「优化数据库查询」（多种路子、要先 profile）／「实现暗色主题」（主题系统的架构决定，波及很多组件）／「给用户资料页加个删除按钮」（看着简单，其实要定位置、确认框、API 调用、错误处理、状态更新）
-不该用：「修 README 里的错别字」／「给这个函数加个 console.log 调试」／「哪些文件负责路由」
+## Examples
+Use for authentication, database optimization, dark themes, or adding a profile deletion button that needs UI/API/error-handling decisions. Skip for README typos, a console.log, or identifying routing files.
 
-## 注意
-- 这个工具需要用户同意：调用后会弹框，用户可以选「直接实施」否掉它。所以拿不准就调——误判的代价是用户按一次键，不是白做一轮。
-- 用户自己按 shift+tab / /plan / --plan 进入时不弹框（那已经是用户的决定）。
-- 进 plan 前还没 brainstorm 过的话，先 read brainstorming 技能的 SKILL.md（路径在系统提示词的 <available_skills> 清单里）并按它走：逐条澄清需求、给 2-3 个方案带取舍。plan mode 里它的文件布局不适用：不写 docs/superpowers/specs/、不 commit（一切写操作都被拦），设计产物由 exit_plan_mode 提交后统一落 .pi/plans/；技能里的「逐条提问」在这里就是 ask_user_question 工具。`;
+## Notes
+- Requires user consent. The dialog allows Implement directly instead.
+- User-initiated shift+tab, /plan, or --plan needs no further consent.
+- If brainstorming has not happened, read the brainstorming skill's SKILL.md from the available-skills list and follow it: clarify requirements and present 2-3 options with tradeoffs. In plan mode, do not write docs/superpowers/specs/ or commit: writes are blocked. exit_plan_mode submits the design and saves the approved plan under .pi/plans/. Use ask_user_question for clarification.`;
 
 interface PersistedState {
 	phase: PlanState["phase"];
@@ -198,7 +193,7 @@ export default function planMode(pi: ExtensionAPI) {
 	let inputUnsubscribe: (() => void) | null = null;
 
 	pi.registerFlag("plan", {
-		description: "启动即进入 plan mode（只读探索）",
+		description: "Start in plan mode (read-only exploration)",
 		type: "boolean",
 		default: false,
 	});
@@ -287,8 +282,8 @@ export default function planMode(pi: ExtensionAPI) {
 		if (ctx?.hasUI) {
 			ctx.ui.notify(
 				reason === "model"
-					? "模型判断这个任务需要先规划，已进入 plan mode（只读）。shift+tab 可随时退出。"
-					: "已进入 plan mode：只读探索，模型会先给方案。shift+tab 切换。",
+					? "Entered plan mode (read-only) because this task needs planning. Press shift+tab to exit anytime."
+					: "Entered plan mode: read-only exploration; the model will propose a design first. Toggle with shift+tab.",
 				"info",
 			);
 		}
@@ -300,7 +295,7 @@ export default function planMode(pi: ExtensionAPI) {
 		pi.setActiveTools(tools);
 		persist();
 		render(ctx);
-		if (notify && ctx?.hasUI) ctx.ui.notify("已退出 plan mode，写权限恢复。", "info");
+		if (notify && ctx?.hasUI) ctx.ui.notify("Exited plan mode; write access restored.", "info");
 	}
 
 	function toggle(ctx: ExtensionContext | undefined): void {
@@ -388,7 +383,7 @@ export default function planMode(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.registerCommand("plan", {
-		description: "切换 plan mode（只读探索 → 批准 → 写计划文档）",
+		description: "Toggle plan mode (read-only exploration → approval → write plan document)",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
 			toggle(ctx);
@@ -396,25 +391,25 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("plan-status", {
-		description: "显示 plan mode 状态",
+		description: "Show plan mode status",
 		handler: async (_args, ctx) => {
 			currentCtx = ctx;
 			if (state.phase === "bypass") {
-				ctx.ui.notify("plan mode: bypass（未启用）", "info");
+				ctx.ui.notify("plan mode: bypass (inactive)", "info");
 				return;
 			}
 			const lines: string[] = [];
 			if (state.docWriting) {
-				lines.push(`plan mode: plan（写文档子态）`);
-				lines.push(`目标文档：${state.pendingDocPath ?? "（路径丢失）"}`);
+				lines.push(`plan mode: plan (writing document)`);
+				lines.push(`Target document: ${state.pendingDocPath ?? "(path unavailable)"}`);
 			} else {
-				lines.push("plan mode: plan（只读探索）");
+				lines.push("plan mode: plan (read-only exploration)");
 			}
 			if (state.pending) {
 				const first = state.pending.split("\n").find((line) => line.trim() !== "") ?? "";
-				lines.push(`待批计划：${first.trim().slice(0, 60)}（共 ${state.pending.split("\n").length} 行）`);
+				lines.push(`Plan awaiting approval: ${first.trim().slice(0, 60)} (total: ${state.pending.split("\n").length} lines)`);
 			}
-			if (state.planSummary) lines.push(`总结：${state.planSummary}`);
+			if (state.planSummary) lines.push(`Summary: ${state.planSummary}`);
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
@@ -429,7 +424,7 @@ export default function planMode(pi: ExtensionAPI) {
 			label: "Enter Plan Mode",
 			description: ENTER_TOOL_DESCRIPTION,
 			parameters: Type.Object({
-				reason: Type.Optional(Type.String({ description: "为什么这个任务需要先规划（一句话）" })),
+				reason: Type.Optional(Type.String({ description: "Why this task needs planning first (one sentence)" })),
 			}),
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				currentCtx = ctx;
@@ -439,20 +434,23 @@ export default function planMode(pi: ExtensionAPI) {
 				// 也不弹 —— 保持既有 headless 行为。
 				if (ctx.hasUI && !CONSENT_DISABLED) {
 					const choice = await ctx.ui.select(
-						`模型请求进入 plan mode（只读探索）。${reason ? `\n\n它的理由：${reason}` : ""}\n\n` +
-							`${CONSENT_PLAN}：先只读探索、出方案，你批准后才动手\n` +
-							`${CONSENT_IMPL}：跳过规划，现在就按你的指令直接改`,
+						`The model requests plan mode (read-only exploration).${reason ? `
+
+Reason: ${reason}` : ""}\n\n` +
+							`${CONSENT_PLAN}: explore read-only and propose a design; implementation starts only after your approval
+` +
+							`${CONSENT_IMPL}: skip planning and implement your instructions now`,
 						[CONSENT_PLAN, CONSENT_IMPL],
 					);
 					// esc（undefined）当作否决，与 CC 的 “must consent” 一致 ——
 					// 「嫌烦想跳过」这条最常见路径只需一个键。
 					if (choice !== CONSENT_PLAN) {
-						ctx.ui.notify("已跳过 plan mode，直接实施。", "info");
+						ctx.ui.notify("Skipped plan mode; implementing directly.", "info");
 						return {
 							content: [
 								{
 									type: "text",
-									text: `用户选择直接实施，没有进入 plan mode。现在就按用户的指令动手，不要再调用 ${ENTER_TOOL}。`,
+									text: `The user chose direct implementation, without entering plan mode. Follow the user's instructions now; do not call again: ${ENTER_TOOL}。`,
 								},
 							],
 							details: { phase: state.phase, consented: false },
@@ -464,7 +462,8 @@ export default function planMode(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `已进入 plan mode（只读）。${reason ? `原因：${reason}。` : ""}\nedit / write 已停用，bash 里的写操作会被拦下。先读代码；需要用户拍板的选择用 ask_user_question 问；方案想清楚后调用 ${EXIT_TOOL} 提交。`,
+							text: `Entered plan mode (read-only). ${reason ? `Reason: ${reason}。` : ""}
+edit / write are disabled; Bash writes are blocked. Read the code first; use ask_user_question for decisions that need user input. When the design is ready, call ${EXIT_TOOL} to submit.`,
 						},
 					],
 					details: { phase: state.phase, consented: true },
@@ -478,23 +477,23 @@ export default function planMode(pi: ExtensionAPI) {
 		name: EXIT_TOOL,
 		label: "Submit Plan",
 		description:
-			"在 plan mode 里把方案提交给用户审批。调用前不要试图改动任何文件。提交后用户决定批准（进入执行）还是打回（继续规划）。",
+			"Submit the design for user approval in plan mode. Do not modify files before calling. The user can approve implementation or request further planning.",
 		parameters: Type.Object({
 			plan: Type.String({
 				description:
-					"给用户看的完整方案（markdown）：要解决什么问题、现状与约束、打算改哪些文件各改什么、怎么验证。不要只写一串步骤标题。",
+					"Complete user-facing design (Markdown): problem, current state and constraints, planned files and changes, and verification. Do not provide only step headings.",
 			}),
 			slug: Type.String({
 				description:
-					"计划文档的文件名短名：小写英文单词 + 数字 + 连字符，3~5 个词概括这次任务，例如 `m5-entity-runtime`、`plan-doc-english-slug`。不要用中文、空格或标点（会被清洗掉，纯中文会退化成 `plan`）。最终文档名是 `<日期>-<slug>.md`。",
+					"Plan filename slug: 3-5 lowercase English words, digits, and hyphens, e.g. m5-entity-runtime or plan-doc-english-slug. Avoid Chinese, spaces, and punctuation; they are stripped, with plan as fallback. Filename: <date>-<slug>.md.",
 			}),
-			summary: Type.Optional(Type.String({ description: "方案的一句话总结" })),
+			summary: Type.Optional(Type.String({ description: "One-sentence design summary" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			currentCtx = ctx;
 			if (state.phase !== "plan") {
 				return {
-					content: [{ type: "text", text: `现在不在 plan mode（当前：${state.phase}），不需要提交计划。` }],
+					content: [{ type: "text", text: `Not in plan mode (current: ${state.phase}); no plan submission is needed.` }],
 					details: { accepted: false, phase: state.phase },
 				};
 			}
@@ -503,7 +502,7 @@ export default function planMode(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `现在是写文档子态：请用 write 工具把计划文档写到 \`${state.pendingDocPath}\`。扩展看到这次 write 成功会自动收尾，不需要再调用 ${EXIT_TOOL}。`,
+							text: `Currently writing the plan document: use the write tool to save it to \`${state.pendingDocPath}\`. The extension finishes this phase after a successful write; do not call again: ${EXIT_TOOL}。`,
 						},
 					],
 					details: { accepted: false, phase: state.phase, docWriting: true },
@@ -513,7 +512,7 @@ export default function planMode(pi: ExtensionAPI) {
 			const plan = typeof params.plan === "string" ? params.plan.trim() : "";
 			if (plan === "") {
 				return {
-					content: [{ type: "text", text: "计划是空的。请写出完整方案（要解决什么、改哪些文件、怎么验证）再提交。" }],
+					content: [{ type: "text", text: "The plan is empty. Submit a complete design: problem, files to change, and verification." }],
 					details: { accepted: false, phase: state.phase },
 				};
 			}
@@ -539,7 +538,9 @@ export default function planMode(pi: ExtensionAPI) {
 			// 非交互运行（`pi -p`）没有对话框可弹：自动按推荐路线（写文档并实施）走，
 			// 比死锁好 —— 模型已经规划完，卡在这里只会让整个运行白跑。
 			const choice = ctx.hasUI
-				? await ctx.ui.select(`批准这个计划？\n\n${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
+				? await ctx.ui.select(`Approve this plan?
+
+${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
 				: CHOICE_EXECUTE;
 
 			if (choice === undefined || choice === CHOICE_REJECT) {
@@ -566,7 +567,7 @@ export default function planMode(pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `用户批准了计划，选择「${choice}」。请用 write 工具把计划文档写到 \`${docPath}\` —— 这是本阶段唯一允许写入的文件。扩展看到这次 write 成功会自动收尾并把下一步指令交给你；不需要再调用 ${EXIT_TOOL}。`,
+						text: `The user approved the plan and selected '${choice}'. Use the write tool to save the plan document to \`${docPath}\` — the only file writable in this phase. After a successful write, the extension finishes this phase and provides the next instructions; do not call again: ${EXIT_TOOL}。`,
 					},
 				],
 				details: { accepted: true, docMode, docPath },
@@ -616,14 +617,14 @@ export default function planMode(pi: ExtensionAPI) {
 			if (!state.docWriting) {
 				return {
 					block: true,
-					reason: `plan 阶段不能写文件。先把方案写清楚并用 ${EXIT_TOOL} 提交，等用户批准。`,
+					reason: `Files cannot be written during planning. Explain the design and submit it using ${EXIT_TOOL}, then wait for user approval.`,
 				};
 			}
 			const target = typeof event.input.path === "string" ? event.input.path : "";
 			if (resolve(ctx.cwd, target) !== state.pendingDocPath) {
 				return {
 					block: true,
-					reason: `写文档子态只允许写计划文档本身：目标是 \`${resolve(ctx.cwd, target)}\`，而计划文档的路径是 \`${state.pendingDocPath}\`。请用 write 写到后者；其余文件要等扩展收尾、写权限恢复之后才能动。`,
+					reason: `Only the plan document may be written in this phase: requested target is \`${resolve(ctx.cwd, target)}\`, but the plan document path is \`${state.pendingDocPath}\`. Write to the latter; wait for this phase to finish and write access to be restored before changing other files.`,
 				};
 			}
 			return undefined;
@@ -635,7 +636,8 @@ export default function planMode(pi: ExtensionAPI) {
 		if (verdict.ok) return undefined;
 		return {
 			block: true,
-			reason: `${verdict.reason}\n现在是 plan mode（只读阶段）：先把方案写清楚并用 ${EXIT_TOOL} 提交，等用户批准后写权限会恢复。`,
+			reason: `${verdict.reason}
+Currently in plan mode (read-only): explain the design and submit it using ${EXIT_TOOL}; write access returns after user approval.`,
 		};
 	});
 
@@ -662,7 +664,7 @@ export default function planMode(pi: ExtensionAPI) {
 		pi.setActiveTools(tools);
 		persist();
 		render(ctx);
-		if (ctx.hasUI) ctx.ui.notify(`计划文档已写好：${outcome.docPath}`, "info");
+		if (ctx.hasUI) ctx.ui.notify(`Plan document saved: ${outcome.docPath}`, "info");
 		return {
 			content: [{ type: "text", text: buildDocWrittenMessage(outcome.docMode, outcome.docPath) }],
 		};
@@ -707,7 +709,7 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 		// 已经绑过（无论是谁绑的）→ 静默。只有「配置坏了、我们不敢动」才需要提醒。
 		if (outcome.needsAttention === true && ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab，但无法自动改绑（${outcome.reason}）。请手动把 app.thinking.cycle 改绑到 ${THINKING_FALLBACK_KEY}（${path}）。`,
+				`Plan mode uses shift+tab, but automatic remapping failed (${outcome.reason}). Manually remap app.thinking.cycle to ${THINKING_FALLBACK_KEY}（${path}）。`,
 				"warning",
 			);
 		}
@@ -719,14 +721,14 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 		writeFileSync(path, value, "utf8");
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab；思考等级循环已改绑到 ${THINKING_FALLBACK_KEY}（${path}，/reload 后生效）`,
+				`Plan mode uses shift+tab; thinking-level cycling was remapped to ${THINKING_FALLBACK_KEY}（${path}; takes effect after /reload)`,
 				"info",
 			);
 		}
 	} catch {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`plan mode 占用了 shift+tab。请在 ${path} 里把 app.thinking.cycle 改绑到 ${THINKING_FALLBACK_KEY}。`,
+				`Plan mode uses shift+tab. In ${path}, remap app.thinking.cycle to ${THINKING_FALLBACK_KEY}。`,
 				"warning",
 			);
 		}

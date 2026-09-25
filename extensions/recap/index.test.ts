@@ -87,6 +87,41 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 const piEntry = await findPiLibraryEntry();
 const skip = piEntry === undefined ? "找不到本机 pi 的库入口（装过 pi 才有）" : false;
 
+test("local /recap and idle recap display an excerpt with zero auth or inference calls", { skip, timeout: 15000 }, async () => {
+	const workspace = makeWorkspace();
+	let extension: any;
+	try {
+		const pi = await import(pathToFileURL(piEntry as string).href);
+		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, createTestBus());
+		assert.deepEqual(loaded.errors, []);
+		extension = loaded.extensions[0];
+		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
+		const ctx: any = createContext(recorder, [
+			{ type: "message", message: { role: "user", content: "Fix fhash" } },
+			{ type: "message", message: { role: "assistant", content: "Fixed fhash; tests passed." } },
+		]);
+		ctx.model = { provider: "llama-local", id: "test", baseUrl: "http://127.0.0.1:8080/v1" };
+		let requests = 0;
+		ctx.modelRegistry = {
+			getApiKeyAndHeaders() { requests++; throw new Error("No local recap auth allowed"); },
+			complete() { requests++; throw new Error("No local recap inference allowed"); },
+		};
+		await extension.commands.get("recap").handler("", ctx);
+		assert.deepEqual(recorder.notifies, ["✦ Recap: Fixed fhash; tests passed."]);
+		assert.equal(recorder.widgets.length, 1);
+		await extension.commands.get("recap").handler("", ctx);
+		assert.equal(recorder.widgets.length, 1, "manual recap is idempotent");
+		await extension.handlers.get("input")[0]({ source: "interactive" }, ctx);
+		await extension.handlers.get("agent_settled")[0]({}, ctx);
+		await new Promise(resolve => setTimeout(resolve, 11500));
+		assert.equal(recorder.widgets.length, 2, "idle recap displays without inference");
+		assert.equal(requests, 0);
+	} finally {
+		await extension?.handlers.get("session_shutdown")?.[0]?.({}, {});
+		workspace.cleanup();
+	}
+});
+
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
 interface WidgetComponent {

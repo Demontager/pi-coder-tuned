@@ -35,6 +35,8 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bash-command-collapse.ts");
+// These snapshots explicitly assert 24-bit ANSI colors, independent of the test terminal.
+process.env.COLORTERM = "truecolor";
 /** 树形竖线行（`│ `）：命令续行、截断提示、以及 `└ ` 之上的所有行。 */
 const PIPE = "\u2502";
 /** 状态圆点 `•`（U+2022）：只挂在命令首行行首。 */
@@ -952,7 +954,7 @@ test("沙箱：越界删除被 OS 拒绝，文件仍在，非交互环境不升�
 		assert.equal(denied.ok, false, "越界删除必须失败（沙箱没生效？）");
 		assert.match(denied.text, /Operation not permitted|EPERM/, `应当是沙箱拒绝：${denied.text}`);
 		assert.match(denied.text, /\[沙箱\]/, "非交互环境要带上沙箱说明");
-		assert.match(denied.text, /删除可删边界之外/, "说明文案要点名是删除而不是写入");
+		assert.match(denied.text, /删除outside the boundary/, "说明文案要点名是删除而不是写入");
 		assert.equal(fs.existsSync(probe), true, "越界文件必须仍在");
 		assert.equal(fs.readFileSync(probe, "utf8"), "victim\n", "内容也不能变");
 	} finally {
@@ -1033,7 +1035,7 @@ test("两层授权：普通目录首次弹框→记住→真删掉→同目录�
 	fs.writeFileSync(second, "b\n");
 	try {
 		// 第一次：弹框，选 `Allow for this session（并记住该目录）`
-		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session (and remember the directory)"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false, "文件真的被删了（不是只返回成功）");
@@ -1041,10 +1043,10 @@ test("两层授权：普通目录首次弹框→记住→真删掉→同目录�
 		assert.ok(ctx1.selects[0]!.title.includes("边界外"), `弹框标题：${ctx1.selects[0]!.title}`);
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
-			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			["Deny", "Allow for this session (and remember the directory)", "Allow once"],
 			"普通目录的三选项",
 		);
-		assert.ok(ctx1.selects[0]!.title.includes("危险") === false, "普通目录不该走危险弹框");
+		assert.ok(ctx1.selects[0]!.title.includes("high-risk") === false, "普通目录不该走危险弹框");
 
 		// 落盘：白名单里应当有这个目录（不是那个文件）
 		const onDisk = JSON.parse(fs.readFileSync(fx.allowlistFile, "utf8"));
@@ -1107,7 +1109,7 @@ test("两层授权：危险目录每次都弹，选 `Allow for this session` 后
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false);
 		assert.equal(ctx1.selects.length, 1);
-		assert.ok(ctx1.selects[0]!.title.includes("危险目录"), `危险弹框标题：${ctx1.selects[0]!.title}`);
+		assert.ok(ctx1.selects[0]!.title.includes("high-risk directories"), `危险弹框标题：${ctx1.selects[0]!.title}`);
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
 			["Deny", "Allow once", "Allow for this session"],
@@ -1183,7 +1185,7 @@ test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍�
 	try {
 		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
 		assert.equal(r.ok, false, "headless 下危险目录必须拒");
-		assert.match(r.text, /非交互环境/, `理由要点明环境：${r.text}`);
+		assert.match(r.text, /non-interactive/, `理由要点明环境：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "a\n", "内容也不能变");
 	} finally {
@@ -1206,7 +1208,7 @@ test("永不删除：删 ~/.gnupg 下的探针不弹框、直接拒，文件仍�
 		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
 		assert.equal(r.ok, false, "永不删除必须失败");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /protected/, `理由要点名档位：${r.text}`);
 		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
 		assert.equal(ctx.confirms.length, 0);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
@@ -1227,7 +1229,7 @@ test("永不删除：headless 下同样拒，且理由点名档位", { skip: san
 	try {
 		const r = await runCommand(fx.definition, `rm -f ${JSON.stringify(target)}`, fx.projectDir);
 		assert.equal(r.ok, false, "headless 下永不删除照样拒");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /protected/, `理由要点名档位：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
@@ -1248,7 +1250,7 @@ test("永不删除：嵌套条目 ~/.config/gh 下的探针同样拦死（2026-0
 		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
 		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
 		assert.equal(r.ok, false, "嵌套的永不删除子树必须失败");
-		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.match(r.text, /protected/, `理由要点名档位：${r.text}`);
 		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
 		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
@@ -1269,14 +1271,14 @@ test("工具状态目录：删 ~/.pi/agent 下的探针弹三选项框，记住�
 	fs.writeFileSync(first, "a\n");
 	fs.writeFileSync(second, "b\n");
 	try {
-		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session (and remember the directory)"]);
 		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
 		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
 		assert.equal(fs.existsSync(first), false, "文件真的被删了");
 		assert.equal(ctx1.selects.length, 1, "应当弹一次框（不再是永不删除的直接拒）");
 		assert.deepEqual(
 			ctx1.selects[0]!.options,
-			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			["Deny", "Allow for this session (and remember the directory)", "Allow once"],
 			"普通目录的三选项",
 		);
 		// 落盘的是目标的父目录（memoryScopeFor 口径：文件记父目录）—— 临时白名单文件，不碰用户真实的那份
@@ -1455,4 +1457,3 @@ test("两层授权：Deny 后文件仍在、内容不变，且什么都没落盘
 		fx.restore();
 	}
 });
-

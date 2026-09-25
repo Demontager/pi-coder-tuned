@@ -336,6 +336,6 @@ test("renderGateMessage: 带文件清单与次数", () => {
 	});
 	assert.match(text, /src\/a\.js/);
 	assert.match(text, /\(apply_patch\)/);
-	assert.match(text, /第 1\/2 次/);
-	assert.match(text, /没有跑过任何命令/);
+	assert.match(text, /intervention 1\/2/);
+	assert.match(text, /no command was run/);
 });

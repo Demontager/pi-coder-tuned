@@ -33,10 +33,10 @@ describe("注入上下文", () => {
 
 	it("plan 阶段要求提交的是一份完整方案，不是一串步骤标题", () => {
 		const context = buildPlanModeContext("/repo");
-		assert.match(context, /plan 是\*\*给用户看的完整方案\*\*/, "参数名与形状都要说清楚");
-		assert.match(context, /markdown/);
-		assert.match(context, /怎么验证/, "验证方式是方案的一部分");
-		assert.match(context, /别只写一串光秃秃的步骤标题/);
+		assert.match(context, /complete Markdown design/, "参数名与形状都要说清楚");
+		assert.match(context, /markdown/i);
+		assert.match(context, /verification/, "验证方式是方案的一部分");
+		assert.match(context, /not just step headings/);
 	});
 });
 
@@ -51,40 +51,40 @@ describe("buildDocWriteContext", () => {
 	it("钉死目标路径，并说明这是唯一允许写入的文件", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN, "改两个文件");
 		assert.match(context, /\[WRITE PLAN DOC\]/);
-		assert.match(context, /不要另选/);
+		assert.match(context, /use this exact path/);
 		assert.ok(context.includes(DOC_PATH), "路径必须原样出现在指令里");
-		assert.match(context, /唯一允许写入的文件/);
-		assert.match(context, /用 write 工具/, "点名工具，模型才不会去试 bash 重定向");
+		assert.match(context, /only writable file/);
+		assert.match(context, /Use the write tool/, "点名工具，模型才不会去试 bash 重定向");
 	});
 
 	it("带上计划全文与总结（模型照着整理，不是重新想一遍）", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN, "改两个文件");
 		assert.ok(context.includes(PLAN), "计划全文要原样带进去");
-		assert.match(context, /方案总结：改两个文件/);
+		assert.match(context, /Design summary: 改两个文件/);
 	});
 
 	it("没有总结时给占位文案，不留一个空冒号", () => {
-		assert.match(buildDocWriteContext(DOC_PATH, PLAN), /方案总结：（未提供总结）/);
-		assert.match(buildDocWriteContext(DOC_PATH, PLAN, "   "), /方案总结：（未提供总结）/);
+		assert.match(buildDocWriteContext(DOC_PATH, PLAN), /Design summary: \(no summary provided\)/);
+		assert.match(buildDocWriteContext(DOC_PATH, PLAN, "   "), /Design summary: \(no summary provided\)/);
 	});
 
 	it("明确边界没变：仍是只读阶段，不许开始改代码", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
-		assert.match(context, /不要开始改代码/);
-		assert.match(context, /edit 不可用/);
-		assert.match(context, /bash 里的写操作/, "bash 闸仍在，要说清楚");
+		assert.match(context, /Do not start changing code/);
+		assert.match(context, /edit is unavailable/);
+		assert.match(context, /Bash writes/, "bash 闸仍在，要说清楚");
 	});
 
 	it("写完不用再调任何工具（收尾由 tool_result 钩子自动做）", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
-		assert.match(context, /不需要再调 exit_plan_mode/, "少一次模型可能忘记的调用");
-		assert.match(context, /自动收尾/);
+		assert.match(context, /Do not call exit_plan_mode/, "少一次模型可能忘记的调用");
+		assert.match(context, /finishes this phase/);
 	});
 
 	it("给出文档结构模板，且要求读者是零上下文的执行者", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
-		assert.match(context, /零上下文的执行者/);
-		for (const section of ["## 总结", "## 背景", "## 涉及文件", "## 实施步骤", "## 验证", "## 风险与未决"]) {
+		assert.match(context, /no prior context/);
+		for (const section of ["## Summary", "## Background", "## Files", "## Implementation steps", "## Verification", "## Risks and open questions"]) {
 			assert.ok(context.includes(section), `模板里应有 ${section}`);
 		}
 	});
@@ -98,21 +98,21 @@ describe("buildDocWrittenMessage", () => {
 	it("execute-with-doc：报路径、让模型按文档实施、建不建清单由它自己判断", () => {
 		const message = buildDocWrittenMessage("execute-with-doc", DOC_PATH);
 		assert.ok(message.includes(DOC_PATH));
-		assert.match(message, /写权限恢复/);
-		assert.match(message, /按这份文档实施/);
+		assert.match(message, /write access is restored/);
+		assert.match(message, /Follow this document/);
 		assert.match(message, /task_set/, "要提到这个工具，模型才知道进度归它自己");
-		assert.match(message, /由你自己判断/, "不强制建清单 —— 这是本次改动的核心");
-		assert.match(message, /不受上下文压缩影响/, "文档存在的理由");
+		assert.match(message, /when useful/, "不强制建清单 —— 这是本次改动的核心");
+		assert.match(message, /survives context compaction/, "文档存在的理由");
 	});
 
 	it("doc-only：报路径并硬止住，不许开始改代码", () => {
 		const message = buildDocWrittenMessage("doc-only", DOC_PATH);
 		assert.ok(message.includes(DOC_PATH));
-		assert.match(message, /只写文档、不实施/);
-		assert.match(message, /现在就停下来/, "写权限已恢复，措辞必须硬");
-		assert.match(message, /不要开始改任何代码/);
-		assert.match(message, /不要建任务清单/);
-		assert.ok(!message.includes("按这份文档实施"), "两条路线的指令不能串");
+		assert.match(message, /document only, no implementation/);
+		assert.match(message, /stop now/, "写权限已恢复，措辞必须硬");
+		assert.match(message, /Do not change code/);
+		assert.match(message, /create a task list/);
+		assert.ok(!message.includes("Follow this document"), "两条路线的指令不能串");
 	});
 
 	it("两条路线都把文档路径报出来（那是这次规划唯一的持久产物）", () => {
@@ -125,8 +125,8 @@ describe("buildDocWrittenMessage", () => {
 describe("buildRejectedMessage", () => {
 	it("说明仍在 plan mode（只读），要按用户反馈改后重新提交", () => {
 		const message = buildRejectedMessage();
-		assert.match(message, /没有批准/);
-		assert.match(message, /仍在 plan mode（只读）/);
+		assert.match(message, /did not approve/);
+		assert.match(message, /Remain in plan mode \(read-only\)/);
 		assert.match(message, /exit_plan_mode/);
 	});
 });
@@ -204,7 +204,7 @@ describe("truncatePlanForDialog", () => {
 
 		const over = truncatePlanForDialog(makePlan(budget + 1), metrics, wrapByChars);
 		// 提示行自己占 1 行，所以能完整留下的只有 budget-1 行，藏起来的是 2 行。
-		assert.match(over, /还有 2 行/, "多一行就该截断并点名剩下几行");
+		assert.match(over, /plus 2 lines/, "多一行就该截断并点名剩下几行");
 		assert.equal(dialogHeight(over, contentWidth), budget, "截断后恰好占满预算");
 	});
 
@@ -212,7 +212,7 @@ describe("truncatePlanForDialog", () => {
 		const metrics = { rows: 30, columns: 100 };
 		const result = truncatePlanForDialog(makePlan(40), metrics, wrapByChars);
 		const lines = result.split("\n");
-		assert.match(lines[lines.length - 1]!, /^… 还有 \d+ 行（上翻终端可看完整计划）$/);
+		assert.match(lines[lines.length - 1]!, /^… plus \d+ lines \(scroll up to read the full plan\)$/);
 		const { budget } = dialogPlanBudget(metrics);
 		assert.ok(lines.length <= budget, `${lines.length} 行应 ≤ 预算 ${budget}`);
 	});
@@ -224,7 +224,7 @@ describe("truncatePlanForDialog", () => {
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
 		const result = truncatePlanForDialog(makePlan(20, long), metrics, wrapByChars);
 		assert.ok(dialogHeight(result, contentWidth) <= budget, `截断后总高应 ≤ 预算 ${budget}`);
-		assert.match(result, /还有 \d+ 行/);
+		assert.match(result, /plus \d+ lines/);
 	});
 
 	it("CJK 文案按注入的折行器算高度（生产注入 pi-tui 的 wrapTextWithAnsi，逐字断行）", () => {
@@ -241,7 +241,7 @@ describe("truncatePlanForDialog", () => {
 		const result = truncatePlanForDialog(makePlan(8), metrics, wrapByChars);
 		assert.ok(budget <= 1, `这个终端的预算应是 1，实际 ${budget}`);
 		assert.equal(result.split("\n").length, 1, "只有一行提示");
-		assert.match(result, /共 8 行/);
+		assert.match(result, /Plan has 8 lines/);
 	});
 
 	it("预算为 0 或负数（终端矮到放不下对话框）也不崩、不超预算", () => {
