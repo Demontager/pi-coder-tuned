@@ -155,8 +155,11 @@ function formatContextSegment(theme: StatuslineTheme, source: StatuslineSource):
 	const percentText = percent === null ? "?" : `${percent.toFixed(1)}%`;
 	const tokens = usage?.tokens;
 	const capacity = usage?.contextWindow ?? readModel(source)?.contextWindow;
-	const count = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) && value >= 0
-		? Math.round(value).toLocaleString("en-US") : "?";
+	const count = (value: number | null | undefined) => {
+		if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "?";
+		if (value >= 1000) return `${Math.round(value / 1000)}k`;
+		return Math.round(value).toString();
+	};
 	const counts = tokens != null || capacity != null ? `${count(tokens)}/${count(capacity)} ` : "";
 	return `${dim(theme, "Ctx")} ${dim(theme, counts)}${theme.fg(contextColor(percent), percentText)}`;
 }

@@ -193,9 +193,11 @@ describe("formatMainLine", () => {
 
 	it("shows exact used/total token counts beside the percentage without no-git placeholders", () => {
 		const source = { ...sourceOf(2.9), getContextUsage: () => ({ tokens: 7602, contextWindow: 262144, percent: 2.9 }) };
-		assert.equal(formatMainLine(plain, source, gitOf(null), stateOf()), "⚡️ qwen3.8-flash/xhigh | Ctx 7,602/262,144 2.9%");
-		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: null, contextWindow: 262144, percent: null }) }, gitOf(null), stateOf()), /Ctx \?\/262,144 \?$/);
-		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 0, contextWindow: 262144, percent: 0 }) }, gitOf(null), stateOf()), /Ctx 0\/262,144 0\.0%$/);
+		assert.equal(formatMainLine(plain, source, gitOf(null), stateOf()), "⚡️ qwen3.8-flash/xhigh | Ctx 8k/262k 2.9%");
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: null, contextWindow: 262144, percent: null }) }, gitOf(null), stateOf()), /Ctx \?\/262k \?$/);
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 0, contextWindow: 262144, percent: 0 }) }, gitOf(null), stateOf()), /Ctx 0\/262k 0\.0%$/);
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 7490, contextWindow: 7490, percent: 100 }) }, gitOf(null), stateOf()), /Ctx 7k\/7k 100\.0%$/);
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 7500, contextWindow: 7500, percent: 100 }) }, gitOf(null), stateOf()), /Ctx 8k\/8k 100\.0%$/);
 	});
 
 	it("shifts the context colour at 70% and 90%", () => {

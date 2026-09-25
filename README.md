@@ -107,6 +107,9 @@ footer truncation remain in place.
 - Destructive-action guard, sandbox boundary, verification gate and `/goal`.
 - Three upstream themes, retaining their original names for compatibility.
 
+The package `config/` and `themes/` directories also contain short English
+README files so GitHub's file browser explains their purpose directly.
+
 Optional companions are installed separately:
 
 ```bash
