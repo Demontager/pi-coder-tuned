@@ -3,6 +3,8 @@
 **English-first Pi extensions, tuned for local models.**
 
 <img width="1490" height="911" alt="sample_window" src="https://github.com/user-attachments/assets/976c2eb1-d0c7-40c6-ad5f-7a7df7a5edc1" />
+
+Live Demo
 [pi-coder-tuned_live.webm](https://github.com/user-attachments/assets/3f17ee89-7a3b-4f03-95f3-e336234d0dfe)
 
 
