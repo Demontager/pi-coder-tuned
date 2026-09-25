@@ -32,10 +32,13 @@
  *
  * 边界外的删除按**目标路径**分三档：
  *
- * - **永不删除**（`NEVER_DELETE_HOME_FILES` / `NEVER_DELETE_HOME_DIRS`）：身份 / 凭据 /
- *   手写配置（`~/.zshrc`、`~/.ssh`、`~/.config`、`~/.pi`…）。**不弹框、无任何放行选项**，
+ * - **永不删除**（`NEVER_DELETE_HOME_FILES` / `NEVER_DELETE_HOME_DIRS`）：身份 / 凭据
+ *   （`~/.zshrc`、`~/.ssh`、`~/.gnupg`…）。**不弹框、无任何放行选项**，
  *   白名单 / 会话豁免 / `PI_SANDBOX_EXTRA_WRITE` 都压不过（内核 deny 行在 allow 行之后）。
  *   2026-09-23 第二次事故删掉的 `~/.zshrc`、`~/.gitconfig`、`~/.zprofile` 就在这一档。
+ *   用户 2026-09-25 把 `~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 移出这一档 ——
+ *   它们是**工具状态目录**（含 lock、缓存、会话日志等日常要清理的东西），不是凭据，
+ *   应当走「弹框 + 可记住目录」那一档。
  * - **危险路径**（`DANGEROUS_ROOTS` + `~/Library` + 任何一级是 `.git`/`.hg`/`.svn`）：
  *   每次删除都问，只支持**会话级**豁免（重启 pi 后恢复）。这是 unix 系统根、
  *   bin、应用程序安装目录 —— 删错难恢复，但不是凭据。
@@ -163,9 +166,12 @@ export const DANGEROUS_EXACT: readonly string[] = ["/", "/Users"];
 /**
  * `$HOME` 下「与配置项有关」的目录，**每次必问、可会话豁免**那一档。
  *
- * 2026-09-24 起身份 / 凭据 / 全局规则类目录（`.ssh`、`.config`、`.pi`、`.claude`…）
- * 升入「永不删除」档（`NEVER_DELETE_HOME_DIRS`），这里只剩 `~/Library` ——
+ * 凭据 / 身份类目录（`.ssh`、`.gnupg`、`.aws`…）在「永不删除」档
+ * （`NEVER_DELETE_HOME_DIRS`），这里只剩 `~/Library` ——
  * macOS 应用偏好与 Application Support 的所在，删错难恢复但不是凭据，仍走必问可豁免。
+ *
+ * `~/.config`、`~/.pi`、`~/.claude`、`~/.codex` **不在这一档也不在永不删除档**
+ * （用户 2026-09-25 定）：它们落到「普通边界外」档 —— 问一次，同意后可永久记住目录。
  *
  * 注意 `~/Library/Caches`、`~/Library/Developer/Xcode/DerivedData` 在**可删边界内**
  * （`SAFE_CACHE_HOME_DIRS`），`classifyOutsidePaths` 先判边界，走不到这里。
@@ -178,11 +184,20 @@ export const DANGEROUS_HOME_DIRS: readonly string[] = ["Library"];
  * 都压不过）。用户 2026-09-24 定的口径：只列**身份 / 凭据 / 手写配置**，
  * 缓存类 dotfile（`.cache`、`.npm`、`.dartServer`…）一律不列。
  *
+ * 用户 2026-09-25 进一步收窄：`~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 移出本档
+ * （它们是工具状态目录，日常要清理 lock / 缓存 / 会话日志），落到「普通边界外」档 ——
+ * 弹三选项框，`Allow for this session（并记住该目录）` 后不再问。
+ *
  * 与「危险必问」档的区别：危险档是「能删但要明确同意」，这一档是「不给删」。
  * 2026-09-23 第二次事故删掉的 `~/.zshrc`、`~/.gitconfig`、`~/.zprofile` 就在这一档。
  *
  * 只列 **home 一级**（`~/.zshrc`），不递归 —— `~/projects/.zshrc` 是项目文件，
  * 不该按永不删除处理。
+ *
+ * 2026-09-25 补了一批**本机尚未出现、但按惯例同样是身份 / 凭据 / 手写配置**的通用名
+ * （`.bash_history`、`.hgrc`、`.envrc`、`.tool-versions`、`.yarnrc`、`.bunfig.toml`、
+ * `.boto`、`.s3cfg`…）：名单是**预防性**的，等文件出现再补就晚了 —— 事故当天被删的
+ * `~/.zprofile` 同样是「本机只有一个」的文件。
  */
 export const NEVER_DELETE_HOME_FILES: readonly string[] = [
 	// shell 启动项
@@ -190,31 +205,60 @@ export const NEVER_DELETE_HOME_FILES: readonly string[] = [
 	".bashrc", ".bash_profile", ".bash_login", ".bash_logout",
 	".profile", ".cshrc", ".login", ".hushlogin",
 	// git / VCS
-	".gitconfig", ".git-credentials", ".gitattributes",
+	".gitconfig", ".git-credentials", ".gitattributes", ".gitignore", ".hgrc",
 	// 凭据
 	".netrc", ".npmrc", ".pgpass", ".my.cnf", ".pypirc", ".vault-token", ".terraformrc",
+	".boto", ".s3cfg",
 	// shell / 工具配置
 	".inputrc", ".editorconfig", ".tmux.conf", ".screenrc", ".vimrc",
 	".curlrc", ".wgetrc", ".gemrc", ".irbrc", ".pryrc", ".pythonrc",
 	".Rprofile", ".Renviron", ".condarc",
+	// 版本 / 包管理器的手写配置
+	".tool-versions", ".yarnrc", ".yarnrc.yml", ".bunfig.toml",
+	// direnv（常含导出到环境的密钥）
+	".envrc",
 	// AI / agent
 	".claude.json",
 	// 环境
 	".env",
+	// shell 历史：丢了补不回，且常含临时敲进去的 token
+	".bash_history",
 ];
 
 /**
- * 「永不删除」档的目录（子树语义）：`~/.ssh/id_rsa`、`~/.config/foo/bar` 都拦。
- * `.pi` 兼自保护 —— 守卫自己的扩展、`AGENTS.md`、`sessions/`、`rewind/`、白名单文件
- * 全在其下，删掉等于当场解除武装并毁掉恢复手段（destructive-guard 时代事故换来的教训）。
+ * 「永不删除」档的目录（子树语义）：`~/.ssh/id_rsa`、`~/.aws/credentials` 都拦。
+ *
+ * **刻意不列**（用户 2026-09-25）：`~/.config`、`~/.pi`、`~/.claude`、`~/.codex`。
+ * 这四个是**工具状态目录**，里面既有手写配置也有大量日常要清理的派生物
+ * （`trust.json.lock`、`settings.json.lock`、缓存、会话日志）—— 整棵子树不给删，
+ * 连 pi 自己清理 stale lock 都会被内核 EPERM 拦死（实测：`pi update --extensions`
+ * 因此退出码 1）。它们走「普通边界外」档：弹框、可记住目录、记住后不再问。
+ *
+ * 代价说清楚：`~/.pi/agent/extensions`、`~/.pi/agent/AGENTS.md`、`sessions/`、
+ * `rewind/`、`sandbox-allowlist.json` 也在这四个子树里，所以守卫的自保护从
+ * 「内核无条件拦死」降级为「弹框 + 用户明确同意」。项目目录豁免（cwd 在其下时
+ * 不判 blocked）本来就是既有口径，不受影响。
+ *
+ * **名字里可以带斜杠**（`neverDeletePaths` 只是把名字拼到 home 下再解析），所以
+ * 凭据下沉到两级的工具用嵌套条目精确点名：`.config/gh`（`hosts.yml` 存 GitHub token）、
+ * `.config/gcloud`（`credentials.db` / `application_default_credentials.json`）。
+ * 这是 2026-09-25「`~/.config` 整棵子树移出本档」之后唯一能把 `~/.config` 下真凭据
+ * 捞回来的办法 —— 代价是 `isSafeAllowlistRoot` 的祖先闸必须只对**危险档**生效，
+ * 否则 `~/.config` 会因为「是 `~/.config/gh` 的祖先」而永远记不住（用户 2026-09-25 选）。
+ * 安全性不受影响：内核 deny 行在 allow 行之后无条件收回，记住 `~/.config` 也交不出
+ * `~/.config/gh`；`classifyOutsidePaths` 同样先判 blocked 再判白名单。
  */
 export const NEVER_DELETE_HOME_DIRS: readonly string[] = [
 	// 凭据 / 身份
 	".ssh", ".gnupg", ".aws", ".kube", ".docker",
-	// 全局规则
-	".config", ".pi",
+	// 云厂商 CLI 的凭据与配置
+	".azure", ".gcloud", ".terraform.d", ".helm", ".minikube",
+	// 密码库
+	".password-store",
+	// 凭据下沉到 ~/.config 两级的工具（嵌套条目，见上面 docstring）
+	".config/gh", ".config/gcloud",
 	// AI / agent
-	".claude", ".codex", ".agents", ".copilot", ".iflow", ".lingma",
+	".agents", ".copilot", ".iflow", ".lingma",
 	".aone_copilot", ".aone-copilot-preview", ".codex-claude-proxy", ".cursor-tutor",
 ];
 
@@ -322,7 +366,9 @@ export function writableRoots(boundary: WriteBoundary): string[] {
 }
 
 /**
- * 「永不删除」路径的绝对形式（home 一级文件 + 目录子树根）。
+ * 「永不删除」路径的绝对形式（home 一级文件 + 目录子树根 + 嵌套条目如 `.config/gh`）。
+ *
+ * 名字里带斜杠的条目同样成立：拼到 home 下再 `resolvePath`，得到两级绝对路径。
  *
  * 供三处共用：`classifyOutsidePaths` 的 `blocked` 档、`buildSeatbeltProfile` 的
  * deny 行、`isSafeAllowlistRoot` 的白名单闸 —— 同一张表，口径不会漂移。
@@ -449,17 +495,25 @@ export function dangerousReasonFor(target: string, env: PathEnv): string | undef
  * 这个路径能不能作为白名单根持久化。
  *
  * 四道闸：组件数 ≥ `MIN_ALLOWLIST_DEPTH`、自身不危险、自身不是永不删除路径、
- * 且**不是任何危险 / 永不删除路径的祖先**（记下 `$HOME` 就等于把 `~/.ssh` 一起交出去）。
+ * 且**不是任何危险路径的祖先**（记下 `$HOME` 就等于把 `~/Library` 一起交出去）。
  * 加载白名单时也跑这一遍，手改或损坏的 JSON 塞不进 `/`。
+ *
+ * 祖先闸**只对危险档生效**，不查永不删除档（用户 2026-09-25 选）：永不删除名单里
+ * 有嵌套条目（`.config/gh`、`.config/gcloud`）之后，若祖先闸也查它，`~/.config` 会因
+ * 「是 `~/.config/gh` 的祖先」而永远记不住，直接推翻「`~/.config` 是普通档、可记住」
+ * 的决定。安全上无损失：内核 deny 行在 allow 行之后无条件收回永不删除子树，
+ * `classifyOutsidePaths` 也先判 blocked 再判白名单 —— 记住 `~/.config` 交不出
+ * `~/.config/gh`。危险档仍需祖先闸：危险根没有内核 deny 行兜底，白名单就是唯一防线。
  */
 export function isSafeAllowlistRoot(path: string, env: PathEnv): boolean {
 	const resolved = stripTrailingSlash(resolvePath(path));
 	if (componentCount(resolved) < MIN_ALLOWLIST_DEPTH) return false;
 	if (dangerousReasonFor(resolved, env)) return false;
 	if (neverDeleteReasonFor(resolved, env)) return false;
-	// 不能是任何危险 / 永不删除路径的**祖先**：记下 `$HOME` 就等于把 `~/.ssh` 一起交出去。
+	// 不能是任何危险路径的**祖先**：记下 `$HOME` 就等于把 `~/Library` 一起交出去。
+	// 永不删除路径不在这里查 —— 见上面 docstring（嵌套条目与可记住的 ~/.config 冲突）。
 	const tables = dangerousRoots(env);
-	const all = [...tables.subtree, ...tables.exact, ...neverDeletePaths(env.home)];
+	const all = [...tables.subtree, ...tables.exact];
 	return !all.some((root) => root !== resolved && root.startsWith(resolved + "/"));
 }
 
@@ -501,7 +555,7 @@ function parentOf(resolved: string): string | undefined {
  * 兄弟文件本会话不再反复问（用户口径：「当前会话就不再弹框确认」）。但仍有一道硬闸：
  *
  * - 范围不能**本身是**某个危险根 / 永不删除路径（豁免了 `~/Library` 就等于把整个偏好目录交出去）；
- * - 范围不能是某个危险根 / 永不删除路径的**祖先**（豁免了 `$HOME` 就等于把 `~/.ssh` 一起交出去）；
+ * - 范围不能是某个危险根的**祖先**（豁免了 `$HOME` 就等于把 `~/Library` 一起交出去）；
  * - 组件数 ≥ `MIN_ALLOWLIST_DEPTH`。
  *
  * 三条都过不了就退回**精确路径**（只豁免这一个目标）。于是豁免删 `~/Library/Foo/bar`
@@ -509,7 +563,7 @@ function parentOf(resolved: string): string | undefined {
  * 只会记下 `~/Library/x.plist` 这一个文件。
  *
  * 注：永不删除路径（`~/.zshrc`、`~/.ssh`…）在 `classifyOutsidePaths` 里进 `blocked` 档，
- * 根本走不到会话豁免这一步 —— 这里把它们纳入硬闸只是口径一致的防御。
+ * 根本走不到会话豁免这一步 —— 硬闸的具体口径见 `isSafeSessionRoot`。
  */
 export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd()): string {
 	const resolved = stripTrailingSlash(resolveAgainst(target, cwd));
@@ -520,14 +574,17 @@ export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd(
 }
 
 /**
- * 会话豁免范围能不能用：深度够、自身不是危险根 / 永不删除路径、也不是它们的祖先。
+ * 会话豁免范围能不能用：深度够、自身不是危险根 / 永不删除路径、也不是危险根的祖先。
  *
  * 与持久白名单不同，这里**允许**落在危险子树根之下（`~/Library/Foo` 在 `~/Library` 下）——
  * 会话豁免不落盘、重启即失效，宽一点是安全的，而且这正是 `Allow for this session` 的语义：
  * 豁免一次后同子目录的兄弟文件不再反复问。
  *
- * 永不删除路径没有豁免一说（blocked 档根本走不到这里），但为了口径一致仍把它们
- * 纳入硬闸 —— 将来调用方误用时不会静默交出 `~/.ssh`。
+ * 永不删除路径没有豁免一说（blocked 档根本走不到这里），但为了口径一致仍把自身判定
+ * 纳入硬闸 —— 将来调用方误用时不会静默交出 `~/.ssh`。祖先闸本来就只查危险档
+ * （与 `isSafeAllowlistRoot` 2026-09-25 改后的口径一致）：永不删除名单有嵌套条目
+ * （`.config/gh`），祖先闸查它会把 `~/.config` 的会话豁免一并废掉，而内核 deny 行本就
+ * 拦死永不删除子树。
  *
  * 深度闸与持久白名单同宽：`$HOME` 的直接子目录（`~/Downloads`，2 个组件）放行，
  * 其余卡 `MIN_ALLOWLIST_DEPTH`。
@@ -535,7 +592,8 @@ export function sessionScopeFor(target: string, env: PathEnv, cwd = process.cwd(
 function isSafeSessionRoot(path: string, env: PathEnv): boolean {
 	const resolved = stripTrailingSlash(resolvePath(path));
 	if (componentCount(resolved) < MIN_ALLOWLIST_DEPTH) return false;
-	// 永不删除是**子树**语义：它下面的一切都不能豁免（`~/.config/foo` 也算）。
+	// 永不删除是**子树**语义：它下面的一切都不能豁免（`~/.config/gh/foo` 也算，
+	// 但 `~/.config/foo` 不算 —— ~/.config 自身自 2026-09-25 起是普通档）。
 	if (neverDeleteReasonFor(resolved, env)) return false;
 	const tables = dangerousRoots(env);
 	const all = [...tables.subtree, ...tables.exact];

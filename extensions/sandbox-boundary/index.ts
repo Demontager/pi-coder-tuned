@@ -26,9 +26,11 @@
  * 记忆落在 `allowlist.ts` 的同一个 globalThis 单例上 —— 所以 bash 侧记住的目录，
  * 这里立刻生效，反之亦然，两边口径不会漂移：
  *
- * - **永不删除**（身份 / 凭据 / 手写配置：`~/.zshrc`、`~/.ssh`、`~/.config`、`~/.pi`…）：
+ * - **永不删除**（身份 / 凭据 / 手写配置：`~/.zshrc`、`~/.ssh`、`~/.gnupg`…）：
  *   **不弹框、无任何放行选项**，直接 fail-closed。白名单 / 会话豁免 /
  *   `PI_SANDBOX_EXTRA_WRITE` 都压不过。整份 patch 一起拒。
+ *   用户 2026-09-25 把 `~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 移出本档 ——
+ *   它们是工具状态目录（含 lock / 缓存 / 会话日志），走下面的普通档。
  * - **危险路径**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）：每次都问，
  *   只支持会话级豁免（`Allow for this session`），重启 pi 后恢复。
  * - **普通路径**：问一次，`Allow for this session（并记住该目录）` 后把目录范围写进持久白名单，
@@ -325,7 +327,7 @@ export default function (pi: ExtensionAPI) {
 				`会话级豁免（重启失效）：${sessionScopes.roots().length ? sessionScopes.roots().join("、") : "（无）"}`,
 				"",
 				"危险目录（系统根 / bin / 应用安装目录 / ~/Library / 含 .git）每次删除都问，只能会话级豁免。",
-				"永不删除（~/.zshrc、~/.ssh、~/.config、~/.pi 等身份/凭据/手写配置）不弹框、无任何放行选项。",
+				"永不删除（~/.zshrc、~/.ssh、~/.gnupg 等身份/凭据/手写配置）不弹框、无任何放行选项。",
 				"写入不拦（write / edit 边界外也放行）；bash 命令由 seatbelt 沙箱强制同一道删除边界。",
 				"子命令：forget <path> 移除一条 · clear 清空 · allow <path> 预授权。PI_SANDBOX=off 整体关闭。",
 			];

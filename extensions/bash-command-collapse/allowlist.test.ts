@@ -162,12 +162,12 @@ test("写入前过滤：危险 scope 永远落不了盘", () => {
 	try {
 		const store = createAllowlistStore(file, env);
 		const written = store.remember(
-			["/", HOME, `${HOME}/.ssh`, `${HOME}/.config`, "/usr/local", `${HOME}/projects/x/.git`, `${HOME}/Downloads`],
+			["/", HOME, `${HOME}/.ssh`, "/usr/local", `${HOME}/projects/x/.git`, `${HOME}/Downloads`, `${HOME}/.pi/agent`],
 			"confirm",
 			env,
 		);
-		assert.deepEqual(written, [`${HOME}/Downloads`], "只有普通目录能落盘");
-		assert.deepEqual(store.roots(), [`${HOME}/Downloads`]);
+		assert.deepEqual(written, [`${HOME}/Downloads`, `${HOME}/.pi/agent`], "只有普通目录能落盘（~/.config、~/.pi 自 2026-09-25 起是普通档）");
+		assert.deepEqual(store.roots(), [`${HOME}/Downloads`, `${HOME}/.pi/agent`]);
 	} finally {
 		cleanup();
 	}

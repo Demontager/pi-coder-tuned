@@ -58,7 +58,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`statusline/`](extensions/statusline/) | Replaces the footer: model/thinking level, context usage, git branch and diff stat, plus a second line for extension statuses. |
 | [`startup-logo/`](extensions/startup-logo/) | Static header logo with version and shortened cwd, and prunes `[Context]`/`[Prompts]`/`[Themes]` from the startup list. |
 | [`working-indicator/`](extensions/working-indicator/) | Semantic working message (`Tools Calling`, `Editing`, `Writing`, `Reading`, `Thinking`) with per-segment token counts and elapsed time. |
-| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. |
+| [`simple-task/`](extensions/simple-task/) | Task list driven by `task_set` / `task_update` / `task_get` and `/tasks`; state rides the session log, never the repo. All three tools use `renderShell: "self"`, so their blocks carry no background and no boundary blank lines — the same shell as the bash and read blocks. |
 | [`recap/`](extensions/recap/) | `/recap` (idempotent: re-running it while the summary is on screen does nothing), plus an automatic summary above the editor after 10s of idling. |
 | [`rewind/`](extensions/rewind/) | Shadow-git checkpoints and `/rewind` (or Esc Esc) to restore code and/or conversation. |
 | [`ask-user-question/`](extensions/ask-user-question/) | An `ask_user_question` tool: up to 4 questions with 2–4 described options plus a free-text row, answered in the terminal. |
@@ -145,13 +145,13 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | [docs/extensions.md](docs/extensions.md) | Reference for all 28 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1123 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1131 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1123 tests
+npm test        # node --test, 1131 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

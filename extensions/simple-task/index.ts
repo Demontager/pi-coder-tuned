@@ -199,9 +199,20 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 
 	// ── 工具 ──────────────────────────────────────────────────────────────
 
+	// 三个工具都带 `renderShell: "self"`：让 pi 不再给整块套 `contentBox`
+	//（tool-execution.js 里那是个 `Box(1, 1, bgFn)`），于是
+	//   ① **没有底色**（pending 的 `toolPendingBg` / 成功的 `toolSuccessBg` /
+	//      失败的 `toolErrorBg` 都不画 —— selfRenderContainer 是纯 Container，
+	//      `renderContainer instanceof Box` 为 false，bgFn 套不上去），
+	//   ② **没有上下边界空行与左右 padding**（都是那个 Box 画的）。
+	// 与 bash（bash-command-collapse.ts）/ read（read-path-collapse.ts）块同一套观感：
+	// 块上方只剩 pi self 模式固定的那一行留白（render() 里 `lines.push("")`），下方紧贴
+	// 下一条消息。renderCall / renderResult 返回的 Text 本来就是 `new Text(…, 0, 0)`
+	//（零 padding、无 bgFn），所以不需要再包 Box。
 	pi.registerTool({
 		name: "task_set",
 		label: "Task Set",
+		renderShell: "self",
 		description:
 			"Create or replace the session task list for multi-step work. Pass an empty array to clear the list.",
 		promptSnippet: "Create or replace the session task list.",
@@ -262,6 +273,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "task_update",
 		label: "Task Update",
+		renderShell: "self",
 		description: "Update the status of one task in the active task list.",
 		promptSnippet: "Update one task's status in the active task list.",
 		promptGuidelines: [
@@ -312,6 +324,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "task_get",
 		label: "Task Get",
+		renderShell: "self",
 		description: "Read the active task list with current statuses.",
 		promptSnippet: "Read the active task list.",
 		parameters: Type.Object({}),

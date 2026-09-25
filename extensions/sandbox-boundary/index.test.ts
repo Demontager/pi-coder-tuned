@@ -8,8 +8,9 @@
  *   - **写入一律不拦**：write / edit / multiedit 无论目标在边界内外都直接放行、不弹窗；
  *   - apply_patch 只看 `*** Delete File:` 行：
  *     - 删除目标在边界内（项目目录、/tmp、可再生缓存 ~/.cache 等）→ 直接放行；
- *     - **永不删除**（`~/.zshrc`、`~/.ssh/…`、`~/.config/…`、`~/.pi/…` 等身份/凭据/手写配置）
- *       → **不弹框、无任何放行选项**，直接 block；整份 patch 一起拒；
+ *     - **永不删除**（`~/.zshrc`、`~/.ssh/…`、`~/.gnupg/…`、嵌套条目 `~/.config/gh/…`
+ *       `~/.config/gcloud/…` 等身份/凭据/手写配置；`~/.config` `~/.pi` `~/.claude` `~/.codex`
+ *       自身自 2026-09-25 起是普通档）→ **不弹框、无任何放行选项**，直接 block；整份 patch 一起拒；
  *     - **危险路径**（系统根、`~/Library/…`、含 `.git` 的路径…）→ 每次必问，
  *       选项是 Deny / Allow once / Allow for this session（没有「记住」）；
  *     - **普通边界外路径**（`~/Downloads/x` 这类）→ 问一次，选项是
@@ -269,14 +270,18 @@ test("apply_patch：永不删除路径（~/.zshrc）不弹框、无任何放行�
 	}
 });
 
-test("apply_patch：永不删除子树（~/.ssh、~/.config）同样 block；项目内同名文件不受影响", { skip }, async () => {
+test("apply_patch：永不删除子树（~/.ssh、~/.gnupg）同样 block；项目内同名文件不受影响", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once"] });
 	try {
 		const v1 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.ssh/id_rsa\n` });
 		assert.equal(v1.block, true, "凭据子树拦");
-		const v2 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.config/foo\n` });
-		assert.equal(v2.block, true, "全局规则子树拦");
+		const v2 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.gnupg/x\n` });
+		assert.equal(v2.block, true, "凭据子树拦");
 		assert.equal(h.selects.length, 0, "两次都不弹框");
+		// 2026-09-25 补充的嵌套条目：~/.config 整棵是普通档，但 .config/gh 捞回永不删除档
+		const v3 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.config/gh/hosts.yml\n` });
+		assert.equal(v3.block, true, "嵌套的永不删除子树拦");
+		assert.equal(h.selects.length, 0, "嵌套条目也不弹框");
 	} finally {
 		h.cleanup();
 	}
@@ -336,6 +341,37 @@ test("apply_patch：普通边界外路径（~/Downloads）弹普通框，`Allow 
 		assert.deepEqual(verdict2, {});
 		assert.equal(h.selects.length, 1, "已记住的目录不再弹框");
 		assert.ok(h.notifies.some((n) => n.includes("白名单")), "命中白名单放行要 notify（不能静默）");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("apply_patch：工具状态目录（~/.pi、~/.config、~/.claude、~/.codex）是普通档 —— 弹框可记住（用户 2026-09-25）", { skip }, async () => {
+	const h = await loadHarness({
+		selections: [
+			"Allow for this session（并记住该目录）",
+			"Allow for this session（并记住该目录）",
+			"Allow for this session（并记住该目录）",
+			"Allow for this session（并记住该目录）",
+		],
+	});
+	try {
+		// 探针名用不存在的文件（apply_patch 钩子不看存在性）—— 否则 memoryScopeFor 会把
+		// 真实存在的目录（如本机的 ~/.pi/agent/trust.json.lock）当成目标自身记住。
+		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.pi/agent/sbx-probe-lock.txt\n` });
+		assert.deepEqual(verdict, {}, "同意后应放行（不再是永不删除的直接拒）");
+		assert.equal(h.selects.length, 1, "应当弹一次框");
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session（并记住该目录）", "Allow once"], "普通目录的三选项");
+		assert.ok(!h.selects[0].title.includes("危险"), "不是危险框");
+		const onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
+		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/.pi/agent`], "记住父目录");
+
+		// 另外三个同样走普通档（未授权 → 弹框）
+		for (const p of [`${HOME}/.config/sbx-probe.txt`, `${HOME}/.claude/sbx-probe.txt`, `${HOME}/.codex/sbx-probe.txt`]) {
+			const v = await h.call("apply_patch", { patch: `*** Delete File: ${p}\n` });
+			assert.deepEqual(v, {}, `${p} 同意后放行`);
+		}
+		assert.equal(h.selects.length, 4, "三个未记住的目录各弹一次");
 	} finally {
 		h.cleanup();
 	}

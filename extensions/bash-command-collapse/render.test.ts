@@ -1192,11 +1192,11 @@ test("两层授权：headless + 危险目录 → fail-closed 拒绝，文件仍�
 	}
 });
 
-test("永不删除：删 ~/.config 下的探针不弹框、直接拒，文件仍在", { skip: sandboxSkip }, async () => {
+test("永不删除：删 ~/.gnupg 下的探针不弹框、直接拒，文件仍在", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("never-delete");
-	// 探针建在 ~/.config（永不删除子树）下，由测试进程自己的 fs 创建（不走沙箱），
-	// finally 里也由它自己清掉 —— 不碰 ~/.config 里任何已有内容。
-	const dir = path.join(os.homedir(), ".config", `.sbx-never-${process.pid}-${Date.now()}`);
+	// 探针建在 ~/.gnupg（永不删除子树）下，由测试进程自己的 fs 创建（不走沙箱），
+	// finally 里也由它自己清掉 —— 不碰 ~/.gnupg 里任何已有内容。
+	const dir = path.join(os.homedir(), ".gnupg", `.sbx-never-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const target = path.join(dir, "probe.txt");
 	fs.writeFileSync(target, "victim\n");
@@ -1220,7 +1220,7 @@ test("永不删除：删 ~/.config 下的探针不弹框、直接拒，文件仍
 
 test("永不删除：headless 下同样拒，且理由点名档位", { skip: sandboxSkip }, async () => {
 	const fx = await loadSandboxFixture("never-delete-headless");
-	const dir = path.join(os.homedir(), ".config", `.sbx-never-h-${process.pid}-${Date.now()}`);
+	const dir = path.join(os.homedir(), ".gnupg", `.sbx-never-h-${process.pid}-${Date.now()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const target = path.join(dir, "probe.txt");
 	fs.writeFileSync(target, "victim\n");
@@ -1229,6 +1229,65 @@ test("永不删除：headless 下同样拒，且理由点名档位", { skip: san
 		assert.equal(r.ok, false, "headless 下永不删除照样拒");
 		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
 		assert.equal(fs.existsSync(target), true, "文件必须仍在");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("永不删除：嵌套条目 ~/.config/gh 下的探针同样拦死（2026-09-25 补充）", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("never-delete-nested");
+	// ~/.config 整棵子树是普通档（用户 2026-09-25），但嵌套条目 .config/gh 把
+	// gh token 所在目录捞回永不删除档 —— 断言的正是这个「捞回」真的生效。
+	// 探针目录由测试进程自己的 fs 建清（recursive 只建到探针自己，finally 也只删探针自己）。
+	const dir = path.join(os.homedir(), ".config", "gh", `.sbx-never-n-${process.pid}-${Date.now()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const target = path.join(dir, "probe.txt");
+	fs.writeFileSync(target, "victim\n");
+	try {
+		const ctx = execCtxUI(fx.projectDir, ["Allow for this session", "Allow once"]);
+		const r = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(target)}`, ctx);
+		assert.equal(r.ok, false, "嵌套的永不删除子树必须失败");
+		assert.match(r.text, /永不删除/, `理由要点名档位：${r.text}`);
+		assert.equal(ctx.selects.length, 0, "不弹框 —— 没有放行选项");
+		assert.equal(fs.existsSync(target), true, "文件必须仍在");
+		assert.equal(fs.readFileSync(target, "utf8"), "victim\n", "内容也不能变");
+	} finally {
+		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+		fx.restore();
+	}
+});
+
+test("工具状态目录：删 ~/.pi/agent 下的探针弹三选项框，记住后不再问（用户 2026-09-25）", { skip: sandboxSkip }, async () => {
+	const fx = await loadSandboxFixture("pi-agent-ordinary");
+	// 复现 pi update --extensions 被拦的形状：~/.pi/agent 下的 stale lock。
+	// 探针由测试进程自己的 fs 建和清，不碰 ~/.pi/agent 里任何已有内容。
+	const dir = path.join(os.homedir(), ".pi", "agent", `.sbx-pi-${process.pid}-${Date.now()}.lock`);
+	fs.mkdirSync(dir);
+	const first = path.join(dir, "a");
+	const second = path.join(dir, "b");
+	fs.writeFileSync(first, "a\n");
+	fs.writeFileSync(second, "b\n");
+	try {
+		const ctx1 = execCtxUI(fx.projectDir, ["Allow for this session（并记住该目录）"]);
+		const r1 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(first)}`, ctx1);
+		assert.equal(r1.ok, true, `批准后应当删成功：${r1.text}`);
+		assert.equal(fs.existsSync(first), false, "文件真的被删了");
+		assert.equal(ctx1.selects.length, 1, "应当弹一次框（不再是永不删除的直接拒）");
+		assert.deepEqual(
+			ctx1.selects[0]!.options,
+			["Deny", "Allow for this session（并记住该目录）", "Allow once"],
+			"普通目录的三选项",
+		);
+		// 落盘的是目标的父目录（memoryScopeFor 口径：文件记父目录）—— 临时白名单文件，不碰用户真实的那份
+		const onDisk = JSON.parse(fs.readFileSync(fx.allowlistFile, "utf8"));
+		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [dir], "记住的是父目录");
+
+		// 第二次：同目录 —— profile 已带上白名单根，沙箱内直接成功，不弹框
+		const ctx2 = execCtxUI(fx.projectDir, []);
+		const r2 = await runCommandWithCtx(fx.definition, `rm -f ${JSON.stringify(second)}`, ctx2);
+		assert.equal(r2.ok, true, `已记住的目录不该再拦：${r2.text}`);
+		assert.equal(ctx2.selects.length, 0);
 	} finally {
 		if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 		fx.restore();

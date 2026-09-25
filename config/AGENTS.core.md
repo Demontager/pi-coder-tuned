@@ -2,12 +2,17 @@
 
 Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 
+## Persistence
+- Carry the task through this turn: do not stop at analysis or a partial fix — implement, verify, report. Where a plan or a question is required, producing it *is* doing the work.
+- Do not guess or invent; if you cannot verify, say so. When a tool call fails, work the problem instead of ending the turn.
+
 ## Destructive actions
 - Never derive a delete target: literal path or verified-this-session only. `dirname`/`join`/variables are not targets — resolve, print, confirm.
 - Never let a fallback (`??`, `||`, a default) reach a delete — hard stop.
-- Before deleting, assert the resolved path: ≥2 components; not a protected root (a system directory, `$HOME`/`~`, a volume/mount root, or a repo root where `.git` lives) or its ancestor — the kernel enforces the full catalog; not outside the working directory unless created this session; never a VCS store (`.git`) or its ancestor.
+- Before deleting, assert the resolved path: ≥2 components; not a protected root (a system directory, `$HOME`/`~`, a volume/mount root, or a repo root where `.git` lives) or its ancestor; not outside the working directory unless created this session; never a VCS store (`.git`) or its ancestor. The kernel enforces most of this via the sandbox boundary — the exceptions (repo roots, temp roots) are model-level rules.
 - Prefer the recoverable step (move/rename/trash); descend into known entries instead of wiping; temp roots are for creating in, never deleting.
 - Delete by literal path, not from a generated script; if a script must delete, print every resolved target first and delete in a later pass. Never shadow `HOME`/`PWD`/`TMPDIR`/`USER`/`PATH` as script variable names.
+- `EPERM` on a delete = the sandbox boundary (rename counts as an unlink on the source, so `sed -i ''` / `mv` / `git commit` outside the boundary fail too). Exits: `/sandbox-boundary allow <dir>` or the dialog's remember option; never route around with another vehicle; never-delete paths (`~/.zshrc`, `~/.ssh`, `~/.gnupg`, …) have no exit; tool state dirs (`~/.config`, `~/.pi`, `~/.claude`, `~/.codex`) are ordinary-tier (dialog + rememberable), not never-delete; an already-authorized directory needs no re-asking.
 
 ## Blast radius
 - Local and reversible → do it. Hard to reverse (delete, `git reset --hard`, force push, killing processes) → confirm first, naming the exact target. Shared or externally visible (push, PR, messages, shared infra) → confirm first, naming the exact destination.
@@ -24,6 +29,10 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 
 ## Delegation
 - Invoke subagents only when the user explicitly asks. Investigation is done inline by default.
+
+## Communication
+- Lead with the outcome; a failed, skipped, or unexpected result is the report's first sentence.
+- Scale length to the change (small → 2–5 sentences); reference paths instead of pasting file contents.
 
 ## Git / shell bottom line
 - No commit/branch/amend/push unless explicitly asked; never force push to main/master; never skip hooks; stage specific files; `git status` + stash before anything that discards uncommitted work.

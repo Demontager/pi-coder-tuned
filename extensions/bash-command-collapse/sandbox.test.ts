@@ -208,14 +208,37 @@ test("neverDeleteReasonFor：身份/凭据/手写配置命中，项目里的同�
 	assert.ok(neverDeleteReasonFor(`${HOME}/.zshrc`, env), "第二次事故删的就是它");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.gitconfig`, env));
 	assert.ok(neverDeleteReasonFor(`${HOME}/.ssh/id_rsa`, env), "子树语义");
-	assert.ok(neverDeleteReasonFor(`${HOME}/.config/foo`, env));
-	assert.ok(neverDeleteReasonFor(`${HOME}/.pi/agent/extensions`, env), "自保护：守卫自己的目录");
-	assert.ok(neverDeleteReasonFor(`${HOME}/.claude/x`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.gnupg/secring`, env));
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config/foo`, env), undefined, "用户 2026-09-25：~/.config 移出永不删除档");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.pi/agent/extensions`, env), undefined, "用户 2026-09-25：~/.pi 移出永不删除档（自保护降级为弹框）");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.claude/x`, env), undefined, "用户 2026-09-25：~/.claude 移出永不删除档");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.codex/y`, env), undefined, "用户 2026-09-25：~/.codex 移出永不删除档");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.env`, env));
 	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.zshrc`, env), undefined, "项目里的 .zshrc 不是全局配置");
 	assert.equal(neverDeleteReasonFor(`${HOME}/.zshrc.bak`, env), undefined, "精确名：.bak 后缀不在名单");
 	assert.equal(neverDeleteReasonFor(`${HOME}/Downloads`, env), undefined);
 	assert.equal(neverDeleteReasonFor(`${HOME}/Library/Caches/x`, env), undefined, "缓存不在永不删除名单");
+	// 2026-09-25 补充的通用项（本机未必存在，名单是预防性的）
+	assert.ok(neverDeleteReasonFor(`${HOME}/.bash_history`, env), "shell 历史丢了补不回");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.envrc`, env), "direnv 常含导出到环境的密钥");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.hgrc`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.gitignore`, env), "home 级全局 gitignore");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.tool-versions`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.yarnrc`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.yarnrc.yml`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.bunfig.toml`, env));
+	assert.ok(neverDeleteReasonFor(`${HOME}/.boto`, env), "gsutil 凭据");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.s3cfg`, env), "s3cmd 凭据");
+	for (const dir of [".azure", ".gcloud", ".terraform.d", ".helm", ".minikube", ".password-store"]) {
+		assert.ok(neverDeleteReasonFor(`${HOME}/${dir}/x`, env), `${dir} 子树语义`);
+	}
+	// 嵌套条目：凭据下沉到 ~/.config 两级的工具
+	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gh/hosts.yml`, env), "gh token 在 hosts.yml");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gcloud/credentials.db`, env), "gcloud 凭据");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config`, env), undefined, "嵌套条目不牵连 ~/.config 自身");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config/ghostty/config`, env), undefined, "~/.config 下其他工具仍是普通档");
+	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.envrc`, env), undefined, "项目里的 .envrc 不是全局配置");
+	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.gitignore`, env), undefined, "项目里的 .gitignore 是项目文件");
 });
 
 test("neverDeleteReasonFor：realpath 能看见符号链接逃逸", () => {
@@ -256,11 +279,16 @@ test("dangerousRoots：分 subtree / exact 两档，$HOME 在 exact 档", () => 
 	assert.ok(!tables.subtree.includes(HOME), "$HOME 不在子树档");
 });
 
-test("neverDeletePaths：home 一级文件 + 目录子树根都解析成绝对路径", () => {
+test("neverDeletePaths：home 一级文件 + 目录子树根 + 嵌套条目都解析成绝对路径", () => {
 	const paths = neverDeletePaths(HOME);
 	assert.ok(paths.includes(`${HOME}/.zshrc`));
 	assert.ok(paths.includes(`${HOME}/.ssh`));
-	assert.ok(paths.includes(`${HOME}/.config`));
+	assert.ok(paths.includes(`${HOME}/.bash_history`), "2026-09-25 补充的通用项");
+	assert.ok(paths.includes(`${HOME}/.password-store`), "密码库子树");
+	assert.ok(paths.includes(`${HOME}/.config/gh`), "嵌套条目：拼到 home 下再 resolvePath");
+	assert.ok(paths.includes(`${HOME}/.config/gcloud`), "嵌套条目");
+	assert.ok(!paths.includes(`${HOME}/.config`), "用户 2026-09-25：工具状态目录移出名单");
+	assert.ok(!paths.includes(`${HOME}/.pi`), "用户 2026-09-25：工具状态目录移出名单");
 	assert.ok(paths.includes(`${HOME}/.env`));
 	assert.ok(!paths.includes(`${HOME}/.cache`), "缓存不在名单");
 	assert.ok(!paths.includes(`${HOME}/Library`), "Library 是危险档不是永不删除");
@@ -290,11 +318,13 @@ test("memoryScopeFor：MIN_ALLOWLIST_DEPTH 挡住浅目录", () => {
 	assert.equal(memoryScopeFor("/Users/bachi/Downloads", env, CWD), "/Users/bachi/Downloads");
 });
 
-test("isSafeAllowlistRoot：拒 `/`、危险根、永不删除路径及其祖先", () => {
+test("isSafeAllowlistRoot：拒 `/`、危险根、永不删除路径，以及危险根的祖先", () => {
 	assert.equal(isSafeAllowlistRoot("/", env), false);
 	assert.equal(isSafeAllowlistRoot(HOME, env), false, "$HOME 是危险根");
 	assert.equal(isSafeAllowlistRoot(`${HOME}/.ssh`, env), false, "永不删除路径不能入白名单");
-	assert.equal(isSafeAllowlistRoot(`${HOME}/.config`, env), false);
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.config/gh`, env), false, "嵌套的永不删除路径同样不能入白名单");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.config`, env), true, "用户 2026-09-25：~/.config 是普通目录，可记住（祖先闸不查永不删除档，否则嵌套条目会把它废掉）");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.pi/agent`, env), true, "用户 2026-09-25：~/.pi 子目录可记住");
 	assert.equal(isSafeAllowlistRoot(`${HOME}/Downloads`, env), true);
 	assert.equal(isSafeAllowlistRoot("/Users", env), false, "组件数不够");
 	assert.equal(isSafeAllowlistRoot("/Users/bachi", env), false, "是 $HOME 危险根的祖先（且组件数不够）");
@@ -307,8 +337,8 @@ test("sessionScopeFor：危险根之下可以会话豁免，危险根 / 永不�
 	assert.equal(sessionScopeFor(`${HOME}/Library/x.plist`, env, CWD), `${HOME}/Library/x.plist`);
 	// ~/.ssh 本身是永不删除路径 → 退回精确路径（blocked 档走不到这里，口径防御）
 	assert.equal(sessionScopeFor(`${HOME}/.ssh`, env, CWD), `${HOME}/.ssh`);
-	// ~/.config/foo 在永不删除子树之下 → 退回精确路径（子树语义：其下一切不可豁免）
-	assert.equal(sessionScopeFor(`${HOME}/.config/foo`, env, CWD), `${HOME}/.config/foo`);
+	// 用户 2026-09-25：~/.config/foo 不再是永不删除子树 → 记父目录 ~/.config（深度 3 过闸）
+	assert.equal(sessionScopeFor(`${HOME}/.config/foo`, env, CWD), `${HOME}/.config`);
 });
 
 test("extractDeniedPaths：BSD rm/rmdir 形状", () => {
@@ -466,17 +496,40 @@ test("classifyOutsidePaths：永不删除先于边界与授权 —— extraWrite
 });
 
 test("classifyOutsidePaths：项目目录在永不删除路径之下时，删自己的文件不被 blocked", () => {
-	// 在 ~/.pi/agent/extensions/x 这种项目里干活：删项目自己的文件应当放行
-	const projectDir = `${HOME}/.pi/agent/extensions/x`;
+	// 在 ~/.gnupg/proj/x 这种（假想的）位于永不删除目录里的项目干活：删项目自己的文件应当放行
+	const projectDir = `${HOME}/.gnupg/proj/x`;
 	const b = makeBoundary(projectDir);
-	const result = classifyOutsidePaths([`${projectDir}/src/a.ts`, `${HOME}/.pi/agent/sessions`], {
+	const result = classifyOutsidePaths([`${projectDir}/src/a.ts`, `${HOME}/.gnupg/private-keys-v1.d`], {
 		boundary: b,
 		allowedRoots: [],
 		sessionRoots: [],
 		env,
 	});
 	assert.deepEqual(result.inside, [`${projectDir}/src/a.ts`], "项目目录按定义在可删边界内");
-	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.pi/agent/sessions`], "项目外的仍拦");
+	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.gnupg/private-keys-v1.d`], "项目外的仍拦");
+});
+
+test("classifyOutsidePaths：~/.pi、~/.config、~/.claude、~/.codex 是普通边界外档 —— 弹框可记住", () => {
+	// 用户 2026-09-25：这四个工具状态目录移出永不删除档（pi 自己清理 stale lock 曾被内核拦死）
+	const b = makeBoundary(CWD);
+	const result = classifyOutsidePaths(
+		[`${HOME}/.pi/agent/trust.json.lock`, `${HOME}/.config/foo`, `${HOME}/.claude/x`, `${HOME}/.codex/y`],
+		{ boundary: b, allowedRoots: [], sessionRoots: [], env },
+	);
+	assert.deepEqual(
+		result.ordinary,
+		[`${HOME}/.pi/agent/trust.json.lock`, `${HOME}/.config/foo`, `${HOME}/.claude/x`, `${HOME}/.codex/y`],
+	);
+	assert.equal(result.blocked.length, 0);
+	assert.equal(result.dangerous.length, 0);
+	// 白名单记住 ~/.pi/agent 后不再问
+	const covered = classifyOutsidePaths([`${HOME}/.pi/agent/trust.json.lock`], {
+		boundary: b,
+		allowedRoots: [`${HOME}/.pi/agent`],
+		sessionRoots: [],
+		env,
+	});
+	assert.deepEqual(covered.covered, [`${HOME}/.pi/agent/trust.json.lock`], "记住后静默放行");
 });
 
 test("classifyOutsidePaths：会话豁免优先于危险判定", () => {
@@ -546,18 +599,36 @@ test("buildSeatbeltProfile：永不删除 deny 行在 allow 行之后，含全�
 	assert.ok(denyLine.includes(`(literal "${HOME}/.zshrc")`), "配置文件有 literal");
 	assert.ok(denyLine.includes(`(subpath "${HOME}/.zshrc")`), "配置文件也有 subpath");
 	assert.ok(denyLine.includes(`(subpath "${HOME}/.ssh")`), "凭据目录在 deny 行");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.password-store")`), "2026-09-25 补充的密码库在 deny 行");
+	// 嵌套条目：两级绝对路径同样进 deny 行（literal + subpath）
+	assert.ok(denyLine.includes(`(literal "${HOME}/.config/gh")`), "嵌套条目有 literal");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.config/gcloud")`), "嵌套条目有 subpath");
 	assert.ok(!denyLine.includes(`"${HOME}/.cache"`), "缓存不在 deny 行");
 	// 缓存根在 allow 行
 	assert.ok(lines[allowIdx]!.includes(`(subpath "${HOME}/.cache")`), "缓存根在 allow 行");
 });
 
 test("buildSeatbeltProfile：项目目录在永不删除路径之下时，该路径不进 deny 行", () => {
-	const projectDir = `${HOME}/.pi/agent/extensions/x`;
+	const projectDir = `${HOME}/.gnupg/proj/x`;
 	const profile = buildSeatbeltProfile(makeBoundary(projectDir));
 	const denyLine = profile.split("\n").find((l) => l.startsWith("(deny file-write-unlink ("));
 	assert.ok(denyLine, "deny 行仍存在");
-	assert.ok(!denyLine!.includes(`"${HOME}/.pi"`), "项目所在的永不删除根被挖掉，否则删自己的文件全被拦");
+	assert.ok(!denyLine!.includes(`"${HOME}/.gnupg"`), "项目所在的永不删除根被挖掉，否则删自己的文件全被拦");
 	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "其余永不删除根仍在");
+});
+
+test("buildSeatbeltProfile：~/.pi、~/.config、~/.claude、~/.codex 不在 deny 行", () => {
+	// 用户 2026-09-25：工具状态目录移出永不删除档，内核不再拦它们的删除
+	const profile = buildSeatbeltProfile(makeBoundary(CWD));
+	const denyLine = profile.split("\n").find((l) => l.startsWith("(deny file-write-unlink ("));
+	assert.ok(denyLine);
+	for (const name of [".pi", ".config", ".claude", ".codex"]) {
+		assert.ok(!denyLine!.includes(`"${HOME}/${name}"`), `${name} 不在 deny 行`);
+	}
+	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "凭据目录仍在 deny 行");
+	// 嵌套条目不影响上面四条：`~/.config/gh` 在 deny 行，但 `~/.config` 自身不在
+	assert.ok(denyLine!.includes(`(subpath "${HOME}/.config/gh")`), "嵌套条目在");
+	assert.ok(!denyLine!.includes(`(subpath "${HOME}/.config")`), "~/.config 自身不在（否则工具状态目录又变回永不删除）");
 });
 
 test("buildSeatbeltProfile：extraUnlinkRoots 并进同一行 allow，顺序不变", () => {
