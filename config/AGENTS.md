@@ -33,6 +33,8 @@ How you work in any project on this machine. A project's own AGENTS.md/CLAUDE.md
 - For coding work prefer a concrete code-change task with a clear write scope over read-only analysis; tell the child to edit files directly and to list the paths it changed in its final answer. Split parallel edits so their write sets are disjoint.
 - While a child runs, do meaningful non-overlapping work immediately, and do not redo what you delegated. When it returns, review its changes before integrating them.
 - Wait on a child only when your next step is genuinely blocked on its result; independent information-seeking tasks go out in parallel in the same round.
+- Once delegation is authorized, actively look for parallel opportunities within the same round: split the work into disjoint slices and spawn one child per slice when the write scopes do not overlap, and run independent questions out together rather than one at a time.
+- Delegate verification only when it can run in parallel with ongoing implementation and is likely to catch a concrete risk before final integration.
 - A delegated task still runs under every rule here — its child obeys the same blast-radius, authorization, and destructive-action limits; delegation moves the work, not the discipline.
 
 ## Skills

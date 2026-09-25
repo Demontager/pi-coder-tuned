@@ -51,6 +51,7 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 | `steeringMode` | `"one-at-a-time"` | pi's default, explicit. |
 | `markdown.mermaid` | `"streaming"` | pi's default, explicit. |
 | `doubleEscapeAction` | `"none"` | See above. |
+| `subagents.watchdog` | `{ "enabled": true }` | A `pi-subagents` setting: the opt-in second-model reviewer. On every turn that changed the repository it feeds that turn's diff plus the user's scope to an independent reviewer model looking for missed constraints, correctness risks, test gaps, unsafe changes and drift; clean turns are silent, `high` findings are pushed back into the model's context, `low` / `medium` are shown to the user only, and three identical warnings in a row are judged a deadlock and stop it. `/subagents-watchdog on\|off\|status` drives it inside a session; `settings.json` is read at startup, so an edit takes effect next session. The snapshot also sets `main.model`, which is machine-specific and removed here — see below. |
 | `subagents.agentOverrides` | `researcher` / `delegate` / `worker` → `tools: "inherit"` | A `pi-subagents` setting, not a pi core one. |
 
 ### Why `tools: "inherit"` on three subagents
@@ -76,13 +77,14 @@ Interaction tools need no exclusion: `ask_user_question` checks `ctx.hasUI` and 
 
 Provider and model registrations are machine-specific: this setup's `litellm-any` provider points at a LiteLLM gateway on `127.0.0.1:996` (LAN address on other machines), carries a compat configuration, and registers six model ids that must match the gateway's routes exactly. Shipping it would be wrong on every other machine, so it is excluded.
 
-The three settings keys that select a model were removed along with it:
+The settings keys that select a model were removed along with it:
 
 | Removed key | Why |
 | --- | --- |
 | `defaultProvider: "litellm-any"` | The provider only exists in the excluded `models.json`. |
 | `defaultModel: "deepseek-flash"` | Depends on that provider. |
 | `modelThinkingLevels` | Pins `deepseek-flash` and `deepseek-flash-qd` to `max`; model ids again. |
+| `subagents.watchdog.main.model` | `"litellm-any/deepseek-flash-qd"` — the same provider. Omitting it makes the watchdog inherit the current session model, which is the documented fallback; the author's choice is a speed pick (~1.4 s through the gateway), not a requirement. |
 
 Everything else in `settings.json` is byte-for-byte the author's file. If you run your own gateway you can add them back:
 
@@ -92,6 +94,17 @@ Everything else in `settings.json` is byte-for-byte the author's file. If you ru
 "modelThinkingLevels": { "<provider>/<model-id>": "max" }
 ```
 
+and merge a `main` block into the `subagents.watchdog` object that is already there (it sits beside `agentOverrides`, so do not replace the whole `subagents` key):
+
+```json
+"subagents": {
+  "watchdog": { "enabled": true, "main": { "model": "<provider>/<model-id>" } },
+  "agentOverrides": { "...": "..." }
+}
+```
+
+A configured reviewer model must be fully qualified as `provider/model` and authenticated in your registry; an unavailable one is **reported, not silently replaced**. Omitting `main.model` altogether inherits the current session model and thinking level, which is what this package relies on. Three sub-switches stay off here as they do upstream — `children` (review subagents), `clarification` (an extra review per prompt) and `cadence` (review every N tool calls) — and `agentEndTimeoutMs` defaults to 30000, after which the review is abandoned rather than blocking the turn. Findings carry an `importance` of `low` / `medium` / `high`: only `high` is steered back into the model's context and triggers a continuation, `low` and `medium` are persisted for the user alone, and a clean review shows nothing. `stalemateRepeats` defaults to 3 — after that many identical warnings in a row the finding is shown as `stalemate`, no continuation is triggered and the turn ends, with your next prompt resetting the count. Its Test Gap category overlaps the `verify-loop` gate on purpose: the gate is deterministic and free, the watchdog is a model judgement that costs a call, so one catches "nothing ran" and the other catches drift and missed edits.
+
 For how providers and thinking levels work, see pi's own `docs/models.md` and `docs/custom-provider.md`.
 
 ### `mcp.json`
@@ -100,7 +113,7 @@ The MCP server list is machine-specific in the same way: the snapshot's only ent
 
 MCP servers are configured in `~/.pi/agent/mcp.json` and/or the nearest project `.mcp.json`, in Claude Code's shape. Neither file is shipped. With no config at all the `mcp/` extension loads, registers no tools and says so in `/mcp`. The format — including `headersCommand` for dynamic auth headers — is documented in [extensions.md](extensions.md) and, in more detail, in the [Chinese handbook](handbook.zh.md).
 
-So two snapshot config files are deliberately left out of this package: `models.json` (gateway registrations) and `mcp.json` (paths of local MCP server executables). `AGENTS.md` and `settings.json` are shipped, and `settings.json` is the only shipped config file that differs from the snapshot — the three removed model keys.
+So two snapshot config files are deliberately left out of this package: `models.json` (gateway registrations) and `mcp.json` (paths of local MCP server executables). `AGENTS.md` and `settings.json` are shipped, and `settings.json` is the only shipped config file that differs from the snapshot — the four removed model selections in the table above.
 
 ### `pi-statusline.json` is legacy
 

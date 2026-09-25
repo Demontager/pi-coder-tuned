@@ -23,6 +23,9 @@
   },
   "doubleEscapeAction": "none",
   "subagents": {
+    "watchdog": {
+      "enabled": true
+    },
     "agentOverrides": {
       "researcher": {
         "tools": "inherit"

@@ -114,7 +114,7 @@ A new tool name and a new command name must not collide with any other extension
 
 This package is a distribution copy, not the master copy. The author's live environment is `~/.pi/agent/`, snapshotted into a separate repository under `clients/pi/`; this package was produced by copying that snapshot verbatim (extensions, themes, and the config files) with three deliberate deltas:
 
-1. `config/models.json` and `config/mcp.json` are not shipped, and the three model-selection keys were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default. See [configuration.md](configuration.md#what-is-not-shipped).
+1. `config/models.json` and `config/mcp.json` are not shipped, and the four model selections were removed from `config/settings.json` (`defaultProvider`, `defaultModel`, `modelThinkingLevels`, `subagents.watchdog.main.model`). Both excluded files hold machine-local values — gateway registrations and absolute paths of local MCP server executables. `config/settings.json` otherwise matches the snapshot, including the `theme` key, which is kept even though the packager's own copy points at a gateway-specific default, and `subagents.watchdog.enabled`, which is kept on with the reviewer model left to inherit the session model. See [configuration.md](configuration.md#what-is-not-shipped).
 2. `docs/handbook.zh.md` is the snapshot's README, kept verbatim as the Chinese handbook.
 3. Everything else under `docs/`, plus `README.md` and `CHANGELOG.md`, is written for this package: extension count, test count and the switch tables have to be updated by hand.
 
@@ -139,7 +139,7 @@ The two `rsync --delete` runs are deliberate: a snapshot sync must remove what u
 
 `docs/handbook.zh.md` is the snapshot README verbatim, so it is not hand-edited here; the package-specific instructions live in the English docs. It still describes the snapshot's own repository layout (`cp clients/pi/...`), which is the machine it was written for.
 
-Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the three removed model keys; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
+Nothing else is copied. `config/settings.json` is the only file in the package that may differ from the snapshot in content, and `diff` on it is expected to show exactly the four removed model selections; everything under `docs/`, plus `README.md`, `CHANGELOG.md` and `assets/`, is written for this package and is not touched by a sync.
 
 Two things under `extensions/` are newer than the sync procedure above and belong in the checklist: `bash-command-collapse/sandbox.ts` and `allowlist.ts` are **live code** (imported by `sandbox-boundary/`), not test helpers, so deleting that directory breaks a second extension; `recap/subagents.ts` is likewise live code imported by `verify-loop/`; and the persistent allowlist at `~/.pi/agent/sandbox-allowlist.json` is **machine-local state**, deliberately absent from `clients/pi/` — a sync must never copy it in either direction.
 

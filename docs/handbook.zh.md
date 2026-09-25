@@ -62,7 +62,7 @@ cp -R clients/pi/extensions/verify-loop        ~/.pi/agent/extensions/   # 验�
 mkdir -p ~/.pi/agent/themes && cp clients/pi/themes/*.json ~/.pi/agent/themes/
 
 pi install npm:pi-web-access                # 外部包；装完必须配 web-search.json（见下文）
-pi install npm:pi-subagents                 # 同上；零配置可用
+pi install npm:pi-subagents                 # 同上；默认零配置可用（watchdog 是 opt-in，模板 settings.json 已带配置，见下文 watchdog 一节）
 ```
 
 四个容易踩的点：
@@ -383,6 +383,51 @@ Codex 另有 proactive 档（`MultiAgentMode` 枚举：`custom` / `explicit` / `
 （learn.chatgpt.com/docs/agent-configuration/subagents）也说当前版本「spawn agents after a direct
 request or applicable project or skill instruction」。检视面（FleetView / fleet inspector /
 async run artifacts）pi-subagents 已自带（`docs/observability.md`），无需自建。
+
+### 补回被压缩掉的「主动找并行」（2026-09-26）
+
+2026-09-25 那次把 Codex 闸门后的 **19 条**打法压成 **5 条**，砍掉的主要是 Codex 鼓励主动寻找并行机会
+的那一半。后果实测可见：`workflowScript` 在全部 62 个会话日志里**零调用**（`subagent` 共 9 次，全是
+`list` / `guide` / `status` / supervisor，没有一次真派活）——闸门 + 纪律保留、并行主动性砍掉、proactive
+档关闭，三层叠加后模型没有任何理由去碰编排层。
+
+补回两条（`AGENTS.md` 的 `## Delegation`，**闸门一字未动**，只加在「授权之后」的打法段）：
+
+| 补回的条款 | Codex 0.154.0 原文 |
+| --- | --- |
+| 授权后主动在同一轮里找并行机会：写集不相交就按切片各派一个子代理，独立问题一起发出而不是逐个问 | 「Split implementation into disjoint codebase slices and spawn multiple agents for them in parallel when the write scopes do not overlap.」+「The key is to find opportunities to spawn multiple independent subtasks in parallel within the same round…」 |
+| 验证只在能与进行中的实现并行、且可能在最终集成前抓到具体风险时才委派 | 「Delegate verification only when it can run in parallel with ongoing implementation and is likely to catch a concrete risk before final integration.」 |
+
+这是**做法 B（补打法）而不是做法 C（放宽闸门）**：授权来源仍只有「用户当前请求 / 适用的项目指令 / 技能」，
+「任务大小、复杂度、工具调用数、想并行」依旧不构成授权，「要深入 / 要调研 / 要详细分析」依旧不算许可。
+proactive 档仍不采用。差别只在**授权成立之后**：以前模型拿到授权也不知道该主动切并行，现在会。
+`AGENTS.core.md` 的蒸馏版同步加了一句（core-rules 按 hash 检测，下个会话自动带替换声明重注）。
+
+### watchdog：开关与配置（2026-09-26 起默认开）
+
+watchdog 是 pi-subagents 的 opt-in 第二模型审查员：每个回合结束且仓库有改动时，把本轮 diff +
+用户 scope 喂给一个独立 reviewer 模型，找漏掉的约束 / 正确性风险 / 测试缺口 / 不安全改动 / 跑偏；
+干净静默，high 发现推回模型上下文续跑，low/medium 只给用户看；连续 3 次相同警告判僵局停止
+（`docs/watchdog.md`）。**配置在 `settings.json` 的 `subagents.watchdog`**（`src/watchdog/settings.js:331`
+读的就是 `~/.pi/agent/settings.json`），模板已带：
+
+```json
+"watchdog": {
+  "enabled": true,
+  "main": { "model": "litellm-any/deepseek-flash-qd" }
+}
+```
+
+- **开关**：改 `enabled` 即可（或会话内 `/subagents-watchdog on|off`、`/subagents-watchdog status` 查状态）。
+  settings 是启动时读的，改完**下个会话生效**。
+- **模型**：`main.model` 必须 `provider/model` 全限定且在 registry 能认证（`model-selection.js:50-71`）；
+  省略则继承当前会话模型。本机选 `deepseek-flash-qd` 是取它快（实测经 996 网关 ~1.4s 返回）；
+  注意本网关所有路由 thinking 钉死，审查调用也付 thinking，单次成本与 `/goal` 评估器同级。
+- **刻意没开的子项**（都默认关）：`children`（子代理审查，当前不委派子代理）、`clarification`
+  （每 prompt 多一次追问审查）、`cadence`（每 N 次工具调用审一次的高频档）。要开再加对应键。
+- **超时**：`agentEndTimeoutMs` 默认 30000（`settings.js:9`），审查超时就放弃本次、不拦回合。
+- **与 verify-loop 的关系**：watchdog 的 Test Gap 类别与 verify-loop 闸重叠（都抓「声称完成但没验证」），
+  但闸是确定性零成本、watchdog 是模型判断付成本；两层并存是有意为之（闸防没跑，watchdog 防跑偏/漏改）。
 
 ### `tools:` 是严格白名单，但真正决定成败的是「子会话注册表里有没有这个名字」
 
