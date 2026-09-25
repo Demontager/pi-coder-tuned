@@ -54,6 +54,8 @@ Two changes: the title row stays on exactly one line, and the block is shelled l
 
 `ctrl+o` expansion is handled by the same one-line rule, so the collapsed and expanded views wrap identically. The file name is never split; a path that does not fit even so is cut from the left per grapheme.
 
+**Copying one of pi's functions means copying its signature, not its name.** pi's `resolvePath(input, baseDir)` (`utils/paths.js`) has the **opposite argument order** to node's `resolve(base, target)`. This file aliases node's `resolve` as `resolvePath` to mirror pi's source shape, so `resolvePath(filePath, cwd)` looked identical to pi's line while running node's "base first" semantics: an absolute `filePath` made node return `cwd` and dropped the file itself, so `relative(cwd, cwd)` was `""`, the "inside cwd" test passed, and the label degenerated to `"."` — reading `~/.pi/agent/AGENTS.md` rendered as `Read resource .:67-80` in the narrow-terminal branch (reproduced; it triggers at width ≤ 66). Files inside cwd happened to be correct, which is why only a path **outside** cwd exposes this class of bug; a regression assertion now pins it. Those two lines go through `resolveLikePi(input, baseDir)`.
+
 - `PI_READ_COLLAPSE=off` — restore pi's builtin title row (the uppercase `Read`, the dot and the shell are unaffected). There is no `/read-collapse` command.
 
 ### `tool-diff.ts` — the `edit` and `write` tools
@@ -252,6 +254,10 @@ Until 2026-09-24 this was three phases (`bypass` → `plan` → `execute`), wher
 
 Four ways in: `shift+tab`, `/plan`, `--plan` at startup, and the model's own `enter_plan_mode` tool.
 
+**The model's way in asks for consent first (Claude Code's mechanism).** `enter_plan_mode` no longer enters directly: it opens a two-option `select` — `进 plan mode（只读探索）` (the default, so Enter accepts the model's request) and `直接实施`. Choosing the second, or pressing Esc, does not enter plan mode; the tool result tells the model the user chose to implement directly and not to call the tool again, so it acts on the instruction in the same turn. Three deliberate points: Esc counts as a refusal (Claude Code's "must consent to entering plan mode"), which also makes "too much friction, skip it" a single keystroke; the dialog is **only on the model path** — `shift+tab` / `/plan` / `--plan` go through `enter(ctx, "user")` and are already the user's own decision; and a headless run (`pi -p`) skips it and enters, keeping the previous behaviour where nobody is interrupted.
+
+**All the routing criteria live in the tool description (also Claude Code's shape).** `enter_plan_mode`'s `description` carries 7 positive conditions (a new feature / several viable approaches / changing existing behaviour or structure / an architectural tradeoff / **more than 2–3 files** / unclear requirements / a fork the user's preference decides — the last one spelled out as "if you were about to ask with `ask_user_question`, use this tool instead"), 4 exemptions (a one-or-two-line fix / a single function with clear requirements / **the user already gave specific detailed instructions** / **pure research, exploration or review**), and GOOD/BAD examples. The global `AGENTS.md`'s `## Uncertainty` keeps a single pointer to it instead of a second copy — Claude Code's system prompt likewise contains no plan rule at all. Criteria in the tool description are read at exactly the moment the model decides whether to call the tool, and they cannot drift away from `AGENTS.md`. This is why the criteria can afford to be loose: a misjudgement costs the user one keystroke at the consent dialog, not a forced round of plan → proposal → approval → document.
+
 **Submitting and approving.** `exit_plan_mode` takes `plan` (the complete markdown for the user — this is what the approval dialog renders), a **required `slug`** (lowercase English plus digits and hyphens, 3–5 words, e.g. `m5-entity-runtime`; the document becomes `.pi/plans/<date>-<slug>.md`, so CJK and punctuation are folded away and a purely Chinese name falls back to `plan`), and an optional `summary` (one line, display only). The dialog offers three answers — **write the plan document and implement it**, **write the document only**, or **reject**. On the first two the model writes the file with the `write` tool while a `tool_call` hook pins that tool to the single approved path, so "plan mode" cannot be used to write anywhere else; a `tool_result` hook notices the successful write and closes the phase itself.
 
 The dialog is **truncated to one screen** (`truncatePlanForDialog`), and the height is computed with pi-tui's own `wrapTextWithAnsi`, so it matches the real render including CJK line-breaking; the overflow line reports how many steps are left and points at the terminal scrollback, while the plan text handed to the model is never truncated. This is not cosmetic: pi pins the viewport to the bottom on every repaint and the confirm dialog is a non-scrollable `Text`, so a long plan is guaranteed to be cut off and manually scrolling up is undone by the next repaint.
@@ -271,6 +277,7 @@ Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getE
 
 - `PI_PLAN_MODE=off` — disable the extension entirely.
 - `PI_PLAN_MODE_AUTO=off` — keep `shift+tab` and `/plan`, drop the model's `enter_plan_mode` tool.
+- `PI_PLAN_MODE_CONSENT=off` — keep the tool, drop its consent dialog (back to "calling it enters plan mode").
 
 ### `destructive-guard/` — pre-execution delete gate (**retired**)
 
@@ -339,7 +346,7 @@ This extension pushes the distilled core back to the end. Codex solves the same 
 
 One decision (`decision.ts`) covers all three Codex triggers: scan the model-visible projection for this extension's own messages — absent means the session just started or compaction dropped it, present with a different hash means the content changed, same hash means skip. Nothing is sent when nothing changed. The file is read on every `before_agent_start`, so editing it takes effect on the next prompt — no `/reload`, no restart.
 
-The injected body is the distilled ~2.5 KB core, not the 19 KB file: the destructive-action rules, the blast-radius table, authorization, the plan gate, delegation and the git/shell bottom line. The full rules stay in the system prompt; this is the part that must not decay. **A missing `AGENTS.core.md` makes the extension skip silently** — it is an optional enhancement and should not make pi noisy at startup. It is shipped as [`config/AGENTS.core.md`](../config/AGENTS.core.md).
+The injected body is the distilled ~3.3 KB core, not the ~20 KB file: the destructive-action rules, the blast-radius table, authorization, the plan gate, delegation and the git/shell bottom line. The full rules stay in the system prompt; this is the part that must not decay. **A missing `AGENTS.core.md` makes the extension skip silently** — it is an optional enhancement and should not make pi noisy at startup. It is shipped as [`config/AGENTS.core.md`](../config/AGENTS.core.md).
 
 - `PI_CORE_RULES=off` — disable the extension.
 
@@ -425,6 +432,7 @@ Every switch is an environment variable read at use time, not cached at load, so
 | `PI_LOGO=off` | on | `startup-logo` | Do not install the startup header. |
 | `PI_PLAN_MODE=off` | on | `plan-mode` | Disable plan mode entirely. |
 | `PI_PLAN_MODE_AUTO=off` | on | `plan-mode` | Do not register the model's `enter_plan_mode` tool; `shift+tab` and `/plan` still work. |
+| `PI_PLAN_MODE_CONSENT=off` | on | `plan-mode` | Do not ask for consent before the model's `enter_plan_mode` enters plan mode. |
 | `PI_READ_COLLAPSE=off` | on | `read-path-collapse` | Keep pi's built-in `read` title row. |
 | `PI_SANDBOX=off` | on | `bash-command-collapse`, `sandbox-boundary` | Disable the delete boundary: no seatbelt profile wraps `bash`, and `apply_patch` deletes are not checked. Also off automatically on platforms without `sandbox-exec`. |
 | `PI_SANDBOX_ALLOWLIST` | `~/.pi/agent/sandbox-allowlist.json` | `bash-command-collapse`, `sandbox-boundary` | Path of the persistent allowlist both sides share. |

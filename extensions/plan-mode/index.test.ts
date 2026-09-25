@@ -236,11 +236,13 @@ function makeContext(extension: LoadedExtension, recorder: Recorder, options: Co
 			notify: (message: string) => {
 				recorder.notifies.push(message);
 			},
-			select: async (title: string, _choices: string[]) => {
+			select: async (title: string, choices: string[]) => {
 				recorder.selectTitles.push(title);
 				// 显式传 undefined = 用户按了 esc（select 返回 undefined）；
-				// 没传这个字段才走默认推荐路线。
-				return "selectResult" in options ? options.selectResult : CHOICE_EXECUTE;
+				// 没传这个字段才走默认 = 直接回车（第一项，即推荐路线）。
+				// 对审批框等价于 CHOICE_EXECUTE（本来就是第一项），对同意框才是正确的
+				// CONSENT_PLAN。硬编码 CHOICE_EXECUTE 会让同意框的默认行为错成「写计划文档并实施」。
+				return "selectResult" in options ? options.selectResult : (choices[0] ?? undefined);
 			},
 			onTerminalInput: (handler: InputHandler) => {
 				inputHandlers.push(handler);
@@ -524,6 +526,113 @@ test("enter_plan_mode 工具让模型自己进 plan，并回一段说明", { ski
 		assert.match(result.content[0]!.text, /已进入 plan mode/);
 		assert.match(result.content[0]!.text, /exit_plan_mode/, "要告诉模型怎么出去");
 		assert.ok(!harness.getActiveTools().includes("write"), "进 plan 后写工具必须停用");
+		// 模型路径要先过同意弹框（默认回车 = 接受）
+		assert.equal(rec.selectTitles.length, 1, "模型路径应弹一次同意框");
+		assert.match(rec.selectTitles[0]!, /模型请求进入 plan mode/, "弹框要说明是模型请求的");
+		assert.ok(rec.selectTitles[0]!.includes("要改多个文件"), "弹框里要能看到模型给的理由");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("同意框选「直接实施」：不进 plan、写工具仍在、告诉模型别再调", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, { selectResult: "直接实施" });
+
+		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
+
+		assert.match(result.content[0]!.text, /没有进入 plan mode/, "必须明确说没进");
+		assert.match(result.content[0]!.text, /不要再调用/, "要阻止模型反复重试");
+		assert.ok(harness.getActiveTools().includes("write"), "否决后写工具不能被动");
+		assert.equal(rec.selectTitles.length, 1, "只弹这一次");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("同意框按 esc：等同否决（CC 的 must consent）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec, { selectResult: undefined });
+
+		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
+
+		assert.match(result.content[0]!.text, /没有进入 plan mode/);
+		assert.ok(harness.getActiveTools().includes("write"), "esc 后写工具不能被动");
+	} finally {
+		workspace.cleanup();
+	}
+});
+
+test("用户路径（shift+tab / --plan）不弹同意框——那已经是用户的决定", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		const result = harness.ctx.__feedInput("\x1b[Z");
+		assert.deepEqual(result, { consume: true });
+		assert.equal(rec.selectTitles.length, 0, "shift+tab 不该弹框");
+		assert.ok(!harness.getActiveTools().includes("write"), "应直接进 plan");
+	} finally {
+		workspace.cleanup();
+	}
+
+	const workspace2 = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace2.agentDir, workspace2.projectDir, rec, new Map([["plan", true]]));
+		const harness = makeContext(extension, rec);
+		await sessionStart(extension, { reason: "startup" }, harness.ctx);
+		assert.equal(rec.selectTitles.length, 0, "--plan 不该弹框");
+		assert.ok(!harness.getActiveTools().includes("edit"), "--plan 应直接进 plan");
+	} finally {
+		workspace2.cleanup();
+	}
+});
+
+test("PI_PLAN_MODE_CONSENT=off：不弹框直接进（回到旧行为）", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	process.env.PI_PLAN_MODE_CONSENT = "off";
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		const harness = await startSession(extension, rec);
+
+		const result = await callTool(extension, "enter_plan_mode", { reason: "要改多个文件" }, harness.ctx);
+
+		assert.match(result.content[0]!.text, /已进入 plan mode/);
+		assert.equal(rec.selectTitles.length, 0, "CONSENT=off 时不该弹框");
+		assert.ok(!harness.getActiveTools().includes("write"), "应直接进 plan");
+	} finally {
+		delete process.env.PI_PLAN_MODE_CONSENT;
+		workspace.cleanup();
+	}
+});
+
+test("工具描述带完整路由判据：正面条件 + 豁免清单都在", { skip, timeout: 30_000 }, async () => {
+	const workspace = makeWorkspace();
+	try {
+		const rec = recorder();
+		const extension = await loadExtension(workspace.agentDir, workspace.projectDir, rec);
+		await startSession(extension, rec);
+
+		const tool = toolOf(extension, "enter_plan_mode");
+		const desc = (tool.definition as unknown as { description: string }).description;
+		// 正面条件（CC 的 7 条里的量化门槛与 ask_user_question 替代规则）
+		assert.match(desc, /2-3 个以上文件/, "多文件门槛要写清");
+		assert.match(desc, /ask_user_question/, "要说明与 ask_user_question 的替代关系");
+		// 豁免清单（实测的两类误报来源，防将来被顺手删掉）
+		assert.match(desc, /具体、详细的指令/, "用户给了明确指令的小改要豁免");
+		assert.match(desc, /纯调研/, "纯调研 / 写报告要豁免");
+		// 同意机制的自述（拿不准就调的前提）
+		assert.match(desc, /需要用户同意/, "要告诉模型这个工具会被用户否决");
 	} finally {
 		workspace.cleanup();
 	}

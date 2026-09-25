@@ -413,6 +413,32 @@ test("紧凑形态（`[skill]`）与行号区间都保住圆点和缩进", { ski
 	assert.equal(title.indexOf("Read"), 2, "`Read` 仍在列 2");
 });
 
+test("cwd 之外的资源文件：压缩后标签是路径，不是一个 `.`", { skip }, () => {
+	// 回归：`cwdRelativePath` 曾把 pi 的 `resolvePath(input, baseDir)` 写成 node 的
+	// `resolve(base, target)` —— 绝对路径进来时 node 直接返回 base，文件被丢掉，
+	// `relative(cwd, cwd)` = "" 于是判定为「在 cwd 内」，标签退化成 `"."`。
+	// 症状：读 `~/.pi/agent/AGENTS.md` 在窄终端上显示 `Read resource .:67-80`。
+	// cwd 之内的文件碰巧正确，所以必须用 cwd 之外的路径才测得出来。
+	const outside = join(os.homedir(), ".pi/agent/AGENTS.md");
+	assert.notEqual(path.dirname(outside), cached!.projectDir, "fixture 必须在 cwd 之外，否则测不到这个坑");
+	for (const width of [79, 66, 60, 40]) {
+		const title = body(text({ path: outside, offset: 67, limit: 14 }, { content: "x\n", width })[1]!);
+		assert.equal(/\s\.(:|\s|$)/.test(title), false, `标签不该退化成 \`.\`（width=${width}）：${JSON.stringify(title)}`);
+		assert.equal(title.includes("AGENTS.md"), true, `文件名该在标题里（width=${width}）：${JSON.stringify(title)}`);
+		assert.equal(title.includes(":67-80"), true, `行号区间该在（width=${width}）：${JSON.stringify(title)}`);
+		assert.ok(widthOf(title) <= width, `超宽（width=${width}）：${JSON.stringify(title)}`);
+	}
+
+	// cwd 之内的资源文件仍走相对标签（修复不能把它一起改坏）
+	const inside = join(cached!.projectDir, "CLAUDE.md");
+	fs.writeFileSync(inside, "# hi\n");
+	for (const raw of ["CLAUDE.md", inside]) {
+		const title = body(text({ path: raw }, { content: "x\n", width: 60 })[1]!);
+		assert.equal(title.includes("CLAUDE.md"), true, `cwd 内该是相对标签：${JSON.stringify(title)}`);
+		assert.equal(title.includes(cached!.projectDir), false, `cwd 内不该出现绝对前缀：${JSON.stringify(title)}`);
+	}
+});
+
 test("展开态（ctrl+o）：结果不裁行，圆点与缩进照旧", { skip }, () => {
 	const raw = renderBlock({ path: "/tmp/x.js" }, { content: "1\n2\n3\n4\n5\n6\n7\n8\n", expanded: true }).map(plain);
 	assert.equal(raw[1]!.startsWith(`${BAR} Read `), true, `展开态也要有圆点：${JSON.stringify(raw)}`);

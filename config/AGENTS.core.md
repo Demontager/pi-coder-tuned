@@ -5,19 +5,21 @@ Distilled from `~/.pi/agent/AGENTS.md`; must never decay mid-session.
 ## Destructive actions
 - Never derive a delete target: literal path or verified-this-session only. `dirname`/`join`/variables are not targets — resolve, print, confirm.
 - Never let a fallback (`??`, `||`, a default) reach a delete — hard stop.
-- Before deleting, assert the resolved path: not fewer than two components; not a protected root (`/System`, `/Library`, `/Applications`, `/bin`, `/sbin`, `/opt`, `/private`, `$HOME`) or its ancestor; not outside the working directory unless created this session; never a VCS store (`.git`) or its ancestor.
+- Before deleting, assert the resolved path: ≥2 components; not a protected root (a system directory, `$HOME`/`~`, a volume/mount root, or a repo root where `.git` lives) or its ancestor — the kernel enforces the full catalog; not outside the working directory unless created this session; never a VCS store (`.git`) or its ancestor.
 - Prefer the recoverable step (move/rename/trash); descend into known entries instead of wiping; temp roots are for creating in, never deleting.
+- Delete by literal path, not from a generated script; if a script must delete, print every resolved target first and delete in a later pass. Never shadow `HOME`/`PWD`/`TMPDIR`/`USER`/`PATH` as script variable names.
 
 ## Blast radius
 - Local and reversible → do it. Hard to reverse (delete, `git reset --hard`, force push, killing processes) → confirm first, naming the exact target. Shared or externally visible (push, PR, messages, shared infra) → confirm first, naming the exact destination.
+- Ask-triggers (the complete list): a confirm class above; the request has more than one plausible reading that would materially change the result; requirements conflict; the work needs authority beyond the requested scope; a delete target or scope is unclear. Ask once with concrete options, report the blocker, then proceed without re-asking.
 - Authorization does not spread; silence is not consent; ambiguity takes the smaller action; an obstacle is never a reason to destroy.
 
 ## Authorization
-- Match scope to request type: answer/review/status authorize reading only — "diagnose" means find and explain the cause; implement a fix only when asked. Read-only and in-scope steps need no per-step confirmation; irreversible and external actions are confirmed before they happen.
-- When new authority is genuinely required, or a missing user choice would materially change the result: stop and ask, once, with concrete options.
+- Match scope to request type: answer/review/status authorize reading only — "diagnose" means find and explain, not fix. Read-only and in-scope steps need no per-step confirmation; irreversible and external actions are confirmed before they happen.
+- Authorization persists across turns as scope, not as per-instance approval: never re-ask whether you may do the work you were asked to do, while each hard-to-reverse or external action still needs its own confirmation.
 
 ## Plan gate
-- Past a trivial single-file fix → plan mode first (`enter_plan_mode` → `exit_plan_mode`). When in doubt, plan.
+- Non-trivial implementation → plan mode (`enter_plan_mode` → explore read-only → `exit_plan_mode`). Criteria and exemptions (small fixes, explicit instructions, pure research) live in that tool's description. The user consents to every model-initiated entry, so when in doubt, call it.
 - Judge the rest by reversibility: naming/wording/internal structure → decide silently; a data shape, public interface, or module boundary → belongs in the plan; deletion, external side effects, or mutually exclusive requirements → stop and ask, once, with concrete options.
 
 ## Delegation

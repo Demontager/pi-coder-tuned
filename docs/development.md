@@ -24,18 +24,18 @@ Two consequences worth remembering:
 ## Tests
 
 ```bash
-npm test        # node --test — 1117 tests, ~39 s
+npm test        # node --test — 1123 tests, ~38 s
 ```
 
 Test files run in parallel (`os.availableParallelism()` — 15 on the machine this was written on). Under that load one case is unreliable: the real spawned MCP handshake in `mcp/client.test.ts` intermittently hits its own 5 s handshake budget (seen twice in four full runs here, and never in isolation). The whole suite passes reliably with reduced parallelism at the same wall time:
 
 ```bash
-node --test --test-concurrency=4      # 1117 tests, ~39 s
+node --test --test-concurrency=4      # 1123 tests, ~38 s
 ```
 
 The 5 s budget is inside the snapshot's `client.test.ts`, which this package keeps byte-identical — it belongs upstream in `clients/pi/`, not here.
 
-**18 of the 1117 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
+**18 of the 1123 are skipped on purpose.** They are the real-sandbox cases in `bash-command-collapse/render.test.ts`: nested `sandbox-exec` cannot run inside a pi session, so they declare themselves skipped rather than faking a pass. They are the ones that prove the boundary is enforced by the **kernel** rather than by a pattern match, so run them from a plain terminal when you touch `sandbox.ts`.
 
 The pure-logic modules are written so this works: they do not import `@earendil-works/pi-*` at all, take injected dependencies instead (a `widthOf` function, an `exec` function, a minimal theme interface), and are duck-typed against structural interfaces. That is why `thinking-collapse/window.ts`, `statusline/line.ts`, `tool-diff/title-row.ts`, `rewind/checkpoints.ts`, `prompt-editor/bash-prompt.ts`, `bash-command-collapse/sandbox.ts`, `allowlist.ts` and the rest can run under plain `node --test`. `mcp/` goes further in the same direction: `protocol.ts`, `config.ts`, `client.ts`, `tools.ts` and `headers-command.ts` are pi-free too, so the whole chain — including a **real** spawned stdio server (`fixtures/fake-mcp-server.mjs`) and real `node:http` servers for the HTTP and SSE transports — is covered with no transport mocking.
 

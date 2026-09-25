@@ -187,10 +187,26 @@ function resolveAgainstCwd(rawPath: string, cwd: string): string {
 	return isAbsolute(normalized) ? resolvePath(normalized) : resolvePath(cwd, normalized);
 }
 
+/**
+ * pi 的 `resolvePath(input, baseDir)`（`utils/paths.js`）—— **参数序与 node 的 `resolve` 相反**。
+ *
+ * 本文件把 node 的 `resolve` 别名成了 `resolvePath`（为了照抄 pi 的源码形状），于是
+ * `resolvePath(filePath, cwd)` 看着像 pi 的那一行，实际是 node 的「base 在前」语义：
+ * `filePath` 是绝对路径时 node 直接返回 `cwd`，文件本身被丢掉。后果是
+ * `relative(cwd, cwd)` = `""` → `inside` 判定通过 → 标签退化成 `"."`，cwd **之外**的资源文件
+ * （`~/.pi/agent/AGENTS.md`）在超宽压缩分支里被渲成 `Read resource .:67-80`（实测复现）。
+ * cwd 之内的文件碰巧正确，所以这个坑只在读全局 AGENTS.md 时露出来。
+ *
+ * 复刻 pi 的函数就复刻它的签名，别复刻它的名字。
+ */
+function resolveLikePi(input: string, baseDir: string): string {
+	return isAbsolute(input) ? resolvePath(input) : resolvePath(baseDir, input);
+}
+
 /** pi 的 `getCwdRelativePath()`：cwd 内返回相对路径，否则 undefined。 */
 function cwdRelativePath(filePath: string, cwd: string): string | undefined {
 	const resolvedCwd = resolvePath(cwd);
-	const resolved = resolvePath(filePath, resolvedCwd);
+	const resolved = resolveLikePi(filePath, resolvedCwd);
 	const rel = relative(resolvedCwd, resolved);
 	const inside = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 	return inside ? rel || "." : undefined;
@@ -198,7 +214,7 @@ function cwdRelativePath(filePath: string, cwd: string): string | undefined {
 
 /** pi 的 `formatPathRelativeToCwdOrAbsolute()`：cwd 内给相对路径，否则绝对路径，一律 posix 分隔符。 */
 function pathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
-	const absolutePath = resolvePath(filePath, cwd);
+	const absolutePath = resolveLikePi(filePath, cwd);
 	return (cwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
 }
 

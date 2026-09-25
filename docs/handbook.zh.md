@@ -450,7 +450,7 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 | `fenceless-code-block/` | Markdown 代码块去掉开合围栏（连 `lang` 标签一起），代码正文按 pi 的缩进铺开、语法着色保留，**不加底色**（观感来自 npm `@itc-steve/pi-theme`，但只取去围栏这一半）；`render.ts` 是纯逻辑（量度 / 折行 / Markdown 类都注入），入口只接线。`PI_FENCELESS_CODE=off` 关闭 |
 | `user-message-bar/` | 用户消息框**每一行**（含上下两条空白内边距行）行首加一条竖线 `▎`（U+258E，左侧四分之一块），**竖线跟着消息底色**（不抠底 —— 它直接坐在 Box 的 `userMessageBg` 里，与底色块连成一片），竖线后空一格（正文共缩进两格），颜色取 **皮肤的强调色 `accent`**（`PI_USER_MESSAGE_BAR_COLOR` 可换槽位，显式指定 `toolDiffAdded` 则拿回原来的 diff 新增行行号色；兜底顺序 `accent` → `selectedBg` → `toolDiffAdded` → `text`）；`UserMessageComponent.prototype.render` 补丁 —— 竖线占原本那一格左内边距，多空的那一格（`BAR_INDENT`）则从**行尾补白**里等量吃回来，所以底色 / 行宽 / 折行位置全不变（pi-tui 对超宽行直接抛错，多一格都不行；`outputPad = 1` 时 Box 只给孩子 `width - 2` 列，所以正文总能留得下那一格，已在 `index.test.ts` 用长正文折行逐行验宽度）。**别再改成「竖线格无底色」**：那需要在竖线前插 `49m`、画完再还原 `48;…m`，而结果是底色块左边缘被抠出一个缺角，实测观感更差（曾这么做过，已回退）；`bar.ts` 是纯逻辑，入口只接线；取色源在 `session_shutdown` 时摘掉、读皮肤再兜一层 try/catch —— 会话替换（`/clear`、`/new`、`/resume`、`/fork`、`/reload`）时 pi 会作废旧 ctx，而旧消息这时还挂在聊天区里，渲染 tick 里抛出的 stale-ctx 异常没人接得住，会直达 pi 的 `uncaughtException` 把进程带走。`PI_USER_MESSAGE_BAR=off` 关闭，`PI_USER_MESSAGE_BAR_COLOR=<槽位名>` 换色（背景槽如 `selectedBg` 会 48→38 转前景） |
 | `bash-command-collapse.ts` | bash 工具块的命令 + 树形输出（**用户 2026-09-21 定的形状**）：命令**首行**行首是一颗状态圆点 `•` **加一个空格**（执行中 `dim` / 成功 `toolDiffAdded` / 失败 `toolDiffRemoved`，**只有首行有**，续行、折叠标记与整棵结果树前面没有；这一列与结果侧的缩进共用同一个 `INDENT_WIDTH`，所以 `Run` / `│` / `└` 同在列 2、正文同在列 4），命令以 `Run ` 起头（pi 内置是 `$ `）、最多 **2 个视觉行**，第 2 行溢出多少都只把行尾换成 `…`，命令更长时再补一行 `… +N lines`；两类续行（折行续行、折叠标记）的正文都对齐 `Run ` 的 `n` 列 —— 执行中是两格缩进，命令一执行完就换成 `│ `。结果挂在同一棵树下：`└ ` **整块只出现一次**、在第一行实质输出上（截断提示行挂 `│ `，`└ ` 之下的输出 / warnings / `Took Xs` 只缩进两格不再画竖线），没有输出时补一行 `(no output)`（`└ ` 挂它前面）；`│ ` / `└ ` 取 `muted`（结构符，`Run ` 取 `toolTitle`；两者**各自是一段独立的前景 SGR**，前缀绝不继承后面 token 的颜色 —— 曾经路径那行的 `│` 跟着 path 色飘过）。只有 `Run` **这一个词**加粗（`bold("Run") + " "`，包住整个前缀会把行尾那格间距也变粗），命令正文一律不加粗（原先是命令名加粗）。**命令失败时** pi 把状态当普通输出拼在结果末尾（`appendStatus` 的 `\n\n` + `Command exited with code N` / `timed out after N seconds` / `aborted`，无输出时正文已被 pi 换成了 `(no output)`）—— 那句 `\n\n` 原本渲染成两行**没有前导符**的空行（用户说的“中间断层两层”），现在 `trimPreviewLines` 把状态与其前的空行一起摘下来、空行不画、状态当作预览必占的一行（否则它会被预览裁掉，只剩一条 `│ … (N earlier lines)`），`└ ` **之上**的空行补 `│ `（用户 2026-09-21 定的：栅栏不能断在空行上；来源是 pi 预览窗口开头的空行与失败状态前面的分隔空行），`└ ` **之下**的空行保持空行（树在那里就落地了，下面那截是缩进对齐的续行 —— 更多输出、`[Full output: …]` 之类的 warnings、`Took`，各自成段；挂竖线反而像还没完），最后按 `error` 槽染红（`isError` + `isFailureStatusLine` 两道判定：只看形态会把 `echo "Command exited with code 2"` 这种正常输出也染红）并放回尾部，展开态（ctrl+o）同样染色（不裁行、不挂树）。整块**既不带底色也不留边界空行**（`Box` 不带 bgFn、`paddingY: 0`：命令就是块的第 1 行、结果就是最后一行；左边距由组件自己画 —— 首行是 `• `、其余行两格空格，结果侧挂同宽的那一列。**只去 bash 的**底色，其他工具照旧）。同时保留：非流式（`onUpdate` 摘掉）、break-all 硬折行 + 行首 `Run ` 语法高亮（`syntax*` 槽）、`/bash-preview` 输出预览行数、`/bash-timeout`、短命令（<2s）不画 `Took` 页脚、`bashOutput` 独立输出色。详见文件头与 `bash-command-collapse/render.test.ts` |
-| `read-path-collapse.ts` | read 工具块的标题 + 结果（**用户 2026-09-21 定，与 bash 块同一套观感**）：`renderShell: "self"` 让 pi 不再套默认壳，于是整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的那两条），只有内容本身；标题行 `• Read <路径>` —— 状态圆点 `•` 在**列 0**、`Read` 的 `R` 在**列 2**（正文整体右移一格），圆点颜色三态：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、失败 `toolDiffRemoved` 红**（与 `bash-command-collapse.ts` 的 `stateBarAnsi` 同源，字形也一样）；结果正文每行两格缩进（与 `Read` 同列），pi 那个前导 `\n` 空行被剥掉，所以正文紧贴标题。左边距由孩子自己画（`withHeadBar`），`Box(0, 0)` 的孩子按 `width - MARGIN_WIDTH - RIGHT_PAD` 渲染。**只影响 read**：其他工具仍走 pi 的默认壳（有底色、有边界空行），有专门的对照断言。原有能力一字未动：长路径压缩成一行（`…` 前缀，装得下的短路径走 pi 原生渲染只换 `accent`→`text` 一个色）、工具名首字母大写（`Read`）、`[skill]` / `read docs` / `read resource` 紧凑形态、OSC 8 超链接、`(ctrl+o to expand)` 提示、`app.tools.expand` 从 keybindings.json 读。11 个端到端断言见 `read-path-collapse/render.test.ts` |
+| `read-path-collapse.ts` | read 工具块的标题 + 结果（**用户 2026-09-21 定，与 bash 块同一套观感**）：`renderShell: "self"` 让 pi 不再套默认壳，于是整块**没有底色**（pending / 成功 / 失败三色底都不画）、**没有上下边界空行**（默认壳 `Box(1, 1)` 的那两条），只有内容本身；标题行 `• Read <路径>` —— 状态圆点 `•` 在**列 0**、`Read` 的 `R` 在**列 2**（正文整体右移一格），圆点颜色三态：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、失败 `toolDiffRemoved` 红**（与 `bash-command-collapse.ts` 的 `stateBarAnsi` 同源，字形也一样）；结果正文每行两格缩进（与 `Read` 同列），pi 那个前导 `\n` 空行被剥掉，所以正文紧贴标题。左边距由孩子自己画（`withHeadBar`），`Box(0, 0)` 的孩子按 `width - MARGIN_WIDTH - RIGHT_PAD` 渲染。**只影响 read**：其他工具仍走 pi 的默认壳（有底色、有边界空行），有专门的对照断言。原有能力一字未动：长路径压缩成一行（`…` 前缀，装得下的短路径走 pi 原生渲染只换 `accent`→`text` 一个色）、工具名首字母大写（`Read`）、`[skill]` / `read docs` / `read resource` 紧凑形态、OSC 8 超链接、`(ctrl+o to expand)` 提示、`app.tools.expand` 从 keybindings.json 读。12 个端到端断言见 `read-path-collapse/render.test.ts`（含一条回归：cwd 之外的资源文件压缩后标签必须是路径而不是 `.`） |
 | `prompt-editor.ts` | 输入框 `❯ ` gutter（`!` bash 模式下换成 `!`、正文里输入的 `!` 不再显示）+ 补全列表与 statusline 之间补一行空行；纯逻辑在 `prompt-editor/bash-prompt.ts` |
 | `cwd-statusline.ts` | 用 `setStatus` 在 statusline 第二行显示完整 pwd（不经任何路径压缩） |
 | `folder-history.ts` | 按工作目录持久化命令历史，注入编辑器原生 ↑/↓（**不注册快捷键** —— 上游的 ctrl+↑/↓ 在 macOS 上被 Mission Control 抢走） |
@@ -481,7 +481,26 @@ HTTP+SSE，否则 streamable HTTP）走远程；字符串值支持 `${VAR}` 与 
 `.pi/plans/`（被 `.gitignore` 排除 —— 计划是过程产物，不该进仓库）。
 
 四个入口：`shift+tab`、`/plan`、`--plan`（启动即进）、模型调 `enter_plan_mode`。
-`/plan-status` 看当前状态。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入。
+`/plan-status` 看当前状态。`PI_PLAN_MODE=off` 整体关闭，`PI_PLAN_MODE_AUTO=off` 只关模型自动进入，
+`PI_PLAN_MODE_CONSENT=off` 只关下面这道同意弹框。
+
+**模型自动进入要过一道同意弹框（CC 同构）。** 模型调 `enter_plan_mode` 时不再直接进，而是先弹
+`select` 两选一：`进 plan mode（只读探索）`（默认选中，直接回车即接受模型的请求）/ `直接实施`。
+选后者或按 esc 都不进 plan，工具结果是「用户选择直接实施……不要再调用 `enter_plan_mode`」，模型
+当轮就照用户指令动手。三个刻意点：① esc 当作否决，与 CC 的 “must consent to entering plan mode”
+一致，也让「嫌烦想跳过」这条最常见路径只需一个键；② 弹框**只在模型路径**——`shift+tab` / `/plan` /
+`--plan` 走 `enter(ctx, "user")` 不经过它，那已经是用户自己的决定；③ 无 UI（`pi -p`）不弹框、直接进，
+保持既有 headless 行为（那边没有人会被打扰）。这正是 CC 敢把判据写松的原因：它的 `EnterPlanMode`
+是 `shouldDefer: true`，误判的代价被弹框吸收成「用户按一次键」，而不是被迫走完「进 plan → 出方案 →
+审批 → 写文档」一整圈。
+
+**路由判据只在工具描述里（CC 同构）。** `enter_plan_mode` 的 `description` 承载全部判据：7 条正面条件
+（新功能 / 多种可行方案 / 改既有行为 / 架构取舍 / **>2-3 个文件** / 需求不清 / 用户偏好决定走向，最后
+一条明写「如果你正打算用 `ask_user_question` 问方案，就改用这个工具」）+ 4 条豁免（一两行小修 / 需求
+明确的单个函数 / **用户已给具体详细指令** / **纯调研探索审阅**）+ GOOD/BAD 示例。全局 `AGENTS.md` 的
+`## Uncertainty` 只留一条指针（判据与豁免在该工具的描述里），不再重复一份——CC 的系统提示词里同样
+一句 plan 规则都没有。判据放在工具描述里，模型在决定要不要调这个工具的那一刻正好读到它，也不会与
+`AGENTS.md` 漂移。
 
 **提交与审批（三选一）。** `exit_plan_mode` 的参数是 `plan`（给用户看的完整方案 markdown）
 + **必填 `slug`**（计划文档的文件名短名：小写英文 + 数字 + 连字符，3~5 个词，如
@@ -641,6 +660,13 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
 - **`keyHint` / `keyText` 绝不能 import**（`bash-command-collapse.ts` 与 `read-path-collapse.ts`
   都踩过：扩展拿到的是 npm/dist 副本，前者抛 `Theme not initialized`、后者返回空串）。要从
   `~/.pi/agent/keybindings.json` 读键名。`startup-logo` 的提示行是唯一从包根 import 的，它整行包了 try/catch。
+- **照抄 pi 的函数时，参数序也要照抄**：pi 的 `resolvePath(input, baseDir)`（`utils/paths.js`）与 node 的
+  `resolve(base, target)` **正好相反**。`read-path-collapse.ts` 把 node 的 `resolve` 别名成了 `resolvePath`
+  再照抄源码，于是 `resolvePath(filePath, cwd)` 看着一模一样、实际是 node 语义：绝对路径进来时 node
+  直接返回 `cwd`，文件被丢掉 → `relative(cwd, cwd)` = `""` → “在 cwd 内”判定通过 → 标签退化成 `"."`。
+  症状：读 `~/.pi/agent/AGENTS.md` 在窄终端上显示 `Read resource .:67-80`（实测复现，宽度 ≤ 66 触发）。
+  **cwd 之内的文件碰巧正确**，所以这类坑只能用 cwd 之外的路径才测得出来（回归断言已钉）。
+  现在那两行走 `resolveLikePi(input, baseDir)` —— 复刻 pi 的函数就复刻它的**签名**，别复刻它的名字。
 - **扩展里没有 `toolcall_checkpoint` 事件**（pi-ai 的事件联合里只有 start / text_* / thinking_* /
   toolcall_{start,delta,end} / done / error），它是 TUI / session 编码器内部用的 `MessageFrame`。
   所以每个参数 delta 都会以 `toolcall_delta` 到达扩展，段级计数本身就是完整的。
@@ -772,7 +798,7 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   （`thinking-collapse/window.ts` 只注入一个 `widthOf`，`node --test clients/pi/extensions/thinking-collapse/window.test.ts`）。
   `mcp/` 更进一步：`protocol.ts` / `config.ts` / `client.ts` / `tools.ts` / `headers-command.ts` **全部不 import pi**，
   只有 `index.ts` 接线 —— 所以整条 MCP 链路（含真实 spawn 子进程）都能 `node --test` 覆盖。
-- **`AGENTS.md` 自设 19000 字符预算**（当前 **18867 字符** ≈ 4717 tokens，余量 133 字符）：
+- **`AGENTS.md` 自设 19000 字符预算**（当前 **19952 字符** ≈ 4988 tokens，**已超预算 952 字符**）：
   pi 本身没有上限 —— 0.87.1 的 `system-prompt.js` 是原样拼接 context files、无截断，实测把标记放在
   9500 字符处仍被模型逐字读回；这条上限是自设的每请求固定开销预算，一路放宽：7400 → 8000（skill 优先级
   与 shell 卫生）→ 9600（issue #8 的 `## Uncertainty` 节）→ 18000（2026-09-23 删除安全 / 爆炸半径重写）
@@ -783,6 +809,24 @@ modifyOtherKeys。而 pi **启动时会主动启用 Kitty 协议**（`pi-tui` �
   委派仍守全部纪律）；`## Verification` 加两条（写文档前逐条对权威来源核事实、报告须写明跑了哪些验证）。
   同一次改动里压缩了现有节腾空间（Git↔Shell 的交互式禁令去重、secrets/staging 三条合并、Destructive
   actions 措辞瘦身），所以抬上限是买新规则而非灌水。下次再加规则前仍须先压缩或再抬上限。
+  **2026-09-24 把 plan 门控回摆了一档**（上面那档「默认准入」的修正，不改写历史记录）：实测本机
+  23 个 session / 97 条用户指令里模型主动进了 **15 次** plan（15.5% 的指令、61% 的 session），且误报
+  集中在两类——纯调研/写报告（CC 明列 “Pure research/exploration tasks” 不进 plan）和用户已给具体
+  详细指令的小改（CC 的 BAD 清单正是这一条）。照 CC 的做法改了两处：① **判据搬进 `enter_plan_mode`
+  的工具描述**（7 条正面 + 4 条豁免 + GOOD/BAD 示例），`AGENTS.md` 的 `## Uncertainty` 只留一条指针
+  ——CC 的系统提示词里同样一句 plan 规则都没有，判据在模型决定要不要调工具那一刻才被读到；
+  ② **模型主动进入前加用户同意弹框**（见上文 plan mode 一节）——CC 的 `EnterPlanMode` 是
+  `shouldDefer: true` + “must consent”，正因为每次进入都要用户点头，它才敢把判据写松并保留
+  “err on the side of planning”。本次「拿不准就调」也保留了，误判代价从「被迫绕一圈」降为「按一次键」。
+  字符账：工具描述 +761、`AGENTS.md` 那条 −87，**每请求净增 ~674 字符**（tools 数组同样每轮发送，
+  所以搬过去不省开销）——买的是去重（两处不再漂移）与判据的读取时机，不是体积。
+  **2026-09-25 又做了一次同向去重（+63 字符）**：「何时必须停下来问」原先在 `## Uncertainty` /
+  `## Authorization` / `## Destructive actions` 三处各写了一遍且条件互不相同（改一处忘两处就漂移），
+  现在规范定义收敛到 `## Blast radius` 的 **Ask-triggers** 一条（(a) 表格的两个 confirm 类；(b) 不属于
+  模型的判断：请求有实质歧义 / 要求互斥 / 超出请求范围 / 删除目标不清），其余三节只留指针；同一次改动
+  把「授权跨轮持续」与「批准不外溢」的字面矛盾显式调和为**持续的是作用域、不是逐次批准**（两侧各加一句
+  互指），并合并 `## Authorization` 里因此重复的两条。蒸馏版 `AGENTS.core.md` 同步（Ask-triggers 进 Blast
+  radius 节、Authorization 节改成 scope-vs-approval 那句），字符数 2909 → 3327。
   它是每个会话、每一轮请求都带的固定开销，改完要重开会话才生效（context files 只在 pi 启动时读一次）。
   它装的是行为规则与安全闸（Authorization / Delegation / Destructive actions / Blast radius /
   Shell commands / Git 六节是硬闸，项目级 AGENTS.md/CLAUDE.md 只能赢过其余的工作流/风格规则，

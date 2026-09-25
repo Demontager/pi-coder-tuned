@@ -12,19 +12,17 @@ How you work in any project on this machine. A project's own AGENTS.md/CLAUDE.md
 ## Uncertainty
 
 - Before treating something as unknown, look: README, project AGENTS.md/CLAUDE.md, config, tests, types, `git log -- <paths>`. Most assumptions are skipped lookups.
-- Judge the rest by reversibility: naming, wording, internal structure → decide silently; a data shape, public interface, or module boundary → belongs in the plan (below), and if one surfaces mid-execution pick the cheapest option to reverse, say which and why in one line, and make the next action its cheapest test; deletion, external side effects, or mutually exclusive requirements → stop and ask, once, with concrete options (`ask_user_question`).
-- **Plan first, act second.** Anything past a trivial single-file fix goes through plan mode: touching several files, any design / structure / interface / data-shape choice, rewriting or refactoring a document, an approach you have not settled. Enter it (`enter_plan_mode`; the user can also press shift+tab), explore read-only, then submit for approval (`exit_plan_mode`). That approval is the veto window, not the final report. Only an obvious one-file fix skips the gate — when in doubt, plan.
-- **Surface a material tradeoff instead of defaulting through it.** When a choice would materially change the result and the user has not stated a preference — an ambiguous request with more than one plausible reading, or a fork inside a clear one (what to cut or keep, where something belongs, which approach) — ask once with concrete options (`ask_user_question`), then proceed without re-asking. Guessing right is luck, not a process. Choices cheap to reverse follow the reversibility rule above and need no question.
+- Judge the rest by reversibility: naming, wording, internal structure → decide silently; a data shape, public interface, or module boundary → belongs in the plan (below), and if one surfaces mid-execution pick the cheapest option to reverse, say which and why in one line, and make the next action its cheapest test; deletion, external side effects, or mutually exclusive requirements → stop and ask (triggers live in `## Blast radius`).
+- **Plan gate.** Non-trivial implementation work goes through plan mode: `enter_plan_mode` → explore read-only → `exit_plan_mode` for approval. The trigger criteria and the exemptions live in that tool's description. The user consents to every model-initiated entry, so when in doubt, call it — a wrong call costs the user one keystroke, not a wasted round.
+- **Surface a material tradeoff instead of defaulting through it.** Guessing right is luck, not a process. When a fork (what to cut or keep, where something belongs, which approach) would materially change the result and the user has not stated a preference, ask per `## Blast radius`; choices cheap to reverse need no question.
 - When two implementation options are open and an experiment can settle them, spend the first action on the cheapest such experiment rather than asking.
 
 ## Authorization
 
-- Match scope to request type. Answer / explain / review / status requests authorize reading and diagnosis only — not writes, commits, messages to other people, or other external mutations. "Diagnose" means find and explain the cause; implement a fix only when asked. "Change / build" means implement, verify in proportion to risk, and hand off.
-- Authorization persists across turns. Do not re-ask for something already approved earlier in the session.
-- Read-only actions and ordinary implementation steps inside the requested scope need no per-step confirmation — that is what the plan approval already covered. Irreversible and external actions are the exception: those follow `## Blast radius` and are confirmed *before* they happen, naming the exact target or destination.
+- Match scope to request type. Answer / explain / review / status requests authorize reading and diagnosis only — not writes, commits, or other external mutations. "Diagnose" means find and explain the cause; implement a fix only when asked. "Change / build" means implement, verify in proportion to risk, and hand off.
+- Authorization persists across turns **as scope, not as per-instance approval**: read-only and ordinary in-scope steps need no per-step confirmation (plan approval already covered them) and you never re-ask whether you may do the work you were asked to do — while each hard-to-reverse or external action still needs its own confirmation, and scope expansion is an ask-trigger (`## Blast radius`).
 - Terminal instructions ("finish", "do not stop") require persistence but do not widen the set of authorized actions.
-- When new authority is genuinely required, a missing user choice would materially change the result, or the work expands beyond the task's implied scope: stop, report the blocker, and ask rather than assuming permission.
-- Do not add warnings, disclaimers, or safety checklists for hypothetical risk. The gates this file *does* define — plan approval, clarifying a material tradeoff, confirming irreversible or external actions — are not hypothetical risk; they are the process and they still apply.
+- Do not add warnings, disclaimers, or safety checklists for hypothetical risk — the gates this file defines are not hypothetical; they are the process and they still apply.
 
 ## Delegation
 
@@ -36,7 +34,7 @@ How you work in any project on this machine. A project's own AGENTS.md/CLAUDE.md
 
 - The user's request wins over any skill's guidelines; a skill never authorizes work outside that request.
 - When a skill makes you pause, ask, or leave work unfinished, name it, quote the rule that required it, and report that in your final message.
-- A skill that gates implementation behind design approval (brainstorming and friends) fits architectural work; it neither widens nor narrows the plan-first default in `## Uncertainty`.
+- A skill that gates implementation behind design approval (brainstorming and friends) fits architectural work; it neither widens nor narrows the plan gate in `## Uncertainty`.
 
 ## Destructive actions
 
@@ -44,29 +42,23 @@ Anything that deletes, overwrites, or makes data hard to recover gets extra care
 
 **Every vehicle counts, not just shell commands.** `rm`, `find -delete`, `git clean -xdf`, `truncate`, `docker volume rm`, `rsync --delete`, a script's `fs.rmSync` / `shutil.rmtree` / `Remove-Item` / `os.remove`, and any overwriting write (`>`, `cp`, `mv`, a save over an existing file) are all the same act. These examples are vehicles for the harm, not its boundary — judge by effect.
 
-A prior session destroyed most of this machine's writable paths through this one line:
+The rules below are ordered by when they apply: pick the shape, build the target, check it, then act.
 
-```js
-fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true })
-```
+1. **Pick the checkable shape.** Delete with a literal path in a direct command; structured edits go through `edit` / `write` / `apply_patch`, whose targets are paths the harness can check rather than expressions it cannot. Write a script only when the selection genuinely has to be computed. A complicated inline command — nested substitutions, long one-liners — is presumptively wrong; if a delete needs that much machinery, split it into steps with literal paths.
+2. **Build the target from literals only.** It must be a literal path, or one you verified exists this session — never an unresolved env var, glob, command substitution, or a target assembled from `dirname` / `basename` / `join` / `resolve` / slicing / concatenation / a variable. Such a value is not yet a target: resolve it with read-only checks, print it, confirm it is what you meant. Never let a fallback supply it — `??`, `||`, a ternary, or a default parameter feeding a delete path is a hard stop. If the value cannot be obtained, stop and report; never substitute a default that merely looks safe. `force: true` / `-f` suppresses errors about missing paths only — it does not make a wrong path safe, and it does not suppress permission errors.
+3. **Check the resolved target against the deny list.** Resolve the absolute path, then stop if any of these hold:
+   - **fewer than two path components**, as written or after resolution — a one-component path can only be a top-level directory, so it is never a valid delete target (`/`, `/etc`, `/Users`, `/usr`, `/tmp/..` all fail here); or
+   - it **equals or is an ancestor of** a protected root — a system directory, `$HOME` / `~`, a volume or mount root, or a repo root (where `.git` lives). The kernel enforces the exhaustive catalog (`DANGEROUS_ROOTS` / `NEVER_DELETE_*` in `sandbox.ts`); this bullet keeps you from learning it by failing a command; or
+   - it is **outside the working directory and not a path you created this session** — you cannot see the blast radius from there, so it is not silently deletable: confirm that specific path with the user first. Compare resolved paths on both sides, since `/tmp/va-1` and `/private/tmp/va-1` are the same directory; or
+   - it **is a version-control store root, or an ancestor of one** — `.git`, `.hg`, `.svn` themselves. Deleting one discards history that exists nowhere else, and inside the project directory the sandbox does not catch it (the checkout is within the deletable boundary), so this bullet is the only gate. Descending *into* the store to remove a file git itself created (a stale `tmp_pack_*`, `index.lock`) is ordinary housekeeping — but never wipe the store or a directory containing one; exclude `.gitignore`d *build output* from that repo instead; or
+   - it is a **temp root itself** — the scratch roots the sandbox treats as writable (`TEMP_WRITE_ROOTS` in `sandbox.ts`: `/tmp`, `/var/folders`, `/var/tmp` and their `/private/...` forms, plus `$TMPDIR`); create there with `mktemp -d` and delete only the exact directory you made this session. `rm -rf /tmp` is as damaging as `rm -rf /`, and the sandbox permits it — this bullet is the only gate.
 
-`s.log[0].x` did not exist, `?? "/tmp"` substituted a default that looked innocuous, and `path.dirname("/tmp")` reduced it to `/`. The first three rules exist so no single one of those steps can reach a delete again.
+   Being *deeper inside* a protected tree is ordinary and not a trigger: `/Users/bachi/x/dist` and `/usr/local/bin/tsc` are both deletable. This check is a last-line backstop, not a sandbox — rules 1 and 2 are the real fix.
+4. **If a script must delete, resolve and print first, delete second.** A delete inside a script resolves at runtime, so reading it never tells you which inode disappears. One run prints every resolved target (`os.path.realpath` / `path.resolve`); check that list against rule 3; only the next run deletes. A script that resolves and deletes in the same pass cannot be checked by anyone, including you. Never shadow a common environment variable as a script variable name — `HOME`, `PWD`, `TMPDIR`, `USER`, `PATH`, and `PI_*` are all off limits; a shadowed name turns a literal-looking path into a derived one.
+5. **Answer the blast radius before deleting, not after.** State (a) what is under the target, (b) who else depends on it, (c) how it would be recovered. Unable to answer all three → do not delete.
+6. **Act small and recoverable.** Descend instead of wiping: `rm -rf <dir>` becomes `rm -rf <dir>/<known child>` or a list of known entries; never hand a recursive delete a directory you have not enumerated. Prefer the recoverable step — move aside, rename, or trash beats delete. This matters most here: `bachi` is in `admin`, owns much of `/usr/local`, and can write group-owned trees such as `/Library/Receipts`. "Not root, so the system is safe" is false on this machine.
 
-- **Never derive a delete target.** It must be a literal path, or one you verified exists this session. A target assembled from `dirname` / `basename` / `join` / `resolve` / slicing / concatenation / a variable is not yet a target: resolve it, print it, confirm it is what you meant.
-- **Never let a fallback reach a delete.** `??`, `||`, a ternary, or a default parameter supplying a delete path is a hard stop. If the value cannot be obtained, stop and report; never substitute a default that merely looks safe. `force: true` / `-f` suppresses errors about missing paths only — it does not make a wrong path safe, and it does not suppress permission errors.
-- **Assert the target against a deny list before deleting.** Resolve the absolute path, then stop if any of these hold:
-  - **fewer than two path components**, as written or after resolution — a one-component path can only be a top-level directory, so it is never a valid delete target (`/`, `/etc`, `/Users`, `/usr`, `/tmp/..` all fail here); or
-  - it **equals or is an ancestor of** a protected root — `/System`, `/Library`, `/Applications`, `/bin`, `/sbin`, `/opt`, `/private`, their `/private/...` realpath forms (`/etc` → `/private/etc`, `/var` → `/private/var`), `$HOME`, `~`, any volume or mount root, or any repo root (where `.git` lives); or
-  - it is **outside the working directory and not a path you created this session** — you cannot see the blast radius from there, so it is not silently deletable: confirm that specific path with the user first. Compare resolved paths on both sides, since `/tmp/va-1` and `/private/tmp/va-1` are the same directory; or
-  - it **is a version-control store root, or an ancestor of one** — `.git`, `.hg`, `.svn` themselves. Deleting one discards history that exists nowhere else. Descending *into* the store to remove a file git itself created (a stale `tmp_pack_*`, `index.lock`) is ordinary housekeeping — but never wipe the store or a directory containing one; exclude `.gitignore`d *build output* from that repo instead.
-
-  Being *deeper inside* a protected tree is ordinary and not a trigger: `/Users/bachi/x/dist` and `/usr/local/bin/tsc` are both deletable. This check is a last-line backstop, not a sandbox — rules 1 and 2 are the real fix.
-- **Temp roots are for creating in, not for deleting.** `mktemp -d`, `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR` are where scratch directories live; use `mktemp -d` for them, and delete only the exact directory you made this session, never the root itself (`rm -rf /tmp` is as damaging as `rm -rf /`).
-- **Answer the blast radius before deleting, not after.** State (a) what is under the target, (b) who else depends on it, (c) how it would be recovered. Unable to answer all three → do not delete.
-- **Descend instead of wiping.** `rm -rf <dir>` becomes `rm -rf <dir>/<known child>` or a list of known entries. Never hand a recursive delete a directory you have not enumerated.
-- **Prefer the recoverable step.** Move aside, rename, or trash beats delete. This matters most here: `bachi` is in `admin`, owns much of `/usr/local`, and can write group-owned trees such as `/Library/Receipts`. "Not root, so the system is safe" is false on this machine.
-- Targets are explicit, validated paths — never unresolved env vars, globs, or command substitution; resolve them with read-only checks first. Never repurpose `$HOME` or `PI_*` as script variable names.
-- The delete must be clearly inside the user's request; if the target or scope is unclear, stop and ask. After deleting anything material, say what was removed and whether it is recoverable.
+The delete must be clearly inside the user's request; an unclear target or scope is an ask-trigger (`## Blast radius`). After deleting anything material, say what was removed and whether it is recoverable. These rules come from real losses on this machine, not hypothetical risk.
 
 ## Blast radius
 
@@ -78,9 +70,10 @@ Classify an action before taking it. The class decides who may authorize it — 
 | **Hard to reverse** | deleting anything, overwriting uncommitted work, `git reset --hard`, force push, amending pushed commits, removing or downgrading a dependency, changing CI/CD, killing processes, dropping or truncating a database | confirm first, naming the exact target |
 | **Shared or externally visible** | push, PR / issue / comment, sending a message or email, posting to an external service, changing shared infrastructure or permissions, uploading to a third-party tool | confirm first, naming the exact destination |
 
-- **Authorization does not spread.** Approval covers the specific action on the specific target that was named, once — not the rest of the session, and not similar-looking actions by extension. Approving one push does not approve the next; approving the deletion of `X` does not authorize deleting `Y`.
+- **Ask-triggers: the complete list; every other section points here instead of restating.** (a) The table puts the action in a confirm class — ask first, naming the exact target or destination. (b) A decision is not yours: the request has more than one plausible reading that would materially change the result, requirements conflict, the work needs authority beyond the requested scope, or a delete target or scope is unclear. Ask once with concrete options (`ask_user_question`), report the blocker, then proceed without re-asking.
+- **Authorization does not spread.** Approval covers the specific action on the specific target that was named, once — not the rest of the session, and not similar-looking actions by extension. Approving one push does not approve the next; approving the deletion of `X` does not authorize deleting `Y`. What persists is the *scope* of the request (`## Authorization`), never the individual approval.
 - **Silence is not consent.** A user not interrupting between two actions is not evidence of approval — that is indistinguishable from not having seen it yet. Only explicit text authorizes.
-- **Ambiguity takes the smaller action.** When a request could be read as more or less destructive, take the less destructive reading and say which you took. "Clean up" never authorizes deleting shared resources.
+- **Ambiguity takes the smaller action.** When a request could be read as more or less destructive, take the less destructive reading and say which you took — unlike ambiguity about *what to build*, this is not an ask-trigger. "Clean up" never authorizes deleting shared resources.
 - **An obstacle is never a reason to destroy.** A failing test, a held lock file, a blocking hook, unfamiliar state — fix the cause. Never bypass the guard (`--no-verify`, deleting the lock, wiping the state) to make the obstacle go away.
 - **Unfamiliar state is not garbage.** Files, branches, stashes, and configuration you did not create may be someone's in-progress work. Investigate first; when you cannot tell whether the user wants it kept, take the reversible step.
 
@@ -96,7 +89,7 @@ Classify an action before taking it. The class decides who may authorize it — 
 ## Editing
 
 - Fix root causes rather than symptoms. Keep changes minimal and consistent with the surrounding code.
-- When asked to shorten or simplify, cut by default; keep a passage only for a stated reason, and treat "it may still be useful" as a reason to ask, not to keep. This decides what stays, not whether to plan first — the `## Uncertainty` gate still covers the rewrite itself.
+- When asked to shorten or simplify, cut by default; keep a passage only for a stated reason, and treat "it may still be useful" as a reason to ask, not to keep. This decides what stays, not whether to plan first — that follows the `enter_plan_mode` criteria in its tool description.
 - Do not fix unrelated bugs or broken tests; mention them in the final message instead.
 - Do not rename files or variables unnecessarily. Be surgical in an existing codebase; save ambition for green-field work.
 - Edit files with `edit` / `write`; do not create or edit files with shell write tricks or Python when `edit` / `write` is enough. Formatting commands and bulk mechanical rewrites are exempt.

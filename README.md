@@ -69,7 +69,7 @@ Without them two extensions degrade instead of failing: `recap` cannot tell whet
 | [`below-editor-after-statusline.ts`](extensions/below-editor-after-statusline.ts) | Moves `belowEditor` widgets underneath the statusline. |
 | [`folder-history.ts`](extensions/folder-history.ts) | Persists command history per working directory and injects it into the editor's native ↑/↓. |
 | [`theme-command.ts`](extensions/theme-command.ts) | `/theme` with live preview: arrow keys preview, Enter persists, Esc cancels. |
-| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode. **Two phases** (`bypass` → `plan`): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning. `exit_plan_mode` submits the plan for approval — full markdown, a `slug` that names the document and an optional summary — and the three-way dialog either writes `.pi/plans/<date>-<slug>.md` and implements it, writes the document only, or rejects. There is no execute phase and no progress table of its own; the model builds a task list itself if one is warranted. |
+| [`plan-mode/`](extensions/plan-mode/) | Claude Code style plan mode. **Two phases** (`bypass` → `plan`): `shift+tab` or `/plan` to enter, `edit`/`write` dropped and write-shaped `bash` blocked while planning. The model's own `enter_plan_mode` carries all the routing criteria in its tool description and asks for **consent first** — a two-option dialog where `直接实施` (or Esc) skips planning. `exit_plan_mode` submits the plan for approval — full markdown, a `slug` that names the document and an optional summary — and the three-way dialog either writes `.pi/plans/<date>-<slug>.md` and implements it, writes the document only, or rejects. There is no execute phase and no progress table of its own; the model builds a task list itself if one is warranted. |
 | [`core-rules/`](extensions/core-rules/) | Re-pushes the distilled global rules (`~/.pi/agent/AGENTS.core.md`, shipped as [`config/AGENTS.core.md`](config/AGENTS.core.md)) to the **end** of the context at session start, after a compaction and whenever the content changed — the full `AGENTS.md` sits at the front of the system prompt, where its recency decays. Nothing is injected when nothing changed. |
 | [`sandbox-boundary/`](extensions/sandbox-boundary/) | The non-shell half of the delete boundary: `bash` runs inside a seatbelt profile, but `write` / `edit` are direct `fs` calls, so `apply_patch`'s `*** Delete File:` lines are checked on the `tool_call` hook instead. Shares one whitelist and one persistent allowlist with the bash side. |
 | [`destructive-guard/`](extensions/destructive-guard/) | **Retired from the author's live environment** (the seatbelt capability boundary replaced the lexical blacklist); shipped here as the reference implementation. A `tool_call` gate that inspects arguments **before** execution: delete targets in `bash`/`powershell` are judged against the protected-root / ancestor / fallback / derived-path rules, plus `outside-workdir`, `self-protection` and `vcs-history-loss`; dangerous delete code inside `write`/`edit` content, and scripts about to be executed, are caught too. Block rejects outright, confirm asks once in the TUI and fails closed without one. `/destructive-guard` shows the mode and this session's counts. |
@@ -101,7 +101,7 @@ Every switch is an environment variable, so it can be scoped per project or set 
 | `PI_DESTRUCTIVE_GUARD` | `on` | `block` rejects the confirm tier too, `notify` only reports what it would have caught, `off` disables the gate. |
 | `PI_FENCELESS_CODE=off` | on | Keep Markdown code fences. |
 | `PI_LOGO=off` | on | Do not install the startup header. |
-| `PI_PLAN_MODE=off` | on | Disable plan mode entirely (`PI_PLAN_MODE_AUTO=off` only disables the model's `enter_plan_mode` tool). |
+| `PI_PLAN_MODE=off` | on | Disable plan mode entirely (`PI_PLAN_MODE_AUTO=off` only disables the model's `enter_plan_mode` tool, `PI_PLAN_MODE_CONSENT=off` only its consent dialog). |
 | `PI_READ_COLLAPSE=off` | on | Keep pi's built-in `read` title row. |
 | `PI_SANDBOX=off` | on | Disable the delete boundary (both the bash seatbelt profile and the `apply_patch` gate); also off automatically off macOS. `PI_SANDBOX_EXTRA_WRITE` adds delete roots, `PI_SANDBOX_ALLOWLIST` moves the persistent allowlist file. |
 | `PI_SUBAGENT_LOG_GUARD=notify` | `drop` | Show `[pi-subagents]` diagnostics through `ctx.ui.notify` instead of dropping them. |
@@ -145,13 +145,13 @@ cp "$PKG/themes/"*.json             ~/.pi/agent/themes/            # optional: a
 | [docs/extensions.md](docs/extensions.md) | Reference for all 28 extensions: commands, switches, caveats, storage. |
 | [docs/themes.md](docs/themes.md) | Theme files, the custom tokens, and the rules that make them load. |
 | [Palette reference](https://raw.githack.com/jayli/pi-coder/main/assets/pi-coder-palettes.html) | **Chinese.** Every variable and slot assignment for the three themes, with a terminal preview that switches between them. |
-| [docs/development.md](docs/development.md) | Running the 1117 unit tests, verifying against a real pi, publishing. |
+| [docs/development.md](docs/development.md) | Running the 1123 unit tests, verifying against a real pi, publishing. |
 | [docs/handbook.zh.md](docs/handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, gateway setup, and the full rationale behind every design decision. |
 
 ## Development
 
 ```bash
-npm test        # node --test, 1117 tests
+npm test        # node --test, 1123 tests
 ```
 
 The pure-logic modules are deliberately free of `@earendil-works/pi-*` imports so they run under plain `node --test`; see [docs/development.md](docs/development.md) for the layout rules, the tmux verification procedure and the traps this codebase documents.

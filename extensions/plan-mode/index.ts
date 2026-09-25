@@ -31,7 +31,12 @@
  *   /plan-status   看当前状态
  *   --plan         启动即进 plan mode
  *   自动进入       注册 enter_plan_mode 工具 —— 模型判断任务偏大时自己调用，
- *                  这就是 Claude Code 的机制（不是关键词启发式）
+ *                  这就是 Claude Code 的机制（不是关键词启发式）。路由判据全在这个
+ *                  工具的描述里（CC 同构：它的系统提示词里一句 plan 规则都没有），
+ *                  全局 AGENTS.md 只留一条指针。模型路径还要过一道**用户同意弹框**
+ *                  （CC 的 “must consent to entering plan mode”）：用户可以选「直接实施」
+ *                  否掉，所以判据可以写松 —— 误判的代价是用户按一次键，不是白做一轮。
+ *                  PI_PLAN_MODE_CONSENT=off 关掉这道弹框。
  *
  * ## 约束（收工具 + 拦 bash，两道独立的闸）
  *
@@ -86,6 +91,8 @@ import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./key
 const DISABLED = (process.env.PI_PLAN_MODE ?? "").trim().toLowerCase() === "off";
 /** 只关自动进入（shift+tab 与 /plan 仍可用）。 */
 const AUTO_DISABLED = (process.env.PI_PLAN_MODE_AUTO ?? "").trim().toLowerCase() === "off";
+/** 关掉模型自动进入前的同意弹框（回到「调了就直接进」）。 */
+const CONSENT_DISABLED = (process.env.PI_PLAN_MODE_CONSENT ?? "").trim().toLowerCase() === "off";
 
 const ENTER_TOOL = "enter_plan_mode";
 const EXIT_TOOL = "exit_plan_mode";
@@ -96,6 +103,53 @@ const ENTRY_TYPE = "plan-mode";
 const CHOICE_EXECUTE = "写计划文档并实施";
 const CHOICE_DOC_ONLY = "只写计划文档";
 const CHOICE_REJECT = "打回";
+
+/**
+ * 同意弹框的两个选项（第一项是默认选中项 = 接受模型的请求）。
+ *
+ * 这是 Claude Code 的机制：它的 `EnterPlanMode` 是 `shouldDefer: true`，描述里明写
+ * “This tool REQUIRES user approval - they must consent to entering plan mode”，弹框是
+ * `Yes, enter plan mode` / `No, start implementing now`。正因为每次进入都要用户点头，
+ * CC 才敢把判据写松（还留了 “err on the side of planning”）—— 误判的代价被弹框吸收了。
+ * 没有这道弹框时，判据一松就直接变成打扰（实测 15.5% 的用户指令进了 plan）。
+ */
+const CONSENT_PLAN = "进 plan mode（只读探索）";
+const CONSENT_IMPL = "直接实施";
+
+/**
+ * `enter_plan_mode` 的工具描述 = 全部路由判据。
+ *
+ * 判据只写在这里，全局 AGENTS.md 只留一条指针（Claude Code 同构：它的系统提示词里
+ * 一句 plan 规则都没有，7 条正面条件 + 4 条豁免 + GOOD/BAD 示例全在工具描述里）。
+ * 这样判据在模型决定要不要调这个工具的那一刻正好在眼前，而且不会与 AGENTS.md 漂移。
+ * 结构照 CC：什么时候用（7 条）/ 什么时候不用（4 条豁免）/ 例子 / 注意。
+ */
+const ENTER_TOOL_DESCRIPTION = `进入 plan mode（只读探索）：先把方案讲清楚、等用户批准，再动手实施。
+
+## 什么时候用
+非简单的实施类任务，命中任意一条就该用：
+1. 新功能：要加一块有意义的新能力（放哪、点了之后发生什么、错误怎么处理都还没定）
+2. 多种可行方案：同一目标有几条明显不同的路（缓存用 Redis / 内存 / 文件；实时用 WS / SSE / 轮询）
+3. 改动既有行为或结构：更新登录流程、重构某个组件——目标形态未定
+4. 架构取舍：要在模式或技术之间选一个
+5. 多文件：预计要动 2-3 个以上文件
+6. 需求不清：得先探索才知道范围（「让它更快」要先 profile；「修 checkout 的 bug」要先定位根因）
+7. 用户偏好决定走向：实现可以合理地分成几种——如果你正打算用 ask_user_question 问方案，就改用这个工具（先探索，再带着上下文给选项）
+
+## 什么时候不用
+只有这几类跳过：
+- 一两行的小修（错别字、明显的 bug、小调整）
+- 需求明确的单个函数
+- 用户已经给了具体、详细的指令（照做即可，方案没有分叉）
+- 纯调研 / 探索 / 审阅（「哪些文件负责路由」、「对比 A 和 B 写份报告」、「审一下这个文档」——产出是结论，不是改动）
+
+## 例子
+该用：「给应用加用户认证」（session vs JWT、token 存哪、中间件结构都要定）／「优化数据库查询」（多种路子、要先 profile）／「实现暗色主题」（主题系统的架构决定，波及很多组件）／「给用户资料页加个删除按钮」（看着简单，其实要定位置、确认框、API 调用、错误处理、状态更新）
+不该用：「修 README 里的错别字」／「给这个函数加个 console.log 调试」／「哪些文件负责路由」
+
+## 注意
+- 这个工具需要用户同意：调用后会弹框，用户可以选「直接实施」否掉它。所以拿不准就调——误判的代价是用户按一次键，不是白做一轮。
+- 用户自己按 shift+tab / /plan / --plan 进入时不弹框（那已经是用户的决定）。`;
 
 interface PersistedState {
 	phase: PlanState["phase"];
@@ -372,15 +426,39 @@ export default function planMode(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: ENTER_TOOL,
 			label: "Enter Plan Mode",
-			description:
-				"进入 plan mode（只读探索）。凡不是极简单的单文件小改，都先进 plan mode：改动多个文件、任何设计/结构/接口/数据形状取舍、重写或重构文档、方案未定——先调用它把方案讲清楚再动手。拿不准就进。用户也可以自己按 shift+tab 进入。",
+			description: ENTER_TOOL_DESCRIPTION,
 			parameters: Type.Object({
 				reason: Type.Optional(Type.String({ description: "为什么这个任务需要先规划（一句话）" })),
 			}),
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				currentCtx = ctx;
-				enter(ctx, "model");
 				const reason = typeof params.reason === "string" && params.reason.trim() !== "" ? params.reason.trim() : "";
+				// 同意弹框只在模型路径：shift+tab / /plan / --plan 走 enter(ctx, "user")，
+				// 那已经是用户自己的决定，再问一次是纯打扰。无 UI（pi -p）没有人会被打扰，
+				// 也不弹 —— 保持既有 headless 行为。
+				if (ctx.hasUI && !CONSENT_DISABLED) {
+					const choice = await ctx.ui.select(
+						`模型请求进入 plan mode（只读探索）。${reason ? `\n\n它的理由：${reason}` : ""}\n\n` +
+							`${CONSENT_PLAN}：先只读探索、出方案，你批准后才动手\n` +
+							`${CONSENT_IMPL}：跳过规划，现在就按你的指令直接改`,
+						[CONSENT_PLAN, CONSENT_IMPL],
+					);
+					// esc（undefined）当作否决，与 CC 的 “must consent” 一致 ——
+					// 「嫌烦想跳过」这条最常见路径只需一个键。
+					if (choice !== CONSENT_PLAN) {
+						ctx.ui.notify("已跳过 plan mode，直接实施。", "info");
+						return {
+							content: [
+								{
+									type: "text",
+									text: `用户选择直接实施，没有进入 plan mode。现在就按用户的指令动手，不要再调用 ${ENTER_TOOL}。`,
+								},
+							],
+							details: { phase: state.phase, consented: false },
+						};
+					}
+				}
+				enter(ctx, "model");
 				return {
 					content: [
 						{
@@ -388,7 +466,7 @@ export default function planMode(pi: ExtensionAPI) {
 							text: `已进入 plan mode（只读）。${reason ? `原因：${reason}。` : ""}\nedit / write 已停用，bash 里的写操作会被拦下。先读代码；需要用户拍板的选择用 ask_user_question 问；方案想清楚后调用 ${EXIT_TOOL} 提交。`,
 						},
 					],
-					details: { phase: state.phase },
+					details: { phase: state.phase, consented: true },
 				};
 			},
 		});
