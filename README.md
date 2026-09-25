@@ -2,6 +2,9 @@
 
 **English-first Pi extensions, tuned for local models.**
 
+<img width="1490" height="911" alt="sample_window" src="https://github.com/user-attachments/assets/976c2eb1-d0c7-40c6-ad5f-7a7df7a5edc1" />
+
+
 A fork of [jayli/pi-coder](https://github.com/jayli/pi-coder), based on upstream
 2.1.3 (`d68d965`). Includes **29 extensions and 3 themes**, with English UI,
 cache-safe local recaps, and compact context-token counts. Original authorship
