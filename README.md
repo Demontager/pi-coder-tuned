@@ -4,7 +4,7 @@
 
 A fork of [jayli/pi-coder](https://github.com/jayli/pi-coder), based on upstream
 2.1.3 (`d68d965`). Includes **29 extensions and 3 themes**, with English UI,
-cache-safe local recaps, and exact context-token counts. Original authorship
+cache-safe local recaps, and compact context-token counts. Original authorship
 and MIT license are preserved.
 
 ## Install from GitHub
@@ -44,7 +44,7 @@ authentication, session history, and selected theme.
 | UI and extension instructions | Mixed English and Chinese | English production labels/messages and instructions |
 | Local recap | Separate model completion after idle | Excerpt from the existing response; no recap inference request |
 | Remote recap | Chinese output requested | English output requested |
-| Context display | `Ctx 2.9%` | `Ctx 7,602/262,144 2.9%` |
+| Context display | `Ctx 2.9%` | `Ctx 8k/262k 2.9%` |
 | Outside Git | `ᗌ no git \| (no git)` | Both empty Git segments omitted |
 | Inside Git | Branch and added/deleted line counts | Retained |
 | Task lists | Model-driven `task_set` / `task_update` | Retained; not automatically forced |
@@ -88,13 +88,17 @@ the response's language. Remote generated recaps receive an English instruction.
 The cache guarantee applies to recap: other extensions, such as working-indicator's
 prompt summary and `/goal` evaluation, can still make their own model requests.
 
-### Exact context counts
+### Compact context counts
 
 ```text
-⚡️ cyber-tiel-35b-a3b/max | Ctx 7,602/262,144 2.9%
+⚡️ cyber-tiel-35b-a3b/max | Ctx 8k/262k 2.9%
 ```
 
 Counts come from Pi's reported context usage, not inference from the percentage.
+Values of 1,000 or more are rounded to the nearest thousand using decimal `k`:
+7,490 becomes `7k`, 7,500 becomes `8k`, and 262,144 becomes `262k`.
+Smaller counts remain whole numbers. The percentage is calculated independently
+from the unrounded usage and retains one decimal place.
 Unknown values display `?`. The configured context capacity is not free memory;
 it is the model's context window. Existing warning/error colors and width-aware
 footer truncation remain in place.
@@ -107,7 +111,7 @@ footer truncation remain in place.
 - Destructive-action guard, sandbox boundary, verification gate and `/goal`.
 - Three upstream themes, retaining their original names for compatibility.
 
-The package `config/` and `themes/` directories also contain short English
+The package `assets/`, `config/`, and `themes/` directories also contain short English
 README files so GitHub's file browser explains their purpose directly.
 
 Optional companions are installed separately:

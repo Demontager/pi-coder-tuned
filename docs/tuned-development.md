@@ -10,7 +10,7 @@ apply here.
 - English production literals and matching test expectations.
 - `extensions/recap/local.ts`: auto/extract/model selection and pure excerpt extraction.
 - `extensions/recap/index.ts`: extraction before auth/completion, English remote prompt.
-- `extensions/statusline/line.ts`: exact token counts; empty Git segments omitted.
+- `extensions/statusline/line.ts`: rounded decimal-k token counts; empty Git segments omitted.
 - Portable test assumptions: skip macOS-only integration on other platforms;
   explicitly select true-color mode for true-color snapshots.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Round context counts to decimal thousands, with half-thousands rounded up:
+  `Ctx 8k/262k 2.9%`. Counts below 1,000 remain whole numbers.
+- Add English folder documentation so the current GitHub directory listing
+  displays English latest-commit subjects without rewriting upstream history.
+
 ## pi-coder-tuned 0.1.0
 
 - Forked from jayli/pi-coder 2.1.3 (`d68d965`), preserving MIT attribution.

@@ -1,7 +1,7 @@
 {
   "name": "pi-coder-tuned",
   "version": "0.1.0",
-  "description": "English-first fork of pi-coder with cache-safe local recaps and exact context-token counts: 29 extensions and 3 themes.",
+  "description": "English-first fork of pi-coder with cache-safe local recaps and compact context-token counts: 29 extensions and 3 themes.",
   "type": "module",
   "license": "MIT",
   "keywords": [
