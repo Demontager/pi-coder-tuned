@@ -64,7 +64,7 @@ Isolate the run instead — a scratch agent directory has no global extensions, 
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -e /absolute/path/to/pi-coder
 ```
 
-Then check that all 29 loaded by reading the startup list:
+Then check that all 30 loaded by reading the startup list:
 
 ```
 [Extensions]

@@ -5,7 +5,7 @@ production UI is English, local recaps use request-free excerpts, and the footer
 shows rounded used/total tokens with Git placeholders hidden outside repositories.
 The detailed descriptions below were inherited from upstream.
 
-29 extensions load from this package. Twelve are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Five more directories (`thinking-collapse/`, `tool-diff/`, `prompt-editor/`, `bash-command-collapse/`, `read-path-collapse/`) contain pure-logic modules and tests only — they have no `index.ts`, so pi never loads them as extensions, but the top-level files import them or their tests cover them.
+30 extensions load from this package. Thirteen are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Helper/test directories without an `index.ts` are not loaded as extensions.
 
 Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
@@ -184,6 +184,21 @@ The same extension draws the `●` on a running bash row.
 - `PI_WORKING_SUMMARY_RETRY_MS` (default `3000`) — a failed request (error, timeout, or a response with no text) is retried once after this delay; two attempts per prompt is the cap, and a new prompt or the end of the turn cancels the pending retry.
 - `PI_WORKING_SUMMARY_MODEL` — `provider/modelId` for that request; defaults to the session model so a typo can only cost the summary, never the request.
 - `PI_WORKING_SUMMARY_GAP` (default `1`).
+
+### `stop-hook.ts` — completed-run counter
+
+Shows `✦ Crafted in 2m 14s. Used 12 tool calls.` immediately at `agent_settled`,
+above the editor and before the delayed recap. Each completed run randomly picks
+Done, Cooked, Brewed, Built, Baked, or Crafted once; redraws keep the same label.
+Aborted/error model responses use Interrupted/Failed instead.
+
+Measures monotonic elapsed time from interactive prompt submission (agent start
+as fallback), including tool execution, confirmation waits, retries, compaction,
+steering, and queued continuations until final settlement. Counts each
+`tool_execution_start`, including failed attempts, but not commands inside Bash
+or tool calls internal to background subagents. Clears on the next input or
+session change. UI-only, with no timers, inference requests, session storage,
+or model-context changes. Disable through the individual resource in `pi config`.
 
 ## Workflow
 

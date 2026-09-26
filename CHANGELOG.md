@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bundle `stop-hook.ts`: prompt-to-settlement elapsed time and tool-call count
+  before the recap, with random Done/Cooked/Brewed/Built/Baked/Crafted labels.
+  Preserve timing across continuations and steering; wrap safely on narrow terminals.
+- Add a linked README table describing all 30 bundled extensions.
 - Round context counts to decimal thousands, with half-thousands rounded up:
   `Ctx 8k/262k 2.9%`. Counts below 1,000 remain whole numbers.
 - Add English folder documentation so the current GitHub directory listing

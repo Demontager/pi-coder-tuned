@@ -15,7 +15,8 @@ try {
   await loader.reload();
   const result = loader.getExtensions();
   assert.deepEqual(result.errors, []);
-  assert.equal(result.extensions.length, 29);
+  assert.equal(result.extensions.length, 30);
+  assert.equal(result.extensions.filter(e => path.basename(e.path) === 'stop-hook.ts').length, 1);
   const commands = result.extensions.flatMap(e => [...e.commands.keys()]);
   const tools = result.extensions.flatMap(e => [...e.tools.keys()]);
   assert.equal(new Set(commands).size, commands.length);

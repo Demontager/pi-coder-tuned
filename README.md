@@ -9,8 +9,8 @@ Live Demo
 
 
 A fork of [jayli/pi-coder](https://github.com/jayli/pi-coder), based on upstream
-2.1.3 (`d68d965`). Includes **29 extensions and 3 themes**, with English UI,
-cache-safe local recaps, and compact context-token counts. Original authorship
+2.1.3 (`d68d965`). Includes **30 extensions and 3 themes**, with English UI,
+cache-safe local recaps, turn timing, and compact context-token counts. Original authorship
 and MIT license are preserved.
 
 ## Install from GitHub
@@ -54,6 +54,7 @@ authentication, session history, and selected theme.
 | Outside Git | `ᗌ no git \| (no git)` | Both empty Git segments omitted |
 | Inside Git | Branch and added/deleted line counts | Retained |
 | Task lists | Model-driven `task_set` / `task_update` | Retained; not automatically forced |
+| Completed-turn counter | No final timing widget | Elapsed time and tool-call count before the recap |
 | Safety dialogs | Original decisions and mixed-language labels | Same decisions, English labels |
 
 ### English interface
@@ -109,7 +110,71 @@ Unknown values display `?`. The configured context capacity is not free memory;
 it is the model's context window. Existing warning/error colors and width-aware
 footer truncation remain in place.
 
+### Completed-turn counter
+
+[`stop-hook.ts`](extensions/stop-hook.ts) automatically shows a result above the
+editor as soon as the agent finishes, before the delayed recap:
+
+```text
+✦ Crafted in 2m 14s. Used 12 tool calls.
+
+✦ Recap: Built and verified the CLI…
+```
+
+Each completed run randomly chooses **Done, Cooked, Brewed, Built, Baked, or
+Crafted**. The label stays fixed when the screen redraws. Timing starts at prompt
+submission and ends at Pi's final `agent_settled` event, including tool execution,
+confirmation waits, retries, and compaction. Steering and queued follow-ups are
+included in the same measurement until Pi settles. The count includes all tool
+execution starts (including failed attempts); a Bash call counts once regardless
+of how many shell commands it contains. Background subagents' internal calls are
+not counted. Interrupted or failed model runs use `Interrupted` or `Failed`.
+
+The widget clears on the next prompt or session change. It makes no model requests
+and adds nothing to model context. It is bundled automatically; no `-e` flag or
+`PI_TURN_COUNTER_WORD` variable is needed. Disable it individually in `pi config`.
+If you tested the standalone prototype, remove
+`~/.pi/agent/extensions/turn-counter.ts` and stop passing its `-e` option when
+switching to this bundled version: Pi auto-discovers personal extensions too.
+
 ## Included functionality
+
+### Extensions
+
+| Extension | What it does |
+|---|---|
+| [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Compact Bash commands and tree-shaped output, with success/error indicators. |
+| [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Compact read results and width-aware file paths. |
+| [`tool-diff.ts`](extensions/tool-diff.ts) | Full-line edit/write diffs with line numbers and syntax highlighting. |
+| [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Compact, horizontally scrolling thinking blocks. |
+| [`user-message-bar/`](extensions/user-message-bar/) | Accent-colored bars beside user messages. |
+| [`prompt-editor.ts`](extensions/prompt-editor.ts) | Prompt gutter, Bash mode, and autocomplete spacing. |
+| [`fenceless-code-block/`](extensions/fenceless-code-block/) | Syntax-highlighted code blocks without visible fences. |
+| [`statusline/`](extensions/statusline/) | Model, compact context counts, Git information, and extension statuses. |
+| [`startup-logo/`](extensions/startup-logo/) | Startup logo, Pi version, and working directory. |
+| [`working-indicator/`](extensions/working-indicator/) | Live activity labels, token estimates, and elapsed time. |
+| [`stop-hook.ts`](extensions/stop-hook.ts) | Completed-run duration and tool-call count, with a random label before the recap. |
+| [`simple-task/`](extensions/simple-task/) | Model-driven task lists and `/tasks`. |
+| [`recap/`](extensions/recap/) | `/recap` and delayed idle recaps; request-free excerpts for local models. |
+| [`rewind/`](extensions/rewind/) | Shadow-Git checkpoints and `/rewind`. |
+| [`ask-user-question/`](extensions/ask-user-question/) | Structured questions answered in the terminal. |
+| [`mcp/`](extensions/mcp/) | MCP server tools and `/mcp` diagnostics. |
+| [`auto-default-model/`](extensions/auto-default-model/) | Persists model selection in settings. |
+| [`subagent-log-guard/`](extensions/subagent-log-guard/) | Keeps subagent diagnostics from disrupting the TUI. |
+| [`cwd-statusline.ts`](extensions/cwd-statusline.ts) | Working directory in the statusline. |
+| [`below-editor-after-statusline.ts`](extensions/below-editor-after-statusline.ts) | Places below-editor widgets under the statusline. |
+| [`folder-history.ts`](extensions/folder-history.ts) | Per-directory prompt history. |
+| [`theme-command.ts`](extensions/theme-command.ts) | Theme selection with live preview. |
+| [`plan-mode/`](extensions/plan-mode/) | Read-only planning, plan approval, and permission modes. |
+| [`core-rules/`](extensions/core-rules/) | Refreshes distilled global rules in context when needed. |
+| [`verify-loop/`](extensions/verify-loop/) | Verification checks after changes and `/goal` continuation. |
+| [`sandbox-boundary/`](extensions/sandbox-boundary/) | Shared deletion boundary; macOS seatbelt integration. |
+| [`destructive-guard/`](extensions/destructive-guard/) | Checks destructive operations and requests confirmation when enabled. |
+| [`init-command.ts`](extensions/init-command.ts) | Creates or updates project instructions with `/init`. |
+| [`clear-command.ts`](extensions/clear-command.ts) | `/clear` alias for `/new`. |
+| [`exit-command.ts`](extensions/exit-command.ts) | `/exit` and plain exit/quit/bye prompts. |
+
+### Themes and companions
 
 - Collapsed Bash/read output, edit/write diffs, thinking display, working indicator.
 - Task list tools, question dialogs, plan mode, shadow-Git rewind checkpoints.
