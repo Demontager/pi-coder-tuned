@@ -157,6 +157,7 @@ function formatContextSegment(theme: StatuslineTheme, source: StatuslineSource):
 	const capacity = usage?.contextWindow ?? readModel(source)?.contextWindow;
 	const count = (value: number | null | undefined) => {
 		if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "?";
+		if (value >= 1_000_000) return `${Math.round(value / 1_000_000)}M`;
 		if (value >= 1000) return `${Math.round(value / 1000)}k`;
 		return Math.round(value).toString();
 	};

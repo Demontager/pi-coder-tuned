@@ -198,6 +198,7 @@ describe("formatMainLine", () => {
 		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 0, contextWindow: 262144, percent: 0 }) }, gitOf(null), stateOf()), /Ctx 0\/262k 0\.0%$/);
 		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 7490, contextWindow: 7490, percent: 100 }) }, gitOf(null), stateOf()), /Ctx 7k\/7k 100\.0%$/);
 		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 7500, contextWindow: 7500, percent: 100 }) }, gitOf(null), stateOf()), /Ctx 8k\/8k 100\.0%$/);
+		assert.match(formatMainLine(plain, { ...source, getContextUsage: () => ({ tokens: 4000, contextWindow: 1_000_000, percent: 0.4 }) }, gitOf(null), stateOf()), /Ctx 4k\/1M 0\.4%$/);
 	});
 
 	it("shifts the context colour at 70% and 90%", () => {

@@ -9,6 +9,7 @@
   avoiding duplicate `/mcp` registration warnings.
 - Remove the shadow-Git `rewind/` extension; its pre-prompt repository scans can stall
   large non-Git working directories, and this package no longer provides Git features.
+- Format million-token context windows as `M` (for example, `1M`) in the statusline.
 - Add a linked README table describing all 30 bundled extensions.
 - Round context counts to decimal thousands, with half-thousands rounded up:
   `Ctx 8k/262k 2.9%`. Counts below 1,000 remain whole numbers.
