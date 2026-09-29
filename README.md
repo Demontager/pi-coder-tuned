@@ -158,7 +158,6 @@ switching to this bundled version: Pi auto-discovers personal extensions too.
 | [`recap/`](extensions/recap/) | `/recap` and delayed idle recaps; request-free excerpts for local models. |
 | [`rewind/`](extensions/rewind/) | Shadow-Git checkpoints and `/rewind`. |
 | [`ask-user-question/`](extensions/ask-user-question/) | Structured questions answered in the terminal. |
-| [`mcp/`](extensions/mcp/) | MCP server tools and `/mcp` diagnostics. |
 | [`auto-default-model/`](extensions/auto-default-model/) | Persists model selection in settings. |
 | [`subagent-log-guard/`](extensions/subagent-log-guard/) | Keeps subagent diagnostics from disrupting the TUI. |
 | [`cwd-statusline.ts`](extensions/cwd-statusline.ts) | Working directory in the statusline. |

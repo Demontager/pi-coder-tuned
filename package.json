@@ -41,7 +41,8 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions",
+      "!./extensions/mcp/**"
     ],
     "themes": [
       "./themes"
