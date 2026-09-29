@@ -28,14 +28,6 @@ This routes every pi npm operation (install, remove, dependency install for git 
 "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
 ```
 
-### `doubleEscapeAction` hands Esc-Esc to `rewind`
-
-```json
-"doubleEscapeAction": "none"
-```
-
-pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` extension takes over the double-Escape gesture and consumes the second press, so with `"tree"` you would get rewind's menu and never pi's tree. `"none"` states that intent explicitly. To go back: remove `extensions/rewind/` and set the value to `"tree"`.
-
 ## What each `settings.json` key does
 
 | Key | Value here | Notes |
@@ -50,7 +42,6 @@ pi's default is `"tree"` (the built-in session-tree navigator). The `rewind` ext
 | `packages` | `["npm:pi-web-access", "npm:pi-subagents"]` | The two companion packages. This array is exactly what `pi install` writes. |
 | `steeringMode` | `"one-at-a-time"` | pi's default, explicit. |
 | `markdown.mermaid` | `"streaming"` | pi's default, explicit. |
-| `doubleEscapeAction` | `"none"` | See above. |
 | `subagents.watchdog` | `{ "enabled": true }` | A `pi-subagents` setting: the opt-in second-model reviewer. On every turn that changed the repository it feeds that turn's diff plus the user's scope to an independent reviewer model looking for missed constraints, correctness risks, test gaps, unsafe changes and drift; clean turns are silent, `high` findings are pushed back into the model's context, `low` / `medium` are shown to the user only, and three identical warnings in a row are judged a deadlock and stop it. `/subagents-watchdog on\|off\|status` drives it inside a session; `settings.json` is read at startup, so an edit takes effect next session. The snapshot also sets `main.model`, which is machine-specific and removed here — see below. |
 | `subagents.agentOverrides` | `researcher` / `delegate` / `worker` → `tools: "inherit"` | A `pi-subagents` setting, not a pi core one. |
 
@@ -142,7 +133,6 @@ Renaming the tool changes the same request from `tools=7` to `tools=8` in the ga
 | `~/.pi/agent/models-store.json` | Cache of pi's built-in model catalog. |
 | `~/.pi/agent/sessions/` | Session transcripts. |
 | `~/.pi/agent/missions/`, `run-history.jsonl` | `pi-subagents` mission and run history. |
-| `~/.pi/agent/rewind/` | The `rewind` extension's shadow snapshot repositories. |
 | `~/.pi/agent/npm/`, `bin/` | Installed packages (use `pi install`) and pi's bundled `fd`/`rg`. |
 | `~/.pi/agent/web-search-cache/`, `~/.pi/folder-history/*.jsonl` | Runtime caches and history. |
 

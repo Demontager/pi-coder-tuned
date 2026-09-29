@@ -5,9 +5,9 @@ production UI is English, local recaps use request-free excerpts, and the footer
 shows rounded used/total tokens with Git placeholders hidden outside repositories.
 The detailed descriptions below were inherited from upstream.
 
-30 extensions load from this package. Thirteen are single files in `extensions/`, seventeen are directories whose entry point is `index.ts`. Helper/test directories without an `index.ts` are not loaded as extensions.
+29 extensions load from this package. Thirteen are single files in `extensions/`, sixteen are directories whose entry point is `index.ts`. Helper/test directories without an `index.ts` are not loaded as extensions.
 
-Every extension is also documented in its own header comment (Chinese, except `rewind/`): the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
+Every extension is also documented in its own header comment: the pi internals it relies on, the failure that motivated it and the trade-offs that are not visible in the code. This page is the map.
 
 ## Commands
 
@@ -27,7 +27,6 @@ Every extension is also documented in its own header comment (Chinese, except `r
 | `/plan` | `plan-mode` | — Toggle plan mode (same as `shift+tab`). |
 | `/plan-status` | `plan-mode` | — Print the current phase and the plan's steps. |
 | `/recap` | `recap` | — Summarizes the conversation now. |
-| `/rewind` | `rewind` | — Checkpoint menu; also Esc Esc at an empty prompt. |
 | `/sandbox-boundary` | `sandbox-boundary` | `forget <path>` \| `clear` \| `allow <path>` — Prints the delete boundary and the persistent allowlist; default form lists both. |
 | `/tasks` | `simple-task` | `status` (default) \| `clear` \| `on` \| `off` |
 | `/theme` | `theme-command` | `[name]` — Without arguments: picker with live preview. |
@@ -100,7 +99,7 @@ Replaces pi's footer with one status line and one status row:
 📁 /Users/you/project
 ```
 
-The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The branch icon is `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE — a glyph that happens to fork) — one column wide and East Asian Width Neutral, so a CJK-configured terminal cannot render it double-width, and deliberately **not** a Nerd Font glyph, so no patched font is needed. No font in the author's Ghostty stack covers U+15CC (`Lyth Mono Term`, `JetBrainsMonoNL Nerd Font Mono`, `Maple Mono SC NF`), so it is drawn through system fallback (`Euphemia UCAS`, `Noto Sans CanAborig` on macOS); two earlier icons were `⎇` (U+2387) and `⑂` (U+2442, OCR FORK). The second row renders whatever other extensions pass to `ctx.ui.setStatus()`, in the order given by `statusline/line.ts`'s `STATUS_PRIORITY`: `plan-mode`'s mode indicator **first**, then the rest in registration order (`cwd-statusline`'s path, `rewind`'s `◆ N checkpoints`), capped at 5 entries. The mode indicator wins the first slot on purpose: the second row truncates instead of wrapping, so an indicator that trails a growing path can be pushed out of sight, and registration order alone depends on directory names. `simple-task` is no longer one of these — see [below](#simple-task--task-list). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
+The main row shows model/thinking level, context usage, git branch and diff stat; when the working directory is not a git repository it says `no git`. The branch icon is `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE — a glyph that happens to fork) — one column wide and East Asian Width Neutral, so a CJK-configured terminal cannot render it double-width, and deliberately **not** a Nerd Font glyph, so no patched font is needed. No font in the author's Ghostty stack covers U+15CC (`Lyth Mono Term`, `JetBrainsMonoNL Nerd Font Mono`, `Maple Mono SC NF`), so it is drawn through system fallback (`Euphemia UCAS`, `Noto Sans CanAborig` on macOS); two earlier icons were `⎇` (U+2387) and `⑂` (U+2442, OCR FORK). The second row renders whatever other extensions pass to `ctx.ui.setStatus()`, in the order given by `statusline/line.ts`'s `STATUS_PRIORITY`: `plan-mode`'s mode indicator **first**, then the rest in registration order (`cwd-statusline`'s path), capped at 5 entries. The mode indicator wins the first slot on purpose: the second row truncates instead of wrapping, so an indicator that trails a growing path can be pushed out of sight, and registration order alone depends on directory names. `simple-task` is no longer one of these — see [below](#simple-task--task-list). Lines are truncated, never wrapped. Git reads happen on a debounced background path (400 ms after `turn_end`/`agent_end`/`tool_execution_end`, immediately on branch change, with a 30 s fallback poll) so the render path is a map lookup.
 
 - `PI_STATUSLINE_FREEZE=off` — disable the footer freeze. On every session switch pi unconditionally restores its builtin footer and clears all `setStatus` values, and no extension hook runs before that frame. The guard replays the previous frame's lines instead, which removes a visible flash. Turning it off restores the flash.
 - `PI_STATUSLINE_BOOT_SUPPRESS=off` — disable boot-window suppression. pi's built-in footer exists before the first extension runs (measured on this setup: its first frame lands at ~480 ms, this statusline at ~1.2 s), so without it you see the default state line and then watch the statusline replace it. [`statusline/footer-suppress.ts`](../extensions/statusline/footer-suppress.ts) patches `FooterComponent.prototype.render` at **extension-factory time** — before pi's TUI is constructed — to return zero lines, and releases it the moment our footer is installed. A 30 s cap releases it anyway when the handoff never happens (an extension error, or a non-TUI mode), so the bottom is never left permanently empty. The two windows have independent switches because they need different remedies: this one has no previous frame to replay, the freeze above has one.
@@ -224,17 +223,6 @@ Deliberately not implemented: no local storage, no session entry, no configurati
 
 `/recap` is **idempotent**: when a summary for the current exchange already exists and is on screen, running it again returns immediately — no model call, no widget reset, no notice. A second run would produce the same summary, and a *failed* second run would replace the summary you already have with a "could not generate" notice. The fingerprint is the last user+assistant pair plus the model, computed in one place (`latestExchange()`) and shared with the automatic path's de-duplication, so a new exchange re-opens the gate.
 
-### `rewind/` — checkpoints and `/rewind`
-
-Claude Code style checkpointing. Before every prompt that starts a turn, the working tree is snapshotted into a **shadow git repository** under `~/.pi/agent/rewind/<project-hash>/git` with `GIT_DIR` pointed at it and `GIT_WORK_TREE` at your project. Your repository's HEAD, index, refs and status are never touched, and this works in directories that are not git repositories at all.
-
-Files the snapshot cannot see — anything `edit`/`write` touches outside the project root, inside it but `.gitignore`d, or inside a nested repository — are covered by lazy pre-image mirroring driven by tool-call events, with blobs addressed by content.
-
-`/rewind`, or Esc Esc at an empty prompt, opens a menu: restore code and conversation, conversation only, code only, summarize from here, or never mind. Conversation restore uses pi's native session-tree navigation, which drops the selected user message and puts its text back into the editor.
-
-- **Requires `doubleEscapeAction: "none"`** in `settings.json`. The extension warns once at session start if the built-in tree navigator would fire instead. It consumes the second Esc (the selector takes focus synchronously, so letting it through would cancel the menu it just opened) while leaving the first Esc alone, so Esc still aborts streaming.
-- Known limits: only the `edit` and `write` tools are tracked (`bash` writes outside the root cannot be parsed), and files larger than 8 MB are not copied.
-
 ### `init-command.ts` — `/init`
 
 Claude Code style repository memory file generation. Target selection looks only at `ctx.cwd`:
@@ -296,7 +284,7 @@ The dialog is **truncated to one screen** (`truncatePlanForDialog`), and the hei
 
 `shift+tab` is taken from pi's built-in `app.thinking.cycle`. A conflicting `registerShortcut` is skipped by pi's runner, so the key is intercepted with `ctx.ui.onTerminalInput` **before** the editor sees it (only in TUI mode, while idle, and with no extension dialog open) and consumed. Because that displaces the thinking-level cycle, the extension rewrites `app.thinking.cycle` to `ctrl+shift+t` in `~/.pi/agent/keybindings.json` — and only when the key has no binding at all; a user-configured binding is left alone. Matching the key must go through pi-tui's `matchesKey`, not a string compare: `shift+tab` arrives as bare CSI (`\x1b[Z`), as the Kitty protocol's CSI-u (`\x1b[9;2u`) or as xterm's modifyOtherKeys, and pi turns the Kitty protocol on at startup, so a real terminal sends the second form. Pressing `shift+tab` while streaming still cycles the thinking level — plan mode only switches when you are stopped.
 
-Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getEntries()`: the latter returns every entry in the file including branches discarded by `rewind` / fork / branch navigation, so a plan dropped on another branch would come back to life (observed: no plan on the active branch, yet the statusline showed `▶ 0/1 executing`). A stored `normal` (the old name of `bypass`) is normalized through a whitelist, so an existing session's phase field cannot bring back a phase that no longer exists.
+Restoring state on startup reads `ctx.sessionManager.getBranch()`, **not** `getEntries()`: the latter returns every entry in the file including branches discarded by fork / branch navigation, so a plan dropped on another branch would come back to life (observed: no plan on the active branch, yet the statusline showed `▶ 0/1 executing`). A stored `normal` (the old name of `bypass`) is normalized through a whitelist, so an existing session's phase field cannot bring back a phase that no longer exists.
 
 - `PI_PLAN_MODE=off` — disable the extension entirely.
 - `PI_PLAN_MODE_AUTO=off` — keep `shift+tab` and `/plan`, drop the model's `enter_plan_mode` tool.
@@ -509,7 +497,6 @@ Every switch is an environment variable read at use time, not cached at load, so
 
 ## Extension interactions
 
-- **Esc Esc is shared.** `rewind` replaces pi's built-in double-Escape action and needs `doubleEscapeAction: "none"`; see above.
 - **`shift+tab` is shared.** `plan-mode` consumes it before the editor sees it and rebinds the thinking-level cycle to `ctrl+shift+t`; while a turn is streaming the key still reaches `app.thinking.cycle`.
 - **The `bash` tool can only be registered once.** Everything that shapes its rendering lives in `bash-command-collapse.ts` for that reason — a second file registering `bash` would be ignored silently.
 - **`recap` imports `simple-task/gap.ts`.** The neighbour-gap heuristic is shared rather than duplicated, so `recap` and `simple-task` must be installed together. In this package they always are; if you copy extensions individually, copy both.
@@ -526,7 +513,6 @@ Every switch is an environment variable read at use time, not cached at load, so
 | Location | Written by | Contents |
 | --- | --- | --- |
 | `~/.pi/agent/settings.json` | `auto-default-model` | `defaultProvider` / `defaultModel` on every model switch. |
-| `~/.pi/agent/rewind/<project-hash>/git` | `rewind` | Shadow git repository with pre-turn snapshots. Never touched by your repository. |
 | `~/.pi/folder-history/<path-with-dashes>.jsonl` | `folder-history` | Command history per working directory. |
 | Session log (via `appendEntry`) | `simple-task` | Task list state; discarded with the session, never written to the repo. |
 | Session log (via `appendEntry`) | `plan-mode` | Plan phase and the plan text; same lifetime, never written to the repo. |

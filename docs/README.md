@@ -11,4 +11,4 @@
 | [development.md](development.md) | Running the tests, adding an extension, verifying changes against a real pi, publishing. |
 | [handbook.zh.md](handbook.zh.md) | **Chinese.** The original handbook this package was extracted from: the author's machine, the LiteLLM gateway, and the full rationale behind every design decision. It is more detailed than the English docs and is kept verbatim, including the parts that describe a machine you do not have. |
 
-Everything else lives in the source: each extension carries a long header comment (in Chinese, except `rewind/`) explaining the pi internals it depends on, the failure that motivated it, and the trade-offs that are not obvious from the code.
+Everything else lives in the source: each extension carries a long header comment explaining the pi internals it depends on, the failure that motivated it, and the trade-offs that are not obvious from the code.

@@ -7,6 +7,8 @@
   Preserve timing across continuations and steering; wrap safely on narrow terminals.
 - Stop shipping the legacy `mcp/` extension now that Pi provides built-in MCP support,
   avoiding duplicate `/mcp` registration warnings.
+- Remove the shadow-Git `rewind/` extension; its pre-prompt repository scans can stall
+  large non-Git working directories, and this package no longer provides Git features.
 - Add a linked README table describing all 30 bundled extensions.
 - Round context counts to decimal thousands, with half-thousands rounded up:
   `Ctx 8k/262k 2.9%`. Counts below 1,000 remain whole numbers.

@@ -9,7 +9,7 @@ Live Demo
 
 
 A fork of [jayli/pi-coder](https://github.com/jayli/pi-coder), based on upstream
-2.1.3 (`d68d965`). Includes **30 extensions and 3 themes**, with English UI,
+2.1.3 (`d68d965`). Includes **29 extensions and 3 themes**, with English UI,
 cache-safe local recaps, turn timing, and compact context-token counts. Original authorship
 and MIT license are preserved.
 
@@ -156,7 +156,6 @@ switching to this bundled version: Pi auto-discovers personal extensions too.
 | [`stop-hook.ts`](extensions/stop-hook.ts) | Completed-run duration and tool-call count, with a random label before the recap. |
 | [`simple-task/`](extensions/simple-task/) | Model-driven task lists and `/tasks`. |
 | [`recap/`](extensions/recap/) | `/recap` and delayed idle recaps; request-free excerpts for local models. |
-| [`rewind/`](extensions/rewind/) | Shadow-Git checkpoints and `/rewind`. |
 | [`ask-user-question/`](extensions/ask-user-question/) | Structured questions answered in the terminal. |
 | [`auto-default-model/`](extensions/auto-default-model/) | Persists model selection in settings. |
 | [`subagent-log-guard/`](extensions/subagent-log-guard/) | Keeps subagent diagnostics from disrupting the TUI. |
@@ -176,7 +175,7 @@ switching to this bundled version: Pi auto-discovers personal extensions too.
 ### Themes and companions
 
 - Collapsed Bash/read output, edit/write diffs, thinking display, working indicator.
-- Task list tools, question dialogs, plan mode, shadow-Git rewind checkpoints.
+- Task list tools, question dialogs, and plan mode.
 - MCP integration, model-default persistence, prompt history, theme selection.
 - Destructive-action guard, sandbox boundary, verification gate and `/goal`.
 - Three upstream themes, retaining their original names for compatibility.
