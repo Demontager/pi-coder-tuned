@@ -9,8 +9,8 @@ Live Demo
 
 
 A fork of [jayli/pi-coder](https://github.com/jayli/pi-coder), based on upstream
-2.1.3 (`d68d965`). Includes **29 extensions and 3 themes**, with English UI,
-cache-safe local recaps, turn timing, and compact context-token counts. Original authorship
+2.1.3 (`d68d965`) with selected features from 2.5.0. Includes **32 extensions and 3 themes**, with English UI,
+cache-safe local recaps, turn timing, compact context-token counts, and intelligent tool routing. Original authorship
 and MIT license are preserved.
 
 ## Install from GitHub
@@ -144,15 +144,18 @@ switching to this bundled version: Pi auto-discovers personal extensions too.
 | Extension | What it does |
 |---|---|
 | [`bash-command-collapse.ts`](extensions/bash-command-collapse.ts) | Compact Bash commands and tree-shaped output, with success/error indicators. |
+| [`explored-group/`](extensions/explored-group/) | Routes simple grep/find/ls lookups to native tools for efficiency. |
 | [`read-path-collapse.ts`](extensions/read-path-collapse.ts) | Compact read results and width-aware file paths. |
 | [`tool-diff.ts`](extensions/tool-diff.ts) | Full-line edit/write diffs with line numbers and syntax highlighting. |
 | [`thinking-collapse.ts`](extensions/thinking-collapse.ts) | Compact, horizontally scrolling thinking blocks. |
+| [`codemode-tree/`](extensions/codemode-tree/) | Tree rendering for codemode execution blocks. |
+| [`web-search-tree/`](extensions/web-search-tree/) | Tree rendering for pi-web-access search results. |
 | [`user-message-bar/`](extensions/user-message-bar/) | Accent-colored bars beside user messages. |
 | [`prompt-editor.ts`](extensions/prompt-editor.ts) | Prompt gutter, Bash mode, and autocomplete spacing. |
 | [`fenceless-code-block/`](extensions/fenceless-code-block/) | Syntax-highlighted code blocks without visible fences. |
 | [`statusline/`](extensions/statusline/) | Model, compact context counts, Git information, and extension statuses. |
 | [`startup-logo/`](extensions/startup-logo/) | Startup logo, Pi version, and working directory. |
-| [`working-indicator/`](extensions/working-indicator/) | Live activity labels, token estimates, and elapsed time. |
+| [`working-indicator/`](extensions/working-indicator/) | Live activity labels, token estimates, elapsed time, and turn-end markers. |
 | [`stop-hook.ts`](extensions/stop-hook.ts) | Completed-run duration and tool-call count, with a random label before the recap. |
 | [`simple-task/`](extensions/simple-task/) | Model-driven task lists and `/tasks`. |
 | [`recap/`](extensions/recap/) | `/recap` and delayed idle recaps; request-free excerpts for local models. |
@@ -172,11 +175,19 @@ switching to this bundled version: Pi auto-discovers personal extensions too.
 | [`clear-command.ts`](extensions/clear-command.ts) | `/clear` alias for `/new`. |
 | [`exit-command.ts`](extensions/exit-command.ts) | `/exit` and plain exit/quit/bye prompts. |
 
+### Recent additions from upstream
+
+- **explored-group** — Intelligent tool routing that sends simple grep/find/ls commands to native tools instead of bash, improving response time and token efficiency.
+- **codemode-tree** — Structured tree rendering for codemode execution blocks, matching the bash output style.
+- **web-search-tree** — Tree rendering for pi-web-access search results with status indicators.
+- **Turn-end markers** — Working indicator now displays completion markers like "✻ Churned for 3m 37s · done 11:52 PM".
+- **MCP removed** — MCP integration is now built into Pi ≥ 0.99.1; the extension has been removed to avoid conflicts.
+
 ### Themes and companions
 
 - Collapsed Bash/read output, edit/write diffs, thinking display, working indicator.
 - Task list tools, question dialogs, and plan mode.
-- MCP integration, model-default persistence, prompt history, theme selection.
+- Model-default persistence, prompt history, theme selection.
 - Destructive-action guard, sandbox boundary, verification gate and `/goal`.
 - Three upstream themes, retaining their original names for compatibility.
 
@@ -195,9 +206,11 @@ for individual commands and switches.
 
 ## Requirements and configuration
 
-Validated against **Pi 0.87.1**. Upstream's stated baseline is Pi 0.85.1+ and
+Validated against **Pi 1.3.0**. Upstream's stated baseline is Pi 0.85.1+ and
 Node 22.19+; older Pi versions and Windows have not been validated for this fork.
 The macOS seatbelt boundary remains macOS-only; it is not a Linux kernel sandbox.
+
+**Note**: This fork requires Pi ≥ 0.99.1 for builtin MCP support and codemode-tree compatibility.
 
 Installation loads extensions and themes. It does not overwrite your global
 settings or install models, credentials, MCP servers, or skills. The files under
