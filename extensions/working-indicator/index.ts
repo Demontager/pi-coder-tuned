@@ -1,186 +1,232 @@
 /**
- * working-indicator.ts — 语义化 working spinner 文案 + 运行时长读秒 + bash 执行中行尾 ●
+ * working-indicator.ts — semantic working spinner text + elapsed-seconds display + trailing `●`
+ * while bash executes
  *
- * pi 内置的 working loader 在流式期间只显示一句固定的 "Working"，看不出当前
- * 在做什么、已经跑了多久。这个扩展用 `ctx.ui.setWorkingMessage()` 把它换成
- * 随状态变化的文案，并在尾部挂一个每秒读秒的运行时长。
+ * pi's built-in working loader shows only a fixed "Working" during streaming — you cannot tell
+ * what it is doing or how long it has been running. This extension replaces it via
+ * `ctx.ui.setWorkingMessage()` with state-aware text plus a per-second elapsed counter at the tail.
  *
- * 文案规则：
- *   bash 工具          → Tools Calling (↓ N tokens · D)
- *   edit 工具          → Editing         (↓ N tokens · D)
- *   write 工具         → Writing         (↓ N tokens · D)
- *   read 工具          → Reading         (↓ N tokens · D)
- *   模型推理中         → Thinking        (↓ N tokens · D)
- *   其他（含未知工具） → Working         (D)
+ * Text rules:
+ *   bash tool          → Tools Calling (↓ N tokens · D)
+ *   edit tool          → Editing         (↓ N tokens · D)
+ *   write tool         → Writing         (↓ N tokens · D)
+ *   read tool          → Reading         (↓ N tokens · D)
+ *   model thinking     → Thinking        (↓ N tokens · D)
+ *   everything else    → Working         (D)
+ *   (unknown tools included)
  *
- * 配色：**标签用正文色（正常白），后面的统计段保持 pi 默认的 muted 灰**。
- * 详见 `formatWorkingMessage` 的注释 —— 颜色必须拼进文案字符串里，因为 pi 只按
- * 「整条文案」上色，没有分段着色的入口。
+ * Colors: **the label takes the body color (normal white); the stats segment after it keeps pi's
+ * default muted gray**. See `formatWorkingMessage`'s comment — colors must be spliced into the
+ * message string itself, because pi colors "the whole message" and offers no per-segment entry.
  *
- * 时长格式：<60s 用 `42s`；≥60s 用 `1m 23s`；≥1h 用 `1h 23m 32s`。
+ * Duration format: under 60s → `42s`; 60s+ → `1m 23s`; 1h+ → `1h 23m 32s`.
  *
- * token 口径说明：`↓ N tokens` 是**当前这一小段的产出量**，不是回合累加值。每次推理段
- * （`thinking_start`）、每次工具参数段（`toolcall_start`）都从 0 重新开始数 —— 否则一个
- * 回合里跑几次工具，数字会一路涨上去，看不出「这次 bash 命令有多大」。实现上按段类型
- * 分成独立的计数器（推理段 / 工具参数段各一份），显示的数跟着当前文案走：`Thinking` 配
- * 推理段的数、`Tools Calling` / `Editing` / `Writing` / `Reading` 配工具参数段的数。
- * 正文段（`text_delta`）刻意不计：它从不显示，累加只会污染后面几段的数。
+ * Token accounting: `↓ N tokens` is **the current small segment's output**, not a per-turn
+ * accumulation. Each thinking segment (`thinking_start`) and each tool-argument segment
+ * (`toolcall_start`) restarts at 0 — otherwise a turn running several tools would show an
+ * ever-climbing number and "how big this bash command is" would be invisible. Implementation
+ * keeps per-segment counters (one for thinking, one for tool args); the displayed number follows
+ * the current label: `Thinking` shows the thinking counter, `Tools Calling` / `Editing` /
+ * `Writing` / `Reading` show the tool-args counter. Text segments (`text_delta`) deliberately
+ * are not counted: they never display, and accumulating them would only pollute later segments.
  *
- * 四个实测得来的实现前提（都验证过）：
- *   1. **`usage.output` 在流式期间恒为 0**（probe 实测：thinking_start /
- *      toolcall_start / 多个 text_delta 时点全是 0），所以 token 数只能从
- *      流式字符估算，不能读 usage。
- *   2. **`toolcall_start` 的 `partial.content[contentIndex].name` 已经带
- *      工具名**（probe 实测 `block.type=toolCall block.name=bash`），所以
- *      参数还在流式生成时就能显示工具态，不必等到 `tool_execution_start`。
- *   3. 现有扩展没人用过 `setWorkingMessage` / `setWorkingIndicator`（grep
- *      0 命中；`setStatus` 只被 simple-task / cwd-statusline 用在 footer），
- *      所以不存在同名覆盖冲突。
- *   4. **`toolcall_checkpoint` 不在扩展能看到的事件联合里** —— pi-ai 的
- *      `AssistantMessageEvent` 只有 start / text_* / thinking_* /
- *      toolcall_{start,delta,end} / done / error；checkpoint 是 TUI / session
- *      编码器内部用的 `MessageFrame`，在事件流下游。所以每个参数 delta 都会
- *      以 `toolcall_delta` 到达扩展，段级计数本身就是完整的，不需要为恢复会话的
- *      catch-up 补一段（补了反而会和 delta 重复计数）。
+ * Four implementation premises established by measurement (all verified):
+ *   1. **`usage.output` stays 0 during streaming** (probe: thinking_start / toolcall_start /
+ *      several text_delta points all 0), so the token count can only be estimated from
+ *      streamed characters, never read from usage.
+ *   2. **`toolcall_start`'s `partial.content[contentIndex].name` already carries the tool
+ *      name** (probe saw `block.type=toolCall block.name=bash`), so the tool state can show
+ *      while args still stream — no waiting for `tool_execution_start`.
+ *   3. No existing extension uses `setWorkingMessage` / `setWorkingIndicator` (grep: 0 hits;
+ *      `setStatus` is only used by simple-task / cwd-statusline in the footer), so there is
+ *      no same-name override conflict.
+ *   4. **`toolcall_checkpoint` is not in the event union extensions see** — pi-ai's
+ *      `AssistantMessageEvent` only has start / text_* / thinking_* / toolcall_{start,delta,end}
+ *      / done / error; checkpoint is a `MessageFrame` used inside the TUI / session encoder,
+ *      downstream of the event stream. So every arg delta reaches the extension as
+ *      `toolcall_delta`, and per-segment counting is already complete — no catch-up segment
+ *      is needed for resumed sessions (adding one would double-count deltas).
  *
- * 时长口径说明：秒数是**回合级**时钟（从 `agent_start` 起算），不是每个活动
- * 各自计时。这样 `Working (42s)` 和 `Tools Calling (… · 42s)` 是同一个数，
- * 不会因为状态切换而跳回 0 —— 切换活动时时钟若重置，读秒就失去了"这个回合
- * 已经花了多久"的意义。**token 数正好相反，是段级的**：时长答"这个回合跑了多久"，
- * token 答"当前这一段产出了多少"，两个口径刻意不同。
+ * Duration accounting: seconds are a **turn-level** clock (from `agent_start`), not per
+ * activity. That way `Working (42s)` and `Tools Calling (… · 42s)` show the same number and
+ * never snap back to 0 on a state switch — resetting the clock per activity would destroy the
+ * "how long this turn has taken" meaning. **Token counts are the opposite — per-segment**:
+ * duration answers "how long the turn ran", tokens answer "how much this segment produced" —
+ * deliberately different scopes.
  *
- * 行尾还有一段**右对齐的提示词摘要**（`working-summary.ts` 算布局）：当前回合
- * 用户输入**压平成一行**后的前排字符，放不下就截断补 `…`，形如
+ * There is also a **right-aligned prompt summary** at the row tail (layout computed by
+ * `working-summary.ts`): the current turn's user input **flattened to one line**, leading
+ * characters kept, truncated with `…` when too long — like
  *
- *     ⠧ Working (23s)                        ✦ /init 我要优化…
+ *     ⠧ Working (23s)                        ✦ /init I want to optimize…
  *
- * 用来在长任务跑起来之后提醒「这一轮到底在干什么」。压平规则见 `flattenPrompt`：
- * 多行折成一句（行间按两侧字符决定补不补空格，CJK 折行处不插空格）、缩进 / 制表符 /
- * 连续空格折叠、ANSI 转义与零宽字符剥掉、Markdown 排版噪声（列表符号 / 引用 / 标题 /
- * 代码围栏标记行）剥掉 —— 截断针对整段而不只是第一行。几个要点：
- *   - 提示词从 `input` 事件捕获（"Fired when user input is received, before
- *     agent processing"）：普通消息就是用户敲的原文，skill / 模板命令是展开前的
- *     原始命令行。**扩展命令（如 /init）例外** —— pi 在 `input` 事件之前就把
- *     原始命令行消费掉了（`agent-session.prompt()` 先走
- *     `_tryExecuteExtensionCommand`，命中即 return），扩展能看到的只有命令
- *     handler 经 `sendUserMessage` 发出的那段提示词，所以 /init 显示的是它
- *     构造的提示词压平后的前排字符而不是 "/init …"。
- *   - 压平在 `input` 事件里**算一次并缓存**（`promptText`），不在每次 refresh 里重算 ——
- *     refresh 每个流式 delta 都会跑，几十 KB 的粘贴不能每次都重新扫一遍。
- *   - 流式中 steer / followUp 也会触发 `input`，摘要跟着更新成最新一条指令。
- *   - **长提示词会异步请模型压成一句话**（`summary-request.ts` 决策 / 提示词 / 清洗，
- *     这里只负责发请求与回包护栏）：原文超过可用宽度 `PI_WORKING_SUMMARY_TRIGGER` 倍
- *     （默认 1，即只要放不下就压）时，拿**同一个可用宽度**算出一个目标列数，让
- *     模型按「一句话说清这段提示词要干什么」返回；请求与主回合并行，不 `await`、不阻
- *     塞任何渲染路径；回来了就顶掉原文，没回来 / 超时 / 报错 / 返回空串就一直显示截断
- *     后的原文，并隔 `PI_WORKING_SUMMARY_RETRY_MS`（默认 3s）**再试一次** —— 每个提示词
- *     最多请求两次，第二次仍失败就放弃（新提示词 / 回合结束会作废待重试的那次）。摘要
- *     回来超长也不追问：按可见宽度正常截断就行（再要一次只会让这一格来回跳）。压平后的
- *     原文也参与判断（不像旧实现那样只看第一行）：只要整段超出阈值就请求，所以多行
- *     粘贴的长提示词同样能拿到摘要。
- *     代价：本机网关给这些模型路由在 `extra_body` 里**写死了 thinking**
- *     （`thinking: {type: enabled}` + `reasoning_effort: max`，客户端关不掉），所以这次
- *     请求一定带着思考：实测 3-20s、600-1400 个 thinking token。默认用当前会话模型，
- *     想省钱 / 提速可以 `PI_WORKING_SUMMARY_MODEL=provider/modelId` 换成便宜快的模型，
- *     或者 `PI_WORKING_SUMMARY_LLM=off` 整个关掉。
- *   - 右对齐靠「把整行可见宽度恰好凑满预算」实现：pi 的 working message 走
- *     Text 的 word-wrap，只有不超宽才单行原样输出（详见 working-summary.ts
- *     头注释）。预算 = 终端列数 − 4（spinner "⠧ " 2 列 + Text paddingX 左右
- *     各 1 列），终端宽度每次刷新现读 `process.stdout.columns`，resize 后
- *     下一个 1s tick 自愈。
- *   - 摘要段另有**整段宽度上限 = 终端宽度的一半**（`floor(cols / 2)`，含
- *     `✦ ` 前缀）：宽终端上剩余空间再多，摘要也不会超过半屏，免得长提示词
- *     把左边的状态文案挤得只剩几列；上限收窄出的富余并进 gap，右对齐不变。
- *     请求目标长度用的是同一个 `availableSummaryTextWidth`，所以「要求模型写多长」
- *     与实际能显示多少列是同一份数学。
- *   - 只对**独立 spinner 行**（statusContainer）精确成立。若 working 指示器被
- *     嵌进编辑器上边框（内置编辑器的 embedWorkingStatus 模式；本机装的
- *     prompt-editor.ts 没开嵌入，所以走独立行），边框渲染会把超宽部分截掉、
- *     摘要自动退化为不显示（折行发生在 gap 的空格处，第一行仍是原文案），
- *     不会渲染出半截摘要。
- *   - 配色：`✦` 用 syntaxKeyword（语法高亮的关键字色，在各行主题里都够显眼又不刺眼），
- *     摘要正文用 muted（与统计段一致，不跟标签抢注意力）。
- *   - 开关：`PI_WORKING_SUMMARY=off` 整段关闭；`PI_WORKING_SUMMARY_LLM=off` 只关掉
- *     模型压缩（退回「压平 + 截断」）；`PI_WORKING_SUMMARY_TRIGGER=<n>` 调触发倍数
- *     （默认 1 = 只要放不下就请求；调大则先容忍截断，见 `SUMMARY_TRIGGER_RATIO`）；
- *     `PI_WORKING_SUMMARY_MODEL=provider/modelId` 指定摘要模型（缺省用
- *     当前会话模型，也可以用便宜快的模型，摘要只是个附带请求）；
- *     `PI_WORKING_SUMMARY_GAP=<n>` 调整左段与摘要之间的最小空隙（默认 1 列；
- *     右对齐时实际空隙通常远大于它，这个值只是窄终端下的下限）。
+ * meant to remind you "what this round is actually doing" during a long task. The flattening
+ * rules live in `flattenPrompt`: multi-line folds into one sentence (join spacing decided by
+ * both sides' characters; no space at a CJK break), indents / tabs / space runs collapse,
+ * ANSI escapes and zero-width chars are stripped, Markdown layout noise (list bullets /
+ * quotes / headings / code-fence marker lines) removed — truncation applies to the whole
+ * text, not just the first line. Points worth noting:
+ *   - The prompt is captured on `input` ("Fired when user input is received, before agent
+ *     processing"): a normal message is the user's verbatim text, a skill / template command is
+ *     the raw command line before expansion. **Extension commands (e.g. /init) are the
+ *     exception** — pi consumes the raw command line before the `input` event
+ *     (`agent-session.prompt()` runs `_tryExecuteExtensionCommand` first and returns on a hit),
+ *     so the only text the extension sees is what the command handler sends via
+ *     `sendUserMessage`; /init therefore shows the flattened leading chars of its constructed
+ *     prompt, not "/init …".
+ *   - Flattening is computed **once and cached** in `input` (`promptText`), not recomputed per
+ *     refresh — refresh runs on every streaming delta and a tens-of-KB paste cannot be rescanned
+ *     each time.
+ *   - Mid-stream steer / followUp also fire `input`, updating the summary to the newest
+ *     instruction.
+ *   - **A long prompt asynchronously asks the model for a one-line summary** (decision / prompt
+ *     / cleanup in `summary-request.ts`; this file only sends the request and guards the
+ *     reply): when the flattened original exceeds the available width × `PI_WORKING_SUMMARY_TRIGGER`
+ *     (default 1, i.e. request whenever it does not fit), a target column count is computed
+ *     from the **same available width** and the model is asked to state "what this prompt does"
+ *     in one line. The request runs parallel to the main round — no `await`, no render path
+ *     blocked; on arrival it replaces the original text; on absence / timeout / error / empty
+ *     reply the truncated original keeps showing, and after `PI_WORKING_SUMMARY_RETRY_MS`
+ *     (default 3s) it is **retried once** — at most two requests per prompt, then it gives up
+ *     (a new prompt / turn end cancels the pending retry). An overlong reply is never asked
+ *     again: truncate by visible width (re-asking would only make the cell jump). The
+ *     *flattened* original is what gets measured (unlike the old implementation that looked
+ *     only at the first line) — whenever the whole thing exceeds the threshold it requests,
+ *     so a multi-line pasted prompt gets a summary too.
+ *     Cost: this machine's gateway **hard-codes thinking** into these model routes
+ *     (`thinking: {type: enabled}` + `reasoning_effort: max` in `extra_body`, not client-
+ *     switchable), so every request carries thinking: measured 3-20s and 600-1400 thinking
+ *     tokens. Defaults to the current session model; for cheaper/faster use
+ *     `PI_WORKING_SUMMARY_MODEL=provider/modelId`, or `PI_WORKING_SUMMARY_LLM=off` to disable.
+ *   - Right-alignment works by "filling the row's visible width to exactly the budget": pi's
+ *     working message goes through Text's word-wrap, which emits a verbatim single line only
+ *     when not overlong (see working-summary.ts header). Budget = terminal columns − 4
+ *     (spinner "⠧ " 2 cols + Text paddingX 1 each side); the terminal width is re-read via
+ *     `process.stdout.columns` each refresh, so resize self-heals on the next 1s tick.
+ *   - The summary segment has its own **whole-segment cap = half the terminal width**
+ *     (`floor(cols / 2)`, `✦ ` prefix included): no matter how much room remains on a wide
+ *     terminal, the summary never exceeds half the screen, so a long prompt cannot squeeze the
+ *     status text to a few columns; headroom freed by the cap folds into the gap, right-
+ *     alignment unchanged. The request's target length uses the same
+ *     `availableSummaryTextWidth`, so "how long the model should write" and "how many columns
+ *     can actually show" share one math.
+ *   - Exact only for the **standalone spinner row** (statusContainer). If the working
+ *     indicator is embedded in the editor's top border (built-in editor's embedWorkingStatus
+ *     mode; the local prompt-editor.ts does not enable embedding, so the standalone row is
+ *     used), the border renderer clips the overlong part and the summary degrades gracefully
+ *     to not shown (wrapping happens at the gap's spaces; row 1 remains the original text) —
+ *     a half summary is never rendered.
+ *   - Colors: `✦` uses syntaxKeyword (the syntax-highlight keyword color — prominent but not
+ *     harsh in every theme); the summary body uses muted (same as the stats segment, no
+ *     attention fight with the label).
+ *   - Switches: `PI_WORKING_SUMMARY=off` disables the whole summary; `PI_WORKING_SUMMARY_LLM=off`
+ *     disables only the model compression (falls back to "flatten + truncate");
+ *     `PI_WORKING_SUMMARY_TRIGGER=<n>` tunes the trigger ratio (default 1 = request whenever
+ *     it does not fit; larger tolerates truncation first — see `SUMMARY_TRIGGER_RATIO`);
+ *     `PI_WORKING_SUMMARY_MODEL=provider/modelId` picks the summary model (defaults to the
+ *     session model; a cheap fast model also works — the summary is only a side request);
+ *     `PI_WORKING_SUMMARY_GAP=<n>` tunes the minimum gap between left segment and summary
+ *     (default 1 column; under right-alignment the actual gap is usually far larger — this
+ *     value is only the narrow-terminal floor).
  *
- * ## spinner 幻彩帧（`spinner-frames.ts`）
+ * ## Spinner rainbow frames (`spinner-frames.ts`)
  *
- * pi 的 working spinner 是十帧盲文 + 单色 accent。本扩展把它换成**同族盲文按调色板轮换颜色**
- * 的幻彩帧：accent → success → warning → syntaxKeyword → toolDiffAdded → toolDiffRemoved →
- * toolTitle，每色 ≈1.5s（19 帧 × 80ms = 1520ms；1500ms 不是 80ms 的整数倍，取最近的 19 帧，
- * 差 1.3%；初版 400ms → 800ms → 1520ms，一路按需求放慢），旋转速度与 pi 默认完全一致
- * （同一套十帧盲文、同一个 80ms 帧间隔），所以看着只是「那只熟悉的 spinner 在变色」。
+ * pi's working spinner is ten braille frames in one accent color. This extension replaces it
+ * with **the same braille family cycling a palette**: accent → success → warning →
+ * syntaxKeyword → toolDiffAdded → toolDiffRemoved → toolTitle, each color ≈1.5s (19 frames ×
+ * 80ms = 1520ms; 1500ms is not a multiple of 80ms so the nearest, 19 frames, is used — 1.3%
+ * off; evolved 400ms → 800ms → 1520ms per the requirement's pace), and rotation speed identical
+ * to pi's default (same ten braille frames, same 80ms interval) — so it looks like "the familiar
+ * spinner, just changing colors".
  *
- * 帧表只能**预烘颜色**：`ctx.ui.setWorkingIndicator({ frames })` 的自定义帧是 verbatim 渲染的
- * （pi 的 Loader 里 `renderIndicatorVerbatim` 为真时不套 `spinnerColorFn`），颜色得自己带在帧
- * 字符串里。于是换主题后必须重装帧表 —— `refresh()` 每秒读主题时顺手比一下色板指纹（同主题
- * 稳定、换肤必变），变了才重装（重装会把动画相位复位，所以不能进每秒 tick 里无脑调）。
- * 帧表怎么排、色槽撞车怎么去重、单色主题怎么降级，全在 `spinner-frames.ts` 头注释里（纯模块，
- * 12 条 `node --test` 用例）。
+ * The frame table can only have colors **pre-baked**: `ctx.ui.setWorkingIndicator({ frames })`
+ * renders custom frames verbatim (pi's Loader skips `spinnerColorFn` when
+ * `renderIndicatorVerbatim` is true), so the frame string must carry its own color. Hence the
+ * table must be reinstalled after a theme change — `refresh()` compares the palette fingerprint
+ * while reading the theme each second (stable within one theme, guaranteed to change on skin
+ * swap) and reinstalls only then (a reinstall resets the animation phase, so it must not run
+ * blindly inside every tick).
+ * How the table is laid out, how colliding color slots dedupe, and how monochrome themes
+ * degrade are all in `spinner-frames.ts`'s header comment (pure module, 12 `node --test` cases).
  *
- * 三个装帧表的时机：
- *   - `agent_start`：回合开始、spinner 还没渲染，相位复位看不见；同时把「上一回合被
- *     `ask_user_question` 顶掉」与「换会话时 pi 的 `resetExtensionUI()` 把 indicator 还原成
- *     默认帧」这两种情况一并补回来。
- *   - `refresh()` 里的指纹比对：`/theme` 换肤后一秒内自愈。
- *   - `ask_user_question` 的 `tool_execution_end`：那个扩展在问卷期间冻结 spinner（单帧 ⠿），
- *     退出时无参 `setWorkingIndicator()` 恢复的是 **pi 的默认帧**（它不知道本扩展的彩帧），
- *     所以问卷一结束就补装，免得这一回合剩下的时间掉回单色。
+ * Three moments the table gets installed:
+ *   - `agent_start`: the turn begins and the spinner has not rendered yet, so the phase reset
+ *     is invisible; it also covers both "last turn's indicator was displaced by
+ *     `ask_user_question`" and "pi's `resetExtensionUI()` on session replace restored the
+ *     default frames".
+ *   - the fingerprint check inside `refresh()`: self-heals within a second of `/theme`.
+ *   - `tool_execution_end` of `ask_user_question`: that extension freezes the spinner to a
+ *     single frame (⠿) during its questionnaire, and its no-arg `setWorkingIndicator()` on
+ *     exit restores **pi's default frames** (it does not know about this extension's rainbow
+ *     frames) — so reinstall right when the questionnaire ends, or the rest of the turn drops
+ *     back to monochrome.
  *
- * 七个色槽在当前主题里可能撞色（实测 pi-coder-summer-night 的 success == toolDiffAdded、warning ==
- * toolTitle），撞车的只留一个；如果最后只剩一种颜色（单色主题 / `NO_COLOR` / 恒等 `fg`），
- * 干脆不下发帧表、保持 pi 默认 spinner —— 装一张每帧长得都一样的「动画」表没有意义。
- * 开关：`PI_SPINNER_RAINBOW=off` 回到单色 accent；`PI_SPINNER_COLOR_HOLD=<帧数>` 调每种
- * 颜色持续多久（默认 19 帧 ≈ 1.5s；1 = 每帧一换，在 80ms 帧率下是频闪，不是幻彩）。
+ * The seven slots may collide under the current theme (measured on pi-coder-summer-night:
+ * success == toolDiffAdded, warning == toolTitle); colliders keep only one. If only one color
+ * survives (monochrome theme / `NO_COLOR` / identity `fg`), no table is installed at all — pi's
+ * default spinner stays, since an "animation" whose every frame looks identical is pointless.
+ * Switches: `PI_SPINNER_RAINBOW=off` returns to monochrome accent; `PI_SPINNER_COLOR_HOLD=<frames>`
+ * tunes how long each color lasts (default 19 frames ≈ 1.5s; 1 = every frame, a strobe at 80ms,
+ * not a rainbow).
  *
- * ## bash 执行中 `●`（working 行尾）
+ * ## Bash-executing `●` (working line tail)
  *
- * 需求原文：把 `●` 挂在 `⠼ Tools Calling (13m 59s)` 后面，bash 执行时长超过 1 秒后出现、
- * 执行结束后消失；多个 bash 同时在执行时，任意一个超过 1s 就闪，**所有** bash 都结束后才
- * 消失。这是退役的 bash 首行 `$ ` → `● ` spinner 的落点迁移（命令块里不再出现 `●`）：
- * 门槛 1s、亮 / 灭各 500ms、`PI_BASH_SPINNER=off` 关闭，都与旧版同契约。
+ * Requirement verbatim: hang `●` after `⠼ Tools Calling (13m 59s)` — appears once a bash
+ * execution exceeds 1 second, disappears when execution ends; while multiple bashes run, it
+ * blinks as soon as any crosses 1s and disappears only after **all** finish. This is a
+ * relocation of the retired bash first-row `$ ` → `● ` spinner (the command block no longer
+ * shows `●`): same contract as the old version — 1s threshold, 500ms lit/dark cadence,
+ * `PI_BASH_SPINNER=off` disables.
  *
- * 实现分两半：纯逻辑在伴生模块 `bash-spinner.ts`（形态 / 门槛 / 并发登记簿，不 import pi，
- * `node --test` 用例在 `bash-spinner.test.ts`），定时器在 `index.ts`：
- *   - `tool_execution_start`（toolName=bash）落账、`tool_execution_end` 销账，`toolCallId`
- *     为键，天然支持并行多 bash；
- *   - 每次 `refresh()` 都跑 `driveBashSpinner(now)`：已跨过门槛 → 起 500ms 节拍（翻相位 +
- *     重绘）；还没跨过 → 按**最早**那个执行的截止点排一次性定时器，让 `●` 准时出现（非流式
- *     命令执行期间没有上游事件，不自驱就永不重绘）；
- *   - 标记段拼在左段（标签 + 统计段）末尾、摘要布局之前，恒 2 列（亮 `" ●"` / 灭两格空格），
- *     所以右对齐的提示词摘要不随亮灭左右蹦；
- *   - 停表三处：`agent_settled` / `session_shutdown`（回合结束、会话替换）、旧 ctx 的
- *     try/catch（`stopActivity`）、以及 `refresh()` 早退分支（不在回合内）。
- *   - 标签口径顺带修了一处：`executingTool` 从单字符串改成 `toolCallId → 工具名` 的 Map ——
- *     并行批次里先结束的工具不再把还在跑的工具名清掉（否则长 bash 的 `●` 会挂在 `Working`
- *     而不是 `Tools Calling` 后面）。标签仍取最后启动的那个，优先级语义不变。
+ * Implementation splits in two: pure logic in the sibling module `bash-spinner.ts` (shape /
+ * threshold / concurrency registry, imports no pi — `node --test` cases in
+ * `bash-spinner.test.ts`), timers here in `index.ts`:
+ *   - `tool_execution_start` (toolName=bash) books in, `tool_execution_end` books out, keyed
+ *     by `toolCallId` — parallel bashes supported naturally;
+ *   - every `refresh()` runs `driveBashSpinner(now)`: threshold crossed → run the 500ms cadence
+ *     (flip phase + repaint); not yet → arm a one-shot timer at the **earliest** execution's
+ *     deadline so `●` appears exactly on time (a non-streaming command may see no upstream
+ *     events while executing — without self-driving it would never repaint);
+ *   - the marker segment is spliced at the end of the left segment (label + stats), before the
+ *     summary layout, always 2 columns (lit `" ●"` / dark two spaces) — so the right-aligned
+ *     prompt summary never bounces with the blink;
+ *   - stopping happens in three places: `agent_settled` / `session_shutdown` (turn end,
+ *     session replace), the stale-ctx path's try/catch (`stopActivity`), and the `refresh()`
+ *     early-return branch (not inside a turn).
+ *   - One labeling fix rides along: `executingTool` changed from a single string to a
+ *     `toolCallId → toolName` Map — in a parallel batch the tool that finishes first no longer
+ *     clears the name of one still running (otherwise a long bash's `●` would hang after
+ *     `Working` instead of `Tools Calling`). The label still takes the last-started tool —
+ *     the priority semantics are unchanged.
  *
- * ## 回合结束符 `✻ Churned for 3m 37s · done 11:52 PM`（turn-marker.ts）
+ * ## Turn-end marker `✻ Churned for 3m 37s · done 11:52 PM` (turn-marker.ts)
  *
- * 用户 2026-10-07 定：一轮对话跑完 spinner 直接消失、不留痕迹，要求把它原地换成一条静态
- * 结束符。文本 / 词表 / 时钟都在 `turn-marker.ts`（十个词随机取一个、12 小时制 `11:52 PM`、
- * 整行 dim 色 —— 与 recap 行里 `Recap:` 标签同档；纯模块，单测在 `turn-marker.test.ts`）；
- * 这里只管时机与落点：
- *   - 落点是**编辑器上方的 widget 区**（recap 摘要 / 任务清单同一个区），而不是原来的
- *     statusContainer：pi 在应用层 `agent_end` 就 `clearStatusIndicator("working")`，而
- *     `setWorkingMessage` / `setWorkingVisible` 只在流式期间有效 —— 扩展没有让 statusContainer
- *     在回合外继续渲染的接口。占的行数保持原样：spinner 在时编辑器上方是「空行 + 文案 +
- *     空行」（它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格也是三行
- *     —— widget 区的前导空行 + 结束符 + **组件自己补的行尾空行**（用户 2026-10-07 要求：
- *     结束符下面必须有空行，和 spinner 在时一样），所以编辑器不会上移一格。
- *   - 时机：`agent_settled`（回合真正结束 —— `agent_end` 之后还可能自动重试 / 压缩 / 排队消息）。
- *     时长 = `agent_start` → `agent_settled` 的墙钟，复用 spinner 读秒的同一个 `formatDuration`，
- *     结束时长不会与 spinner 最后一帧对不上。
- *   - 只认正常完成：结局在 `agent_before_settle` 记下（`agent_settled` 不带载荷），`aborted` /
- *     `error` 不画 —— ESC 打断保持现状，spinner 直接消失。
- *   - 清理：`agent_start`（下一回合把位置让回给 spinner）、`session_shutdown`；会话替换时
- *     pi 的 `resetExtensionUI()` 也会清掉扩展 widget。
- *   - 开关 `PI_TURN_MARKER=off`。
+ * User decision 2026-10-07: when a round finishes, the spinner simply vanished leaving no
+ * trace — it should be replaced in place by a static end marker. The text / word list / clock
+ * all live in `turn-marker.ts` (one of ten words picked at random, 12-hour `11:52 PM`, the
+ * whole row in dim — same tier as the `Recap:` label in the recap line; pure module, tests in
+ * `turn-marker.test.ts`); this file only owns timing and placement:
+ *   - Placement is **the widget area above the editor** (same area as the recap summary / task
+ *     list), not the old statusContainer: pi calls `clearStatusIndicator("working")` at the
+ *     app layer's `agent_end`, and `setWorkingMessage` / `setWorkingVisible` only work during
+ *     streaming — there is no API for a statusContainer render outside a turn. The row count
+ *     stays identical: with the spinner, the stretch above the editor is "blank + text + blank"
+ *     (it carries one leading blank, and the lower blank is the widget area's leading blank);
+ *     the marker slot is likewise three rows — the widget area's leading blank + the marker +
+ *     **a trailing blank the component itself supplies** (user 2026-10-07: the marker must
+ *     have a blank below it, same as when the spinner was there) — so the editor does not
+ *     shift up one row.
+ *   - Timing: `agent_settled` (the real end of a turn — `agent_end` can still be followed by
+ *     auto-retry / compaction / queued follow-ups). Duration = wall clock from `agent_start`
+ *     to `agent_settled`, reusing the spinner's own `formatDuration` — the end duration never
+ *     disagrees with the spinner's last frame.
+ *   - Only normal completion counts: the outcome is recorded at `agent_before_settle`
+ *     (`agent_settled` carries no payload); `aborted` / `error` draw nothing — ESC
+ *     interruption keeps its current behavior, the spinner simply vanishes.
+ *   - Cleanup: `agent_start` (the next turn gives the slot back to the spinner),
+ *     `session_shutdown`; pi's `resetExtensionUI()` also clears extension widgets on
+ *     session replace.
+ *   - Switch: `PI_TURN_MARKER=off`.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -217,7 +263,7 @@ import {
 	pickTurnVerb,
 } from "./turn-marker.ts";
 
-/** 工具名 → 文案。没列进来的工具一律回落到 Working（按需求「其他情况都显示 Working」）。 */
+/** Tool name → label. Unlisted tools all fall back to Working (per the requirement, "everything else shows Working"). */
 const TOOL_LABELS: Record<string, string> = {
 	bash: "Tools Calling",
 	edit: "Editing",
@@ -228,64 +274,74 @@ const TOOL_LABELS: Record<string, string> = {
 const THINKING_LABEL = "Thinking";
 const DEFAULT_LABEL = "Working";
 /**
- * 问卷工具名（`ask-user-question/` 扩展注册的）。它在问卷期间把 working indicator 冻结成单帧、
- * 退出时无参恢复成 pi 的**默认**帧（见文件头「spinner 幻彩帧」），所以本扩展要在它结束时补装彩帧。
+ * The questionnaire tool's name (registered by the `ask-user-question/` extension). It freezes
+ * the working indicator to a single frame during its questionnaire and restores pi's **default**
+ * frames with a no-arg call on exit (see the file header "spinner rainbow frames"), so this
+ * extension must reinstall its rainbow frames when it ends.
  */
 const ASK_USER_QUESTION_TOOL = "ask_user_question";
 
 /**
- * 弹窗期间 spinner 冻结在这一帧（与 `ask-user-question` 扩展同字同族：盲文全集字符，
- * 看起来是「spinner 停住了」而不是换了个东西）。pi-tui Loader 对单帧 indicator 不起
- * 动画定时器，所以冻结帧 = 停掉 80ms 重绘。
+ * During dialogs the spinner freezes on this frame (same family as the `ask-user-question`
+ * extension's — the full-block braille char, reading as "spinner paused" rather than a different
+ * thing). pi-tui's Loader does not animate a single-frame indicator, so a frozen frame = the
+ * 80ms repaint stopped.
  */
 const FROZEN_SPINNER_FRAME = "⠿";
 
 /**
- * 文案两个色段。标签用 `text`（正文正常色，深色主题下就是那条浅白），统计段用
- * `muted` —— 和 pi 给整条 working message 上的默认色**同一个槽位**，所以那截灰
- * 渲染出来和改动前一致（只是转义符的位置从整条包一层变成统计段自己带前缀）。
+ * The message's two color segments. The label uses `text` (normal body color — pale white on
+ * dark themes); the stats segment uses `muted` — **the same slot** as pi's default color for
+ * the whole working message, so that gray stretch renders identically to before (only the
+ * escape's position changed: instead of wrapping the whole message once, the stats segment
+ * carries its own prefix).
  */
 const LABEL_COLOR = "text";
 const STATS_COLOR = "muted";
-/** 摘要标记 `✦` 的颜色：语法高亮的关键字色，作行尾的视觉锚点。 */
+/** The summary marker `✦`'s color: the syntax-highlight keyword color — a visual anchor at the row tail. */
 const SUMMARY_MARKER_COLOR = "syntaxKeyword";
 
 /**
- * spinner（"⠧ " 2 列）+ Text 组件 paddingX（左右各 1 列）占掉的列数：
- * working message 的可见宽度预算 = 终端列数 − 4（见文件头注释）。
+ * Columns eaten by the spinner ("⠧ " = 2 cols) + the Text component's paddingX (1 each side):
+ * the working message's visible-width budget = terminal columns − 4 (see file header).
  */
 const SPINNER_AND_PADDING_COLUMNS = 4;
 
 const SUMMARY_ENABLED = (process.env.PI_WORKING_SUMMARY ?? "").toLowerCase() !== "off";
 /**
- * 提示词太长时请模型压成一句话的开关（`PI_WORKING_SUMMARY_LLM=off` 关掉，退回「只截断」）。
- * `PI_WORKING_SUMMARY=off` 时整段摘要都不显示，自然也不用请求。
+ * Switch for asking the model to compress an overlong prompt into one line (`PI_WORKING_SUMMARY_LLM=off`
+ * falls back to "truncate only").
+ * With `PI_WORKING_SUMMARY=off` the whole summary is hidden and no request is needed either.
  */
 const SUMMARY_LLM_ENABLED = SUMMARY_ENABLED && (process.env.PI_WORKING_SUMMARY_LLM ?? "").toLowerCase() !== "off";
 /**
- * 超过可用宽度的多少倍才请求摘要（`PI_WORKING_SUMMARY_TRIGGER`，默认 1）。
- * 1 = 只要放不下（哪怕只多一列）就请求；调大则先容忍截断：1.2 ≈ 截断丢掉近两成原文才压，
- * 2 = 丢掉一半以上才压。小于 1 的值无意义（退回默认）。
+ * How many times the available width the flattened prompt must exceed before a summary is
+ * requested (`PI_WORKING_SUMMARY_TRIGGER`, default 1).
+ * 1 = request whenever it does not fit (even one column over); larger values tolerate
+ * truncation first: 1.2 ≈ compress only when nearly a fifth of the original is lost, 2 = more
+ * than half. Values below 1 are meaningless (fall back to default).
  */
 const SUMMARY_TRIGGER_RATIO = (() => {
 	const parsed = Number.parseFloat(process.env.PI_WORKING_SUMMARY_TRIGGER ?? "");
 	return Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_TRIGGER_RATIO;
 })();
 /**
- * 摘要请求用哪个模型（`PI_WORKING_SUMMARY_MODEL=provider/modelId`，如 `litellm-any/deepseek-flash`）。
- * 缺省 / 解析不到时用当前会话模型 —— 摘要只是个附带请求，不该因为配置写错就消失。
+ * Which model serves the summary request (`PI_WORKING_SUMMARY_MODEL=provider/modelId`, e.g.
+ * `litellm-any/deepseek-flash`).
+ * Falls back to the current session model when unset / unresolvable — the summary is only a
+ * side request and must not vanish over a misconfig.
  */
 const SUMMARY_MODEL_SPEC = (process.env.PI_WORKING_SUMMARY_MODEL ?? "").trim();
-/** 摘要请求的硬超时，到点 abort。本机这些路由都带着强制 thinking，实测一次「压一句话」
- * 要 3-20s（qwen3.8-flash 在 max 档上偏慢），所以比 recap 的 30s 再宽一点；回合结束时
- * 还会提前 abort（那时摘要已经没人看）。超时只是白花一次请求，不影响主任务。 */
+/** Hard timeout for the summary request, aborted when reached. This machine's routes all force thinking, so one "compress to a line" takes 3-20s measured (qwen3.8-flash is slow on the max tier) — a bit wider than recap's 30s; a turn end also aborts early (nobody is watching by then). A timeout only wastes one request and does not affect the main task. */
 const SUMMARY_TIMEOUT_MS = 45_000;
-/** 摘要请求失败后的默认重试延时（`PI_WORKING_SUMMARY_RETRY_MS` 覆盖）。 */
+/** Default retry delay after a failed summary request (`PI_WORKING_SUMMARY_RETRY_MS` overrides). */
 const DEFAULT_SUMMARY_RETRY_DELAY_MS = 3_000;
 /**
- * 首次请求失败后延时多久再试一次（`PI_WORKING_SUMMARY_RETRY_MS`，默认 3s；0 = 立即重试）。
- * 失败多半是一次抖动（上游 5xx / 连接被掐 / 只出了 thinking 没出正文），隔几秒再要一次
- * 常常就有了；**只重试这一次**（见 `SUMMARY_MAX_ATTEMPTS`）。
+ * How long to wait before retrying a failed first request (`PI_WORKING_SUMMARY_RETRY_MS`,
+ * default 3s; 0 = retry immediately).
+ * Failure is usually a one-off blip (upstream 5xx / connection cut / only thinking, no body)
+ * and a second ask a few seconds later often succeeds; **only this one retry** (see
+ * `SUMMARY_MAX_ATTEMPTS`).
  */
 const SUMMARY_RETRY_DELAY_MS = (() => {
 	const raw = (process.env.PI_WORKING_SUMMARY_RETRY_MS ?? "").trim();
@@ -293,62 +349,72 @@ const SUMMARY_RETRY_DELAY_MS = (() => {
 	const value = Number(raw);
 	return Number.isFinite(value) && value >= 0 ? value : DEFAULT_SUMMARY_RETRY_DELAY_MS;
 })();
-/** 摘要请求最多尝试几次：首次 + 一次重试；第二次仍失败就彻底放弃。 */
+/** Max attempts per summary request: first try + one retry; a second failure gives up for good. */
 const SUMMARY_MAX_ATTEMPTS = 2;
 /**
- * 摘要请求的 maxTokens。**必须给 thinking 留足份额**：本机网关给这些路由强制
- * `thinking: {type: enabled}` + `reasoning_effort: max`（`gateway/config.yaml` 的
- * `extra_body`），客户端关不掉；实测「压一句话」光思考就要 600-1400 token，预算给小了
- * 思考会把额度吃光、正文一个字都不剩（实测 80 / 512 / 2048 全被 thinking 吃满）。
- * 1024 在 deepseek-flash / qwen3.8-flash / deepseek-flash-qd 上都稳定留下正文。
+ * maxTokens for the summary request. **Must leave thinking its share**: this machine's gateway
+ * forces `thinking: {type: enabled}` + `reasoning_effort: max` on these routes
+ * (`extra_body` in `gateway/config.yaml`), unswitchable by the client; measured 600-1400
+ * thinking tokens for one "compress to a line", and a small budget gets eaten entirely by
+ * thinking with zero body left (measured 80 / 512 / 2048 all consumed).
+ * 1024 reliably leaves body room on deepseek-flash / qwen3.8-flash / deepseek-flash-qd.
  *
- * 另：**不要传 `temperature: 0`** —— 这几个 max 档路由在 0 温度下会退化成停不下来的
- * 长思考（2048 额度也被吃光且零正文），默认温度下 3s 就正常返回。
+ * Also: **do not pass `temperature: 0`** — these max-tier routes degenerate into unstoppable
+ * long thinking at 0 (2048 fully eaten with zero body), while default temperature returns
+ * normally in 3s.
  */
 const SUMMARY_MAX_TOKENS = 1024;
 /**
- * 估算「左段（标签 + 统计段 + `●`）占多宽」的余量，只用于请求模型时算目标长度。
- * 请求发生在 `input` 事件里，那时这一回合还没开始、真实左段不存在，只能按工具执行态
- * （最长的 `Tools Calling (↓ N tokens · D)` 加行尾 `●`）估一个偏保守的值：宽终端上真正
- * 起作用的是半屏上限，这个估计只在窄终端里生效，估小了反而会让摘要被截。
+ * Headroom for "how wide the left segment (label + stats + `●`) is", used only when computing
+ * the request's target length.
+ * The request fires in `input` — the turn has not started and no real left segment exists, so
+ * a conservative estimate is used: the longest tool-execution label (`Tools Calling (↓ N
+ * tokens · D)`) plus the trailing `●`. On wide terminals the half-screen cap dominates anyway;
+ * the estimate only matters on narrow terminals, where underestimating would clip the summary.
  */
 const SUMMARY_LEFT_WIDTH_ESTIMATE = 34;
 /**
- * bash 执行中 `●` 的开关。env 名沿用退役的 bash 首行 spinner（`PI_BASH_SPINNER`）：
- * 功能只是把落点从命令块挪到了 working 行尾。
+ * Switch for the bash-executing `●`. The env name inherits the retired bash first-row spinner
+ * (`PI_BASH_SPINNER`): the feature only moved its landing spot from the command block to the
+ * working line's tail.
  */
 const BASH_SPINNER_ENABLED = (process.env.PI_BASH_SPINNER ?? "").toLowerCase() !== "off";
 /**
- * 幻彩 spinner 开关（`PI_SPINNER_RAINBOW=off` 回到 pi 默认的单色 accent 十帧）。
+ * Rainbow spinner switch (`PI_SPINNER_RAINBOW=off` returns to pi's default monochrome accent
+ * ten-frame).
  */
 const SPINNER_RAINBOW_ENABLED = (process.env.PI_SPINNER_RAINBOW ?? "").toLowerCase() !== "off";
 /**
- * 回合结束符开关（`PI_TURN_MARKER=off` 关闭，回到「回合结束 spinner 直接消失」）。
- * 形状 / 词表 / 12 小时制时钟都在 `turn-marker.ts`。
+ * Turn-end marker switch (`PI_TURN_MARKER=off` disables — back to "spinner simply vanishes at
+ * turn end").
+ * Shape / word list / 12-hour clock all live in `turn-marker.ts`.
  */
 const TURN_MARKER_ENABLED = (process.env.PI_TURN_MARKER ?? "").toLowerCase() !== "off";
 /**
- * 结束符的色槽：`dim`，与 recap 行里 `Recap:` 标签同档（用户 2026-10-07 定）。整行
- * （含行首 `✻`）一个色段，所以只有一个槽位。
+ * The marker's color slot: `dim`, same tier as the `Recap:` label in the recap line (user
+ * 2026-10-07). The whole row (including the leading `✻`) is one color segment, so one slot.
  */
 const TURN_MARKER_COLOR = "dim";
 /**
- * watchdog 提示开关（`PI_WORKING_INDICATOR_WATCHDOG=off` 关闭）。关掉后 spinner 在
- * watchdog 审查期间仍显示普通 Working，不做特殊提示。
+ * Watchdog hint switch (`PI_WORKING_INDICATOR_WATCHDOG=off` disables). With it off, the
+ * spinner keeps showing plain Working during watchdog review — no special hint.
  */
 const WATCHDOG_HINT_ENABLED = (process.env.PI_WORKING_INDICATOR_WATCHDOG ?? "").toLowerCase() !== "off";
 /**
- * watchdog 审查期间显示的文案（用户指定，英文，不带时长/省略号）。
+ * The text shown during watchdog review (user-specified, English, no duration/ellipsis).
  */
 export const WATCHDOG_LABEL = "Subagent watchdog reviewing";
 /**
- * `agent_end` 之后多久还没 settle 就认定「有东西在阻塞」并切到 watchdog 文案。
+ * How long after `agent_end` without a settle counts as "something is blocking" → switch to the
+ * watchdog label.
  *
- * 依据：pi-subagents 的 watchdog 在**每个改过仓库的回合**的 `agent_end` 里跑一次独立
- * 模型审查（实测 7~17s），而 pi 要等所有 `agent_end` handler 跑完才清 spinner —— 所以
- * 那段时间 spinner 一直转却没有解释。正常回合 `agent_end` → `agent_settled` 是毫秒级，
- * 2s 阈值不会误报；唯一同样会阻塞这段窗口的自动压缩，由 `session_before_compact`
- * 取消定时器兜底（见下）。`PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS` 覆盖（测试用）。
+ * Rationale: pi-subagents' watchdog runs an independent model review inside `agent_end` on
+ * **every turn that touched the repo** (measured 7~17s), and pi waits for all `agent_end`
+ * handlers before clearing the spinner — so the spinner keeps spinning unexplained that whole
+ * time. A normal turn's `agent_end` → `agent_settled` is millisecond-scale, so a 2s threshold
+ * cannot false-positive; the only other thing that blocks that window is auto-compaction,
+ * backstopped by the `session_before_compact` cancel (below). `PI_WORKING_INDICATOR_WATCHDOG_DELAY_MS`
+ * overrides (for tests).
  */
 export const DEFAULT_WATCHDOG_DELAY_MS = 2_000;
 export const WATCHDOG_DELAY_MS = (() => {
@@ -358,9 +424,10 @@ export const WATCHDOG_DELAY_MS = (() => {
 	return Number.isFinite(value) && value > 0 ? value : DEFAULT_WATCHDOG_DELAY_MS;
 })();
 /**
- * 幻彩里每种颜色持续的**帧数**（`PI_SPINNER_COLOR_HOLD`，默认 19 帧 × 80ms = 1520ms ≈ 1.5s
- * 一换色；1500ms 不是 80ms 的整数倍，取最近帧数）。解析不到 / 小于 1 时退回默认；
- * `spinner-frames.ts` 里还会再兜一次非有限值。
+ * How many **frames** each rainbow color lasts (`PI_SPINNER_COLOR_HOLD`, default 19 frames ×
+ * 80ms = 1520ms ≈ one color change per 1.5s; 1500ms is not a multiple of 80ms so the nearest
+ * frame count is used). Unparseable / <1 falls back to the default; `spinner-frames.ts`
+ * backstops non-finite values once more.
  */
 const SPINNER_COLOR_HOLD = (() => {
 	const parsed = Number.parseInt(process.env.PI_SPINNER_COLOR_HOLD ?? "", 10);
@@ -371,33 +438,35 @@ const SUMMARY_MIN_GAP = (() => {
 	return Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_MIN_GAP;
 })();
 
-/** 终端列数；拿不到（非 TTY）或异常窄时退回 80。每次刷新现读，resize 自愈。 */
+/** Terminal columns; falls back to 80 when unavailable (non-TTY) or abnormally narrow. Re-read each refresh — resize self-heals. */
 function terminalWidth(): number {
 	const cols = process.stdout.columns;
 	return Number.isFinite(cols) && cols >= 20 ? Math.floor(cols) : 80;
 }
 
-/** 只用到 `fg` 的主题接口 —— 探针 / 单测里可以喂一个只有 `fg` 的假对象。 */
+/** A theme interface using only `fg` — probes / unit tests can feed a fake with just `fg`. */
 export interface WorkingMessageTheme {
 	fg(color: string, text: string): string;
 }
 
 /**
- * 组装 spinner 文案：标签（`Tools Calling` / `Editing` / …）走正文色，后面的统计段
- * （`(↓ 70 tokens · 10s)`）走 muted 灰。
+ * Assemble the spinner text: the label (`Tools Calling` / `Editing` / …) takes the body color;
+ * the stats segment after it (`(↓ 70 tokens · 10s)`) takes muted gray.
  *
- * 为什么要自己上色：pi 的 `WorkingStatusIndicator` 把整条 working message 交给
- * `theme.fg("muted", message)`（非嵌入态；嵌入编辑器边框时是边框色），没有分段着色的
- * 入口，`setWorkingMessage()` 收的就是一个字符串。好在 `Theme.fg` 只重置前景色
- * （结尾是 `\x1b[39m` 而不是 `\x1b[0m`），于是「标签染 text + 统计段再染 muted」的
- * 拼接结果是稳定的：标签的重置符止于标签末尾，统计段自己带上 muted 前缀，最外层的
- * 那次 muted 只是多包了一层、渲染上无副作用。
+ * Why self-color: pi's `WorkingStatusIndicator` hands the whole working message to
+ * `theme.fg("muted", message)` (non-embedded; embedded in the editor border it uses the border
+ * color) — there is no per-segment coloring entry, and `setWorkingMessage()` takes one string.
+ * Fortunately `Theme.fg` only resets the foreground (it ends `\x1b[39m`, not `\x1b[0m`), so
+ * "label dyed text + stats dyed muted" composes stably: the label's reset ends at its own end,
+ * the stats segment carries its own muted prefix, and the outer muted is just one extra wrapper
+ * — harmless.
  *
- * 统计段的 muted **必须显式写出来**，不能指望外层那次 `fg("muted")` —— 标签里的
- * `\x1b[39m` 已经把外层的前景色重置成终端默认色了，不重新上色的话那截灰会变白。
+ * The stats segment's muted **must be written out explicitly** — it cannot rely on the outer
+ * `fg("muted")`: the label's `\x1b[39m` already reset the outer foreground to the terminal
+ * default, and without re-coloring that gray stretch would come out white.
  *
- * 拿不到主题时（理论上只有非 TUI 上下文）退回纯文本：外层仍按 pi 的默认色渲染，
- * 只是标签不再是白的。
+ * When no theme is available (theoretically only non-TUI contexts) it degrades to plain text:
+ * the outer layer still renders pi's default color — the label just stops being white.
  */
 export function formatWorkingMessage(
 	theme: WorkingMessageTheme | undefined,
@@ -406,18 +475,21 @@ export function formatWorkingMessage(
 ): string {
 	if (theme === undefined) return stats === null ? label : `${label} ${stats}`;
 	const styledLabel = theme.fg(LABEL_COLOR, label);
-	// 分隔空格放进统计段一起染 muted，免得它孤零零地留在终端默认色上。
+	// the separating space is colored along with the stats segment so it does not sit alone on the terminal default color.
 	return stats === null ? styledLabel : `${styledLabel}${theme.fg(STATS_COLOR, ` ${stats}`)}`;
 }
 
 /**
- * 在左段（标签+统计）之后补空隙、接上右对齐的提示词摘要。放不下（终端太窄 /
- * 左段太宽 / 提示词为空）时原样返回左段 —— 摘要永远是增强，不挤掉原有信息。
+ * After the left segment (label + stats), pad the gap and attach the right-aligned prompt
+ * summary. When it does not fit (terminal too narrow / left segment too wide / empty prompt),
+ * the left segment returns verbatim — the summary is strictly an enhancement, never pushing
+ * out existing info.
  *
- * 传入的 `summaryText` 是 `input` 事件里已经压平缓存好的整段提示词（见文件头注释），
- * 这里只做布局。宽度计算用 pi-tui 的 `visibleWidth`（与渲染器折行同一套实现），布局数学在
- * `working-summary.ts`（纯函数，有单测）。gap 空格夹在两段各自的颜色重置之后、
- * 之前，不归属任何色段（空格本来就没有前景色）。
+ * The `summaryText` passed in is the flattened-and-cached whole prompt from the `input` event
+ * (see file header); this function only does layout. Widths use pi-tui's `visibleWidth` (the
+ * same implementation the renderer wraps on); the layout math lives in `working-summary.ts`
+ * (pure, unit-tested). The gap spaces sit between the two segments' color resets — owned by
+ * neither (spaces carry no foreground anyway).
  */
 function appendPromptSummary(
 	theme: WorkingMessageTheme | undefined,
@@ -430,7 +502,7 @@ function appendPromptSummary(
 		promptText: summaryText,
 		leftWidth: visibleWidth(left),
 		totalWidth: termWidth - SPINNER_AND_PADDING_COLUMNS,
-		// 摘要段（含 `✦ `）不超过半屏，免得长提示词把左侧状态文案挤没。
+		// the summary segment (incl. `✦ `) never exceeds half the screen, so a long prompt cannot squeeze the left status text away.
 		maxWidth: Math.floor(termWidth / 2),
 		widthOf: visibleWidth,
 		minGap: SUMMARY_MIN_GAP,
@@ -443,7 +515,7 @@ function appendPromptSummary(
 	return `${left}${" ".repeat(layout.gap)}${styledSummary}`;
 }
 
-/** 摘要用哪个模型：`PI_WORKING_SUMMARY_MODEL` 解析得到就用它，否则用当前会话模型。 */
+/** Which model serves the summary: the `PI_WORKING_SUMMARY_MODEL`-resolved one when available, else the session model. */
 function resolveSummaryModel(ctx: ExtensionContext): NonNullable<ExtensionContext["model"]> | undefined {
 	if (SUMMARY_MODEL_SPEC !== "") {
 		const slash = SUMMARY_MODEL_SPEC.indexOf("/");
@@ -456,9 +528,10 @@ function resolveSummaryModel(ctx: ExtensionContext): NonNullable<ExtensionContex
 }
 
 /**
- * 请求模型摘要时假定的可用宽度（列）。与渲染共用 `availableSummaryTextWidth`，只是左段
- * 宽度是估计值 —— 请求发生在 `input` 事件里，这一回合还没开始，真实左段还不存在
- * （见 `SUMMARY_LEFT_WIDTH_ESTIMATE`）。
+ * The available width (columns) assumed when requesting a model summary. Shares
+ * `availableSummaryTextWidth` with the renderer, except the left-segment width is an estimate —
+ * the request fires in `input`, before the turn starts, so no real left segment exists
+ * (see `SUMMARY_LEFT_WIDTH_ESTIMATE`).
  */
 function summaryRequestBudgetWidth(): number {
 	const termWidth = terminalWidth();
@@ -471,7 +544,7 @@ function summaryRequestBudgetWidth(): number {
 	});
 }
 
-/** 从 assistant 响应里抽文本（只走了 thinking 的空回复会得到空串 → 放弃这次摘要）。 */
+/** Extract text from an assistant response (an empty reply that only produced thinking → "", abandoning this summary). */
 function textFromAssistant(message: unknown): string {
 	const content = (message as { content?: unknown } | undefined)?.content;
 	if (!Array.isArray(content)) return "";
@@ -482,15 +555,17 @@ function textFromAssistant(message: unknown): string {
 		.join("\n");
 }
 
-/** 读秒间隔。1s 足够 —— 显示精度就是秒，更密的 tick 只是白做渲染。 */
+/** Seconds-tick interval. 1s is enough — the display precision is seconds; tighter ticks are wasted renders. */
 const TICK_MS = 1000;
 
 /**
- * 时长格式化：<60s → `42s`；≥60s → `1m 23s`；≥1h → `1h 23m 32s`。
- * 分钟段在超过 1 小时后仍然保留（不折算成纯分钟），符合 `1h 23m 32s` 的形状。
+ * Duration formatting: under 60s → `42s`; 60s+ → `1m 23s`; 1h+ → `1h 23m 32s`.
+ * The minutes field survives past 1 hour (not folded into pure minutes), matching the
+ * `1h 23m 32s` shape.
  *
- * 导出是为了可测：小时档要真跑一小时才能触发，所以三个分支用单测覆盖，
- * 分钟档另外用一次真实的长任务抓帧验证（见 README）。
+ * Exported for testability: the hour tier takes a real hour to trigger, so all three branches
+ * are covered by unit tests, and the minutes tier was additionally frame-verified once on a
+ * real long task (see README).
  */
 export function formatDuration(ms: number): string {
 	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -503,73 +578,84 @@ export function formatDuration(ms: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	/** 回合起始时刻；null 表示当前不在回合内（不渲染、不起定时器）。 */
+	/** Turn start instant; null = not inside a turn (no render, no timers). */
 	let turnStartedAt: number | null = null;
 	/**
-	 * 本次 run 的结局（`agent_before_settle` 记录、`agent_settled` 消费一次就清）：
-	 * 结束符只在 `completed` 时画 —— ESC 打断 / 报错收尾保持现状（spinner 直接消失）。
-	 */
+ * This run's outcome (recorded at `agent_before_settle`, consumed once at `agent_settled`):
+ * the end marker is drawn only on `completed` — ESC interruption / error endings keep the
+ * current behavior (the spinner simply vanishes).
+ */
 	let turnOutcome: "completed" | "aborted" | "error" | null = null;
 
 	/**
-	 * 当前回合的用户输入**压平后**的原文（`input` 事件捕获后立刻 `flattenPrompt`
-	 * 一次并缓存，见文件头注释）；null = 还没捕获到（恢复的会话自动继续等），
-	 * 此时不显示摘要。刻意不存原文再每次 refresh 重算 —— refresh 每个流式 delta 都跑。
-	 */
+ * The current turn's user input **flattened** (captured on `input`, `flattenPrompt`ed once and
+ * cached — see file header); null = not captured yet (a resumed session just keeps waiting)
+ * and no summary shows. Deliberately not stored raw and recomputed per refresh — refresh runs
+ * on every streaming delta.
+ */
 	let promptText: string | null = null;
 	/**
-	 * 模型压出来的一句话（异步到达；null = 还没到 / 没请求 / 请求失败）。显示时优先于
-	 * `promptText`：到了就换上摘要，一直到回合结束都不会再变（每个提示词最多请求两次，
-	 * 首次失败会隔几秒重试一次；回来的摘要再长也只截断、不再追问）。
-	 */
+ * The one-liner the model compressed (arrives async; null = not yet / not requested / failed).
+ * Takes display precedence over `promptText`: once it arrives it stays until the turn ends
+ * (at most two requests per prompt; a failed first retries after a delay; an overlong reply
+ * is only truncated, never re-asked).
+ */
 	let promptSummaryText: string | null = null;
 	/**
-	 * 每次 `input` 递增的序号。模型回包可能比提示词换得慢（用户已经开始下一轮 / 流中
-	 * steer），回包拿它对一下：不是自己那一次就丢掉，绝不把旧提示词的摘要贴到新的上面。
-	 */
+ * A counter incremented on each `input`. The model reply may come back slower than prompts
+ * change (the user already started the next round / mid-stream steer): the reply is checked
+ * against it, and a reply that is not its own generation is dropped — a stale prompt's summary
+ * never lands on a new prompt.
+ */
 	let promptSeq = 0;
-	/** 上一次 `input` 的原文，用来吃掉同一条消息的重复 `input` 事件（见 `input` 处理里）。 */
+	/** The previous `input`'s raw text, used to swallow duplicate `input` events for the same message (see the `input` handler). */
 	let lastInputText: string | null = null;
-	/** 在飞的摘要请求；`abort()` 停掉它（新提示词 / 回合结束 / 会话关掉）。 */
+	/** The in-flight summary request; `abort()` stops it (new prompt / turn end / session close). */
 	let summaryAbort: AbortController | null = null;
 	/**
-	 * 待执行的摘要重试定时器（首次失败后延时重试一次）。`cancelSummaryRequest()` 会把它
-	 * 一并清掉 —— 新提示词 / 回合结束 / 会话替换之后，那次重试已经没人要了。
-	 */
+ * The pending summary-retry timer (one delayed retry after a first failure).
+ * `cancelSummaryRequest()` clears it too — after a new prompt / turn end / session replace,
+ * nobody wants that retry anymore.
+ */
 	let summaryRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 	/**
-	 * 按段类型分开的 token 估算计数器：宽字符（CJK，终端占 2 列）按 1 token 计，
-	 * 窄字符按 1/4 token 计（下方 `wide` 从 pi-tui 的 `visibleWidth` 反推，不是自己维护码点表）。
-	 *
-	 * 以前这个口径与 `tool-diff.ts` 的 `estimateTokens` 共用 —— 那边标题行后来改成显示
-	 * `(+N -M)` 行数而不是 token 数，函数已经删掉，所以估算只留这里一份。
-	 *
-	 * 每段各自一份、段开始时清零，所以显示出来的数永远是「当前这一小段」的量。
-	 * 分开存而不是共用一个累加值，还有一个原因：工具执行期间上游可能还在推 reasoning 帧，
-	 * 共用一个累加值会把推理字符算进 bash 命令的数里。
-	 *
-	 * 这里做**增量累加**而不是每秒重算整串：宽/窄字符数是可加的，所以
-	 * 逐 delta 累加与对完整文本一次性计算等价，但代价从 O(全文) 降到 O(delta)。
-	 *
-	 * 正文段（text）不在表里：它的 token 数从不显示，累加只会污染其它段。
-	 */
+ * Per-segment token-estimate counters: a wide char (CJK — 2 terminal columns) counts as 1
+ * token, a narrow char as 1/4 (the `wide` below is derived from pi-tui's `visibleWidth`, no
+ * hand-maintained code-point table).
+ *
+ * This accounting used to be shared with `tool-diff.ts`'s `estimateTokens` — its title row
+ * later switched to showing `(+N -M)` line counts instead of token counts, that function was
+ * deleted, and this is the only copy left.
+ *
+ * One counter per segment, zeroed when the segment starts, so the displayed number is always
+ * "the current small segment's" amount. Kept separate rather than one shared accumulator for
+ * another reason: during tool execution upstream may still push reasoning frames, and a shared
+ * accumulator would count thinking chars into the bash command's number.
+ *
+ * **Incremental accumulation** here, not a full recompute each second: wide/narrow counts are
+ * additive, so accumulating per delta equals a one-shot count over the whole text — O(delta)
+ * instead of O(text).
+ *
+ * The text segment is not in the table: its token count never displays, and counting it would
+ * only pollute the other segments.
+ */
 	type CounterKind = "thinking" | "toolcall";
 	const counters: Record<CounterKind, { wide: number; narrow: number }> = {
 		thinking: { wide: 0, narrow: 0 },
 		toolcall: { wide: 0, narrow: 0 },
 	};
 
-	/** 新一小段开始：该段的计数器清零，从头重新数。 */
+	/** A new small segment begins: its counter zeroes out and counting restarts. */
 	function resetCounter(kind: CounterKind): void {
 		counters[kind].wide = 0;
 		counters[kind].narrow = 0;
 	}
 
-	/** 逐 delta 累加宽/窄字符数到对应段。 */
+	/** Accumulate wide/narrow char counts into the segment per delta. */
 	function accumulate(kind: CounterKind, text: string): void {
 		if (text === "") return;
-		const points = [...text].length; // 按码点计，代理对不会算成 2 个字符
+		const points = [...text].length; // counted by code points — a surrogate pair does not count as 2 chars
 		const wide = Math.max(0, visibleWidth(text) - points);
 		counters[kind].wide += wide;
 		counters[kind].narrow += Math.max(0, points - wide);
@@ -581,14 +667,17 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 正在执行的工具：`toolCallId → 工具名`（`tool_execution_start` 落账、`_end` 销账）。
-	 * 一个批次里可能**并行**执行多个工具（pi 的 parallel tool mode），只留一个字符串会在
-	 * 先结束的那个上把名字清掉 —— 长 bash 还在跑、文案却掉回 `Working`，行尾的 `●` 就挂在
-	 * 了错的标签后面。标签取**最后启动**的那个（沿用原语义：执行态压过推理态，看启动序）。
-	 */
+ * Currently executing tools: `toolCallId → toolName` (booked at `tool_execution_start`,
+ * unbooked at `_end`).
+ * A batch may run **several tools in parallel** (pi's parallel tool mode); keeping a single
+ * string would clear the name when the first-finishing tool ends — the long bash still runs
+ * but the label drops back to `Working`, and the `●` hangs after the wrong label. The label
+ * takes the **last started** tool (inherited semantics: executing beats thinking, by start
+ * order).
+ */
 	const executingTools = new Map<string, string>();
 
-	/** 最后启动且仍在执行的工具名；没有则 null。 */
+	/** The name of the last-started tool still executing; null when none. */
 	function executingToolName(): string | null {
 		let name: string | null = null;
 		for (const toolName of executingTools.values()) name = toolName;
@@ -596,50 +685,55 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 并发 bash 执行的登记簿（见 `bash-spinner.ts`）：门槛 / 粘性 / 消失条件都在它里面，
-	 * 这里只管「什么时候闪」的定时器。
-	 */
+ * The registry of concurrent bash executions (see `bash-spinner.ts`): threshold / stickiness /
+ * disappear conditions all live there; this file only owns the "when to blink" timers.
+ */
 	const bashRuns = new BashRunTracker();
-	/** 标记的亮 / 灭相位（`bashSpinnerSuffix` 用它出两态）。 */
+	/** The marker's lit/dark phase (`bashSpinnerSuffix` renders the two states from it). */
 	let bashSpinOn = false;
 	let bashBlinkTimer: ReturnType<typeof setInterval> | null = null;
 	let bashArmTimer: ReturnType<typeof setTimeout> | null = null;
-	/** 参数正在流式生成的工具（`toolcall_start` → `toolcall_end`）。 */
+	/** The tool whose arguments are still streaming (`toolcall_start` → `toolcall_end`). */
 	let streamingTool: string | null = null;
-	/** 是否处于推理段（`thinking_start` → `thinking_end`）。 */
+	/** Whether a thinking segment is in progress (`thinking_start` → `thinking_end`). */
 	let thinking = false;
 
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let ctxRef: ExtensionContext | null = null;
 	let lastMessage: string | null = null;
 	/**
-	 * 弹窗（`ui_prompt_start` → `ui_prompt_end`）期间为 true：所有定时器暂停、spinner 冻结成
-	 * 单帧，`refresh()` 早退。目的：pi 的主屏渲染每次重绘都把视口钉在底部，弹窗期间任何
-	 * 周期性重绘（Loader 的 80ms 动画、本扩展的 1s 读秒）都会把用户手动上翻的滚动位置立刻
-	 * 拉回去 —— 长内容弹窗（plan-mode 批准框）因此看不全。冻结后终端自己的回滚不再被抢。
-	 */
+ * True during dialogs (`ui_prompt_start` → `ui_prompt_end`): all timers pause, the spinner
+ * freezes to one frame, `refresh()` early-returns. Purpose: pi's main-screen render pins the
+ * viewport to the bottom on every repaint, and during a dialog any periodic repaint (Loader's
+ * 80ms animation, this extension's 1s ticking) yanks the user's manually scrolled position
+ * back — a long-content dialog (the plan-mode approval box) becomes uninspectable. Frozen, the
+ * terminal's own scrollback stops being stolen.
+ */
 	let uiPromptActive = false;
 	/**
-	 * watchdog 审查提示是否正在显示。`agent_end` 后 `WATCHDOG_DELAY_MS` 还没 settle 就置
-	 * true（refresh 把文案切成 WATCHDOG_LABEL）；`agent_settled` / `agent_before_settle` /
-	 * `session_before_compact` / `agent_start` / `session_shutdown` 任一到就复位。
-	 */
+ * Whether the watchdog-review hint is showing. Set true when `WATCHDOG_DELAY_MS` elapses after
+ * `agent_end` without a settle (refresh switches the label to WATCHDOG_LABEL); reset by any of
+ * `agent_settled` / `agent_before_settle` / `session_before_compact` / `agent_start` /
+ * `session_shutdown`.
+ */
 	let watchdogActive = false;
 	let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 	/**
-	 * 上一次装上去的色板指纹（`spinner-frames.ts` 的 `signature`）：`refresh()` 每秒拿当前主题
-	 * 现算一次，指纹变了才重装帧表 —— `/theme` 换肤后一秒内自愈，且相位只在真的换色时复位。
-	 */
+ * The palette fingerprint last installed (`spinner-frames.ts`'s `signature`): `refresh()`
+ * recomputes it from the current theme every second and reinstalls only when it changed —
+ * self-heals within a second of `/theme`, and the phase resets only on a real color change.
+ */
 	let spinnerSignature: string | null = null;
 
 	/**
-	 * 当前该显示哪个文案，以及该配哪一段的 token 计数；返回 null 表示回落到
-	 * Working（无 token 段）。
-	 *
-	 * 优先级：正在执行 > 参数流式中 > 推理中。执行态压过推理态是有意的 ——
-	 * 工具执行期间上游可能还在推 reasoning 帧，但用户关心的是"命令在跑"。
-	 * 未列进 TOOL_LABELS 的工具直接回落 Working，不再往下走推理态（沿用原语义）。
-	 */
+ * Which label to show now and which segment's token counter goes with it; null = fall back to
+ * Working (no token segment).
+ *
+ * Priority: executing > args streaming > thinking. Executing beating thinking is deliberate —
+ * upstream may keep pushing reasoning frames during tool execution, but the user cares about
+ * "a command is running". A tool not in TOOL_LABELS falls back to Working directly, never
+ * down to thinking (inherited semantics).
+ */
 	function currentActivity(): { label: string; counter: CounterKind } | null {
 		const executing = executingToolName();
 		if (executing !== null) {
@@ -654,7 +748,7 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
-	/** 当前文案拆成「标签」与「统计段」两截 —— 两截颜色不同，得分开上色。 */
+	/** Split the current message into "label" and "stats segment" — the two take different colors and must be dyed separately. */
 	function buildParts(now: number): { label: string; stats: string | null } {
 		const duration = formatDuration(now - (turnStartedAt ?? now));
 		const activity = currentActivity();
@@ -665,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	/** 当前主题下的幻彩色板（现算；`theme.fg` 是 live proxy，换肤后同一调用就能拿到新色）。 */
+	/** The rainbow palette under the current theme (recomputed live; `theme.fg` is a live proxy, so the same call picks up new colors after a skin swap). */
 	function spinnerPalette(ctx: ExtensionContext): SpinnerPalette {
 		return buildSpinnerPalette((token, text) => ctx.ui.theme.fg(token, text), {
 			framesPerColor: SPINNER_COLOR_HOLD,
@@ -673,9 +767,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 把色板装到 pi 上（不判重、不兜异常）。`frames === null`（当前主题挑不出两种可区分的颜色）
-	 * 时退回 pi 默认帧。
-	 */
+ * Install the palette onto pi (no dedupe check, no error guard). `frames === null` (current
+ * theme cannot produce two distinguishable colors) → fall back to pi's default frames.
+ */
 	function applySpinnerPalette(ctx: ExtensionContext, palette: SpinnerPalette): void {
 		spinnerSignature = palette.signature;
 		if (palette.frames === null) {
@@ -686,22 +780,24 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 无条件装幻彩帧表。失败静默：调用点都是「旧 ctx 也不该掀翻宿主」的位置（`agent_start` /
-	 * `tool_execution_end`）—— 旧 ctx 会抛 `This extension ctx is stale…`，那种情况下什么都没必要做。
-	 */
+ * Unconditionally install the rainbow frame table. Fails silently: every call site is a spot
+ * where "a stale ctx must not topple the host" (`agent_start` / `tool_execution_end`) — a
+ * stale ctx throws `This extension ctx is stale…`, in which case nothing needs doing.
+ */
 	function installRainbowSpinner(ctx: ExtensionContext): void {
 		if (!SPINNER_RAINBOW_ENABLED) return;
 		try {
 			applySpinnerPalette(ctx, spinnerPalette(ctx));
 		} catch {
-			// 旧 ctx：不去碰 UI。
+			// stale ctx: do not touch the UI.
 		}
 	}
 
 	/**
-	 * 只在主题指纹变了时重装（`refresh()` 每秒调一次）。重装会把动画相位复位，所以不能无脑调 ——
-	 * 换肤那一瞬间本来就要全屏重绘，那一下复位看不见。
-	 */
+ * Reinstall only when the theme fingerprint changed (`refresh()` calls this every second).
+ * A reinstall resets the animation phase, so it must not run blindly — the skin-swap moment
+ * redraws the whole screen anyway and that one reset is invisible.
+ */
 	function syncRainbowSpinner(ctx: ExtensionContext): void {
 		if (!SPINNER_RAINBOW_ENABLED) return;
 		const palette = spinnerPalette(ctx);
@@ -710,17 +806,20 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 刷新文案。只在字符串真的变了时才调 `setWorkingMessage`，避免每秒无谓重渲染。
-	 *
-	 * `ctx.ui` 的读取（取主题、写文案）包在 try/catch 里：会话被替换或 `/reload` 之后，
-	 * 旧 ctx 会抛 `This extension ctx is stale after session replacement or reload`，
-	 * 而这个异常发生在**读 `ctx.ui` 这一步**（比组件 render 更早），漏网的定时器回调
-	 * 足以掀翻宿主进程 —— recap / simple-task 都踩过同一个坑。
-	 *
-	 * 主题每次现读（`/theme` 换主题后一秒内自愈），刻意不订阅主题变更事件。
-	 */
+ * Refresh the text. `setWorkingMessage` is called only when the string really changed, avoiding
+ * pointless re-renders every second.
+ *
+ * `ctx.ui` access (reading the theme, writing the message) is wrapped in try/catch: after a
+ * session replace or `/reload`, a stale ctx throws `This extension ctx is stale after session
+ * replacement or reload` — and that throw happens **while reading `ctx.ui`**, earlier than any
+ * component render; a leaked timer callback is enough to topple the host process — recap /
+ * simple-task have hit the same hole.
+ *
+ * The theme is re-read every time (self-heals within a second of `/theme`), deliberately not
+ * subscribing to theme-change events.
+ */
 	function refresh(): void {
-		// 弹窗期间不碰 UI：定时器已停，但 tool_execution_start 等事件路径仍可能调到这里。
+		// during a dialog, do not touch the UI: timers are stopped, but event paths like tool_execution_start can still reach here.
 		if (uiPromptActive) return;
 		const ctx = ctxRef;
 		if (ctx === null || turnStartedAt === null) {
@@ -730,8 +829,8 @@ export default function (pi: ExtensionAPI) {
 		let message: string;
 		try {
 			const now = Date.now();
-			// watchdog 审查中：只显示固定文案，不拼 token/时长，也不跑 bash spinner。
-			// 用户指定文案就是全部，加时长反而暗示「还要很久」。
+			// watchdog reviewing: show only the fixed text — no tokens/duration, and no bash spinner.
+			// the user-specified text is the whole thing; adding a duration would imply "much longer still".
 			if (watchdogActive) {
 				message = formatWorkingMessage(ctx.ui.theme, WATCHDOG_LABEL, null);
 				if (message !== lastMessage) {
@@ -748,13 +847,13 @@ export default function (pi: ExtensionAPI) {
 			const parts = buildParts(now);
 			let left = formatWorkingMessage(ctx.ui.theme, parts.label, parts.stats);
 			left += bashSpinnerText(ctx.ui.theme);
-			// 模型摘要到达后顶掉原文；没到 / 失败就是截断后的原文。
+			// once the model summary arrives it replaces the original; before that (or on failure) the truncated original shows.
 			const summarySource = promptSummaryText ?? promptText;
 			message = SUMMARY_ENABLED ? appendPromptSummary(ctx.ui.theme, left, summarySource) : left;
-			// 主题指纹变了就重装幻彩帧表（换肤后一秒内自愈）；指纹没变这里什么都不做。
+			// reinstall the rainbow table when the theme fingerprint changed (self-heals within a second of a skin swap); unchanged → no-op here.
 			syncRainbowSpinner(ctx);
 		} catch {
-			// 旧 ctx：停掉定时器，别再拿它去碰 UI。
+			// stale ctx: stop the timers — do not touch the UI with it again.
 			stopActivity();
 			return;
 		}
@@ -771,7 +870,7 @@ export default function (pi: ExtensionAPI) {
 		stopTimer();
 		ctxRef = ctx;
 		timer = setInterval(refresh, TICK_MS);
-		// unref：读秒定时器不该把进程吊住（退出时不必等它）。
+		// unref: the seconds timer must not hold the process open (no need to wait for it at exit).
 		timer.unref?.();
 	}
 
@@ -784,15 +883,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 弹窗开始：停掉本扩展的三个定时器，并把 spinner 冻结成单帧。
-	 *
-	 * 冻结单帧是这里**最关键**的一步：pi 的 working indicator 是 pi-tui 的 `Loader`，它自带
-	 * 一个 80ms 的帧动画定时器，每帧都 `requestRender()` —— 比本扩展 1s 的读秒快 12.5 倍，
-	 * 是把视口钉回底部的主因。`Loader.restartAnimation()` 遇 `frames.length <= 1` 直接返回，
-	 * 所以装一个单帧就能停掉那个 interval（`ask-user-question` 扩展用的是同一手法）。
-	 *
-	 * 不用 `stopTimer()`：它会把 `ctxRef` 置 null，弹窗结束就没法恢复了。
-	 */
+ * Dialog start: stop this extension's three timers and freeze the spinner to a single frame.
+ *
+ * The frozen frame is **the crucial step**: pi's working indicator is pi-tui's `Loader`, which
+ * carries an 80ms frame-animation timer calling `requestRender()` each frame — 12.5× more
+ * frequent than this extension's 1s ticking and the main cause of the viewport being yanked to
+ * the bottom. `Loader.restartAnimation()` early-returns on `frames.length <= 1`, so installing
+ * a single frame stops that interval (the same trick the `ask-user-question` extension uses).
+ *
+ * Not `stopTimer()`: that would null `ctxRef`, making resume impossible when the dialog ends.
+ */
 	function pauseForUiPrompt(ctx: ExtensionContext): void {
 		if (uiPromptActive) return;
 		uiPromptActive = true;
@@ -804,30 +904,32 @@ export default function (pi: ExtensionAPI) {
 		try {
 			ctx.ui.setWorkingIndicator({ frames: [ctx.ui.theme.fg("accent", FROZEN_SPINNER_FRAME)] });
 		} catch {
-			// 旧 ctx / 宿主不支持：冻结失败不影响正确性，只是弹窗期间仍会重绘
+			// stale ctx / unsupported host: a failed freeze does not break correctness — the dialog just still repaints.
 		}
 	}
 
 	/**
-	 * 弹窗结束：重装幻彩帧表（`installRainbowSpinner` 无条件装，正好覆盖掉冻结帧）、
-	 * 重启读秒定时器、立即刷一次文案（把弹窗期间走过的秒数补上）。
-	 *
-	 * 只在真的处于回合中（`ctxRef` 与 `turnStartedAt` 都在）时重启定时器 —— 弹窗可能
-	 * 发生在回合外（比如 `/plan` 命令弹的确认框），那时不该凭空起一个读秒。
-	 */
+ * Dialog end: reinstall the rainbow table (`installRainbowSpinner` installs unconditionally,
+ * conveniently overwriting the frozen frame), restart the seconds timer, and refresh once
+ * immediately (catching up on the seconds that passed during the dialog).
+ *
+ * The timer restarts only when truly inside a turn (both `ctxRef` and `turnStartedAt` set) —
+ * a dialog can also happen outside a turn (e.g. the `/plan` command's confirm box), where no
+ * seconds timer should materialize out of nothing.
+ */
 	function resumeAfterUiPrompt(): void {
 		if (!uiPromptActive) return;
 		uiPromptActive = false;
 		const ctx = ctxRef;
 		if (ctx === null) return;
-		// 恢复帧表：幻彩开着就重装彩帧（无条件装，正好覆盖掉冻结帧）；关着就回到 pi 默认帧，
-		// 否则单帧冻结会卡住。
+		// restore the frame table: with rainbow on, reinstall unconditionally (conveniently overwriting the frozen frame); with it off, restore pi's default frames,
+		// or the single frozen frame stays stuck.
 		if (SPINNER_RAINBOW_ENABLED) installRainbowSpinner(ctx);
 		else {
 			try {
 				ctx.ui.setWorkingIndicator();
 			} catch {
-				// 旧 ctx：不碰 UI
+				// stale ctx: do not touch the UI
 			}
 		}
 		if (turnStartedAt !== null && timer === null) {
@@ -837,7 +939,7 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 	}
 
-	/** 停掉 `●` 的节拍 / 排程定时器并回到灭态（幂等）。 */
+	/** Stop `●`'s cadence / armed timers and return to the dark state (idempotent). */
 	function stopBashSpinner(): void {
 		if (bashBlinkTimer !== null) {
 			clearInterval(bashBlinkTimer);
@@ -851,12 +953,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 亮灭节拍：`●` 亮起后每 500ms 翻相位 + 重绘（与 tool-diff 的 `edit` / `write` 同节拍）。
-	 * 幂等：已在闪就不动（相位不重置，多 bash 并发时节拍连续）。
-	 */
+ * Blink cadence: once `●` is lit, flip phase + repaint every 500ms (same cadence as tool-diff's
+ * `edit` / `write`).
+ * Idempotent: already blinking → no-op (the phase is not reset, keeping cadence continuous
+ * under concurrent bashes).
+ */
 	function startBashBlink(): void {
 		if (bashBlinkTimer !== null) return;
-		bashSpinOn = true; // 首次亮相：到门槛那一刻就是亮的，不留 500ms 空窗
+		bashSpinOn = true; // first light: the crossing instant itself is the lit phase — no 500ms dark window
 		bashBlinkTimer = setInterval(() => {
 			bashSpinOn = !bashSpinOn;
 			refresh();
@@ -865,9 +969,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 门槛未到：起一次性定时器，到点重绘一次让 `●` **准时**出现（否则要等下一次别的重绘 ——
-	 * 非流式命令执行期间可能一个上游事件都没有）。幂等（已有排程 / 已在闪都直接返回）。
-	 */
+ * Threshold not yet reached: arm a one-shot timer that repaints at the deadline so `●` appears
+ * **exactly on time** (otherwise it waits for the next unrelated repaint — a non-streaming
+ * command may see no upstream events while executing). Idempotent (an armed schedule or an
+ * active blink returns early).
+ */
 	function armBashSpinner(delayMs: number): void {
 		if (bashArmTimer !== null || bashBlinkTimer !== null) return;
 		bashArmTimer = setTimeout(() => {
@@ -878,10 +984,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 「这一批 bash 有没有谁跨过门槛」+ 定时器驱动，每次 refresh 都跑一遍。
-	 * 已跨过 → 停排程、起节拍；还没跨过 → 按最早截止点排一次性定时器；没有执行 / 开关关了
-	 * → 全部停掉。
-	 */
+ * "Has any bash in this batch crossed the threshold" + timer driving — runs every refresh.
+ * Crossed → stop arming, start the cadence; not yet → arm a one-shot at the earliest deadline;
+ * no executions / switch off → stop everything.
+ */
 	function driveBashSpinner(now: number): void {
 		if (!BASH_SPINNER_ENABLED || bashRuns.size === 0) {
 			stopBashSpinner();
@@ -900,9 +1006,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 行尾标记段（含前导空格，**恒 2 列**；不显示时是空串）。上色在这里做：`Theme.fg`
-	 * 只重置前景色，拼在左段末尾不影响前面已有的色段。
-	 */
+ * The row-tail marker segment (leading space included, **always 2 columns**; empty string when
+ * hidden). Coloring happens here: `Theme.fg` only resets the foreground, so splicing it at the
+ * left segment's tail does not disturb the segments already there.
+ */
 	function bashSpinnerText(theme: WorkingMessageTheme | undefined): string {
 		if (!BASH_SPINNER_ENABLED || !bashRuns.shown) return "";
 		const text = bashSpinnerSuffix(bashSpinOn);
@@ -910,54 +1017,59 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 回合结束符：把一行静态文案画在 spinner 原来那一行（形状 / 词表见 `turn-marker.ts`）。
-	 *
-	 * 为什么是 widget 而不是继续用 working message：pi 在应用层 `agent_end` 就
-	 * `clearStatusIndicator("working")` 了，而 `setWorkingMessage` / `setWorkingVisible` 只在
-	 * 流式期间有效 —— 扩展没有让 statusContainer 在回合外继续渲染的接口。编辑器上方的 widget
-	 * 区是唯一能常驻的位置，占的行数也正好对得上：spinner 在时上方是「空行 + 文案 + 空行」
-	 * （它自带一条前导空行，下面那条是 widget 区的前导空行），结束符这一格同样是三行 ——
-	 * widget 区的前导空行 + 结束符 + 下面补的行尾空行。本机装的 prompt-editor 没开
-	 * embedWorkingStatus，spinner 走独立行，这条恒定成立。
-	 *
-	 * 用工厂形式（而不是字符串数组）：上色要走 `theme` 的 live proxy，`/theme` 换肤后重渲染
-	 * 就自愈；字符串数组在注册那一刻就把颜色烘死了。
-	 *
-	 * 自己补一个前导空格：spinner 与 recap 的缩进来自 `Text` 的 paddingX=1（渲染器给的），
-	 * widget 组件直接返回字符串，没有那一格。
-	 *
-	 * 整个动作包 try/catch：`hasUI` 与 `ui` 都是 runner 的 assertActive 代理，stale ctx 在
-	 * **读**的这一步就抛，比 widget 的 render 更早；结束符只是装饰，抛了就当没画。
-	 */
+ * The turn-end marker: paint one static row where the spinner used to be (shape / word list in
+ * `turn-marker.ts`).
+ *
+ * Why a widget rather than the working message: pi calls `clearStatusIndicator("working")` at
+ * the app layer's `agent_end`, and `setWorkingMessage` / `setWorkingVisible` only work during
+ * streaming — there is no API for the statusContainer to render outside a turn. The widget
+ * area above the editor is the only place that can persist, and its row count matches exactly:
+ * with the spinner, the stretch above is "blank + text + blank" (it carries one leading blank,
+ * the lower blank being the widget area's); the marker slot is likewise three rows — the
+ * widget area's leading blank + the marker + the trailing blank supplied below. The locally
+ * installed prompt-editor does not enable embedWorkingStatus, so the spinner runs as a
+ * standalone row and this holds exactly.
+ *
+ * Factory form rather than a string array: coloring must go through `theme`'s live proxy so a
+ * `/theme` swap self-heals on rerender; a string array would bake the colors in at
+ * registration time.
+ *
+ * One leading space is self-supplied: the spinner's and recap's indent come from the Text's
+ * paddingX=1 (renderer-provided) — a widget component returns bare strings without it.
+ *
+ * The whole thing is wrapped in try/catch: `hasUI` and `ui` are the runner's assertActive
+ * proxies, and a stale ctx throws **on the read**, earlier than the widget's render; the marker
+ * is only decoration — a throw means skip it.
+ */
 	function showTurnMarker(ctx: ExtensionContext, text: string): void {
 		try {
 			if (!ctx.hasUI) return;
 			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, (_tui, theme) => ({
 				render: (width: number) => [
 					truncateToWidth(` ${theme.fg(TURN_MARKER_COLOR, text)}`, width, ""),
-					// 行尾一条空行（用户 2026-10-07 要求）：spinner 在时它下面本来就有一条
-					// （widget 区的前导空行），不补的话结束符会与编辑器贴在一起、整块上移一格。
-					// 顺带也是 widget 之间的间隔：recap / simple-task 的 `gap.ts` 看到邻居末行
-					// 是空行就不再补 —— 两个 widget 之间仍恰好一行。
+					// a trailing blank row (required by the user 2026-10-07): the spinner always had one below it
+					// (the widget area's leading blank); without it the marker would hug the editor and the whole block shifts up a row.
+					// conveniently it is also the gap between widgets: recap / simple-task's `gap.ts` adds nothing when the neighbor's last row
+					// is blank — so two widgets still end up exactly one row apart.
 					"",
 				],
 				invalidate() {},
 			}));
 		} catch {
-			// stale ctx / 宿主不支持：静默跳过。
+			// stale ctx / unsupported host: skip silently.
 		}
 	}
 
-	/** 清掉结束符（下一回合开始；会话替换时 pi 的 `resetExtensionUI()` 也会清）。 */
+	/** Clear the marker (the next turn starts; pi's `resetExtensionUI()` also clears on session replace). */
 	function clearTurnMarker(ctx: ExtensionContext): void {
 		try {
 			ctx.ui.setWidget(TURN_MARKER_WIDGET_KEY, undefined);
 		} catch {
-			// stale ctx：不碰 UI。
+			// stale ctx: do not touch the UI.
 		}
 	}
 
-	/** 旧 ctx（会话被替换 / `/reload`）：停掉所有定时器、清掉账本，别再拿它去碰 UI。 */
+	/** Stale ctx (session replaced / `/reload`): stop all timers and wipe the books — do not touch the UI with it again. */
 	function stopActivity(): void {
 		stopTimer();
 		stopBashSpinner();
@@ -966,7 +1078,7 @@ export default function (pi: ExtensionAPI) {
 		clearWatchdogHint();
 	}
 
-	/** 取消待触发的 watchdog 定时器并复位标志（幂等）。 */
+	/** Cancel the pending watchdog timer and reset the flag (idempotent). */
 	function clearWatchdogHint(): void {
 		if (watchdogTimer !== null) {
 			clearTimeout(watchdogTimer);
@@ -976,15 +1088,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * `agent_end` 后起一个一次性定时器：到点还没 settle 就认定 watchdog（或其他阻塞）
-	 * 正在跑，把文案切成 WATCHDOG_LABEL。定时器 unref，不吊住进程退出。
-	 */
+ * Arm a one-shot timer after `agent_end`: if the turn still has not settled at the deadline,
+ * count it as a watchdog (or other blocker) running and switch the label to WATCHDOG_LABEL.
+ * The timer is unref'd — it does not hold the process at exit.
+ */
 	function armWatchdogHint(): void {
 		if (!WATCHDOG_HINT_ENABLED) return;
 		clearWatchdogHint();
 		watchdogTimer = setTimeout(() => {
 			watchdogTimer = null;
-			// 到点时回合必须还在（turnStartedAt 非空）才显示；settled 会先清掉它。
+			// at the deadline the turn must still be running (turnStartedAt non-null) to show; settled clears it first.
 			if (turnStartedAt === null) return;
 			watchdogActive = true;
 			refresh();
@@ -992,7 +1105,7 @@ export default function (pi: ExtensionAPI) {
 		watchdogTimer.unref?.();
 	}
 
-	/** 从 `toolcall_start` 的 partial 里取工具名。 */
+	/** Extract the tool name from a `toolcall_start` partial. */
 	function toolNameFromPartial(event: { contentIndex?: number; partial?: unknown }): string | null {
 		const partial = event.partial as { content?: unknown[] } | undefined;
 		const index = event.contentIndex;
@@ -1001,7 +1114,7 @@ export default function (pi: ExtensionAPI) {
 		return typeof block?.name === "string" ? block.name : null;
 	}
 
-	/** 停掉在飞的摘要请求与待重试的那次（幂等）。它们只是附带请求，停了也不会影响主任务。 */
+	/** Stop the in-flight summary request and the pending retry (idempotent). They are only side requests — stopping them does not affect the main task. */
 	function cancelSummaryRequest(): void {
 		if (summaryRetryTimer !== null) {
 			clearTimeout(summaryRetryTimer);
@@ -1014,20 +1127,23 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 提示词太长时**异步**让模型压一句话（决策 / 提示词 / 清洗都在 `summary-request.ts`）。
-	 * 发出去就返回，不 `await`：主回合跟这个请求完全并行，请求慢 / 失败只意味着这一格继续
-	 * 显示截断后的原文。回包三重护栏：abort 过的、序号换了的、提示词已经清掉的（回合结束）
-	 * 一律丢弃。
-	 *
-	 * 首次失败（报错 / 45s 超时 / 只出了 thinking 没出正文）会隔 `SUMMARY_RETRY_DELAY_MS`
-	 * 自动重试**一次**（`attempt`），第二次仍失败就彻底放弃。重试前要再确认这次请求
-	 * 仍然有效：新提示词 / 回合结束 / 会话替换都会经过 `cancelSummaryRequest()`（清掉待
-	 * 重试的定时器、把 `summaryAbort` 置空），`retryLater` 靠 `summaryAbort === controller`
-	 * 认出「已被取消」并放弃 —— 45s 超时虽然也 abort，但不碰 `summaryAbort`，所以那算
-	 * 失败、照常重试。
-	 */
+ * When the prompt is too long, **asynchronously** ask the model to compress it to one line
+ * (decision / prompt / cleanup in `summary-request.ts`).
+ * It returns right after sending, without `await`: the main round runs fully parallel to the
+ * request, and slow/failure only means the cell keeps showing the truncated original. The
+ * reply has three guards: an aborted request, a mismatched generation, or a cleared prompt
+ * (turn ended) all get dropped.
+ *
+ * A first failure (error / 45s timeout / thinking-only reply) auto-retries **once** after
+ * `SUMMARY_RETRY_DELAY_MS` (`attempt`); a second failure gives up for good. Before retrying,
+ * validity is re-checked: a new prompt / turn end / session replace all pass through
+ * `cancelSummaryRequest()` (clearing the pending retry timer and nulling `summaryAbort`), and
+ * `retryLater` recognizes "already cancelled" via `summaryAbort === controller` and gives up —
+ * the 45s timeout aborts too but does not touch `summaryAbort`, so it counts as a failure and
+ * retries normally.
+ */
 	function requestPromptSummary(ctx: ExtensionContext, prompt: string, seq: number, attempt = 0): void {
-		if (ctx.mode !== "tui") return; // print / json / rpc 没有 working 行，白花请求。
+		if (ctx.mode !== "tui") return; // print / json / rpc modes have no working line — a wasted request.
 		const model = resolveSummaryModel(ctx);
 		if (model === undefined) return;
 
@@ -1043,7 +1159,7 @@ export default function (pi: ExtensionAPI) {
 		const timeout = setTimeout(() => controller.abort(), SUMMARY_TIMEOUT_MS);
 		timeout.unref?.();
 
-		/** 这次算失败：还有额度就排一次重试（已被取消 / 提示词换了 / 回合结束了就不排）。 */
+		/** Counts as failure: schedule one retry if budget allows (not when cancelled / prompt changed / turn ended). */
 		const retryLater = (): void => {
 			if (attempt + 1 >= SUMMARY_MAX_ATTEMPTS) return;
 			if (summaryAbort !== controller) return;
@@ -1058,7 +1174,7 @@ export default function (pi: ExtensionAPI) {
 		void (async () => {
 			try {
 				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-				// 取不到 key：3 秒后也不会变好，不重试；已取消（极端情况下是超时）同样直接退出。
+				// cannot get a key: it will not get better in 3s, so no retry; already cancelled (a timeout, in the extreme case) likewise exits directly.
 				if (!auth.ok || controller.signal.aborted) return;
 				const response = await ctx.modelRegistry.complete(
 					model,
@@ -1076,23 +1192,23 @@ export default function (pi: ExtensionAPI) {
 						headers: auth.headers,
 						signal: controller.signal,
 						maxTokens: SUMMARY_MAX_TOKENS,
-						// 刻意**不**传 temperature：0 会让这些 max 档路由退化成停不下来的长思考（见
-						// `SUMMARY_MAX_TOKENS` 注释），默认温度反而稳。
+						// deliberately **not** passing temperature: 0 degenerates these max-tier routes into unstoppable long thinking (see
+						// the `SUMMARY_MAX_TOKENS` comment); the default temperature is stable.
 						cacheRetention: "none",
 					},
 				);
 				if (controller.signal.aborted || seq !== promptSeq || promptText === null) return;
 				const text = cleanSummaryText(textFromAssistant(response));
 				if (text === "") {
-					// 只出了 thinking / 只回了装饰（清洗后空）：当成失败，值得再要一次。
+					// thinking only / only decoration (cleans to empty): count as failure — worth another ask.
 					retryLater();
 					return;
 				}
 				promptSummaryText = text;
 				refresh();
 			} catch {
-				// 超时 / 中断 / 网络错误 / 模型不可用：延时重试一次；第二次仍失败就一直显示
-				// 截断后的原文（摘要只是增强，不打扰主回合）。
+				// timeout / abort / network error / model unavailable: retry once after a delay; a second failure keeps showing
+				// the truncated original (the summary is only an enhancement — it must not disturb the main round).
 				retryLater();
 			} finally {
 				clearTimeout(timeout);
@@ -1102,13 +1218,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("input", async (event, ctx) => {
-		// 在 agent 处理前触发：普通消息是用户原文，skill/模板命令是展开前的原始
-		// 命令行，扩展命令的 sendUserMessage 也会再触发一次（source=extension）。
-		// 流式中的 steer / followUp 同样走这里，摘要随之更新成最新指令。
-		// 压平在这里算一次并缓存（refresh 每个 delta 都跑，不能每次重扫整段）。
+		// fires before agent processing: a normal message is the user's verbatim text, a skill/template command is the
+		// raw command line before expansion, and an extension command's sendUserMessage fires again too (source=extension).
+		// mid-stream steer / followUp also comes through here — the summary updates to the newest instruction.
+		// flattening is computed once and cached here (refresh runs per delta — a whole rescan each time is unaffordable).
 		//
-		// 同一条文本重复触发时直接复用：扩展命令的 sendUserMessage 会让同一条消息
-		// 走两次 `input`，第二次不该把在飞的摘要请求作废重来。
+		// a repeated fire of the same text reuses the cache: an extension command's sendUserMessage runs the same message
+		// through `input` twice, and the second one must not invalidate the in-flight summary request and restart it.
 		if (event.text === lastInputText) return;
 		lastInputText = event.text;
 		promptSeq += 1;
@@ -1132,12 +1248,12 @@ export default function (pi: ExtensionAPI) {
 		thinking = false;
 		lastMessage = null;
 		clearWatchdogHint();
-		// print / json 模式没有 working loader 行，起定时器只是白跑。
+		// print / json modes have no working loader row — a timer would run for nothing.
 		if (ctx.hasUI) {
-			// 新回合开始，上一回合的结束符退场（本回合结束时再画新的）。
+			// a new turn begins — the previous turn's end marker steps aside (a fresh one is drawn at this turn's end).
 			clearTurnMarker(ctx);
-			// 回合开始时装帧表：此刻 spinner 还没渲染（流式开始才出现），相位复位看不见；
-			// 换会话后 pi 的 resetExtensionUI() 会把 indicator 还原成默认帧，这里一并补回来。
+			// install the frame table at turn start: the spinner has not rendered yet (it appears at streaming start), so the phase reset is invisible;
+			// after a session replace, pi's resetExtensionUI() restores the indicator to default frames — covered here too.
 			installRainbowSpinner(ctx);
 			startTimer(ctx);
 			refresh();
@@ -1149,7 +1265,7 @@ export default function (pi: ExtensionAPI) {
 			| { type?: string; delta?: string; contentIndex?: number; partial?: unknown }
 			| undefined;
 		switch (streamEvent?.type) {
-			// 三个 *_start 都是一小段的起点：该段计数器清零，从头重新数。
+			// every *_start is the beginning of a small segment: that segment's counter zeroes and restarts.
 			case "thinking_start":
 				thinking = true;
 				resetCounter("thinking");
@@ -1157,8 +1273,8 @@ export default function (pi: ExtensionAPI) {
 			case "thinking_end":
 				thinking = false;
 				break;
-			// 文本段开始 = 推理段结束（正常顺序里 thinking_end 会先到，这里是兜底）。
-			// text_delta 本身不计数，所以 text_start 不需要重置任何计数器。
+			// text segment start = thinking segment end (in the normal order thinking_end arrives first; this is a fallback).
+			// text_delta itself is not counted, so text_start needs no counter reset.
 			case "text_start":
 				thinking = false;
 				break;
@@ -1170,17 +1286,17 @@ export default function (pi: ExtensionAPI) {
 			}
 			case "toolcall_end":
 				streamingTool = null;
-				// 刻意不清零 toolcall 计数器：`tool_execution_start` 紧接着就到，执行期间
-				// 显示的仍然是这条命令的量；清零会让整个执行期显示 `↓ 0 tokens`。
+				// deliberately not zeroing the toolcall counter: `tool_execution_start` arrives right after, and during execution
+				// what shows is still this command's amount; zeroing would display `↓ 0 tokens` for the whole execution.
 				break;
-			// delta 按自己的类型归到对应段，于是推理帧不会算进工具命令的数里。
+			// each delta lands in its own kind's segment, so reasoning frames never count into a tool command's number.
 			case "thinking_delta":
 				accumulate("thinking", typeof streamEvent.delta === "string" ? streamEvent.delta : "");
 				break;
 			case "toolcall_delta":
 				accumulate("toolcall", typeof streamEvent.delta === "string" ? streamEvent.delta : "");
 				break;
-			// text_delta 刻意不计：正文段的 token 数从不显示，累加只会污染后面几段的数。
+			// text_delta deliberately uncounted: the body segment's tokens never display, and accumulating would only pollute later segments.
 		}
 		refresh();
 	});
@@ -1188,7 +1304,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", async (event) => {
 		executingTools.set(event.toolCallId, event.toolName);
 		if (event.toolName === "bash") bashRuns.start(event.toolCallId, Date.now());
-		// 参数流式阶段可能没拿到名字（partial 缺块），执行态是权威来源，这里补上。
+		// the args-streaming phase may not have gotten a name (partial missing the block) — the execution state is authoritative; patched here.
 		streamingTool = null;
 		refresh();
 	});
@@ -1196,41 +1312,44 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_end", async (event, ctx) => {
 		executingTools.delete(event.toolCallId);
 		bashRuns.end(event.toolCallId);
-		// 问卷退出时会把 indicator 恢复成 pi 的默认帧（它不知道本扩展的彩帧），这里补装回去。
+		// on questionnaire exit the indicator restores pi's default frames (it does not know about this extension's rainbow); reinstalled here.
 		if (event.toolName === ASK_USER_QUESTION_TOOL) installRainbowSpinner(ctx);
 		refresh();
 	});
 
 	/**
-	 * `agent_end`：所有扩展的 agent_end handler 会被 pi 依次 await，跑完才发应用层
-	 * agent_end（TUI 在那里清 spinner）。pi-subagents 的 watchdog 就在这个 handler 里
-	 * 阻塞 7~17s 跑审查模型 —— 于是 spinner 一直转却没解释。这里起一个一次性定时器：
-	 * 到点还没 settle 就把文案切成 watchdog 提示（见 armWatchdogHint）。
-	 */
+ * `agent_end`: pi awaits every extension's agent_end handler in turn, and only afterwards fires
+ * the app-layer agent_end (where the TUI clears the spinner). pi-subagents' watchdog blocks
+ * inside that handler for 7~17s running its review model — so the spinner keeps spinning
+ * unexplained. A one-shot timer is armed here: not settled by the deadline → switch the label
+ * to the watchdog hint (see armWatchdogHint).
+ */
 	pi.on("agent_end", async () => {
 		armWatchdogHint();
 	});
 
 	/**
-	 * 压缩与 `/goal` 评估都发生在应用层 agent_end（spinner 已被 pi 清掉）**之后**、
-	 * agent_settled 之前。watchdog 阶段在那之前就已经结束，所以这两个事件一到就复位
-	 * 提示，避免把压缩 / verify-loop 的 `/goal` 评估误标成 watchdog。
-	 */
+ * Both compaction and the `/goal` evaluation happen **after** the app-layer agent_end (where pi
+ * already cleared the spinner) and before agent_settled. The watchdog phase is finished by
+ * then, so either event resets the hint — avoiding mislabeling compaction / verify-loop's
+ * `/goal` evaluation as a watchdog.
+ */
 	pi.on("session_before_compact", async () => {
 		clearWatchdogHint();
 	});
 	pi.on("agent_before_settle", async (event) => {
-		// 结局只有这里能拿到（`agent_settled` 不带载荷），结束符按它决定画不画。
+		// the outcome is only available here (`agent_settled` carries no payload) — the marker's draw-or-not hangs on it.
 		turnOutcome = event.outcome;
 		clearWatchdogHint();
 	});
 
 	/**
-	 * `agent_settled` 才是回合真正结束（`agent_end` 之后还可能自动重试、自动压缩
-	 * 或继续排队的后续消息 —— 那些阶段 spinner 仍在转，所以不能提前停表）。
-	 */
+ * `agent_settled` is the turn's real end (`agent_end` can still be followed by auto-retry,
+ * auto-compaction, or queued follow-ups — the spinner is still running during those, so the
+ * clock cannot stop early).
+ */
 	pi.on("agent_settled", async (_event, ctx) => {
-		// 结束符要用回合时长与结局，两者都得在清状态之前取出来。
+		// the marker needs both the turn duration and the outcome — both must be captured before state is cleared.
 		const settledAt = Date.now();
 		const startedAt = turnStartedAt;
 		const completed = turnOutcome === "completed";
@@ -1242,12 +1361,12 @@ export default function (pi: ExtensionAPI) {
 		promptSummaryText = null;
 		lastInputText = null;
 		try {
-			ctx.ui.setWorkingMessage(); // 无参 = 恢复 pi 默认文案
+			ctx.ui.setWorkingMessage(); // no-arg = restore pi's default text
 		} catch {
-			// 旧 ctx，忽略
+			// stale ctx; ignore
 		}
-		// 结束符：spinner 此刻已被 pi 清掉，原地留一行「跑了多久 · 几点结束」。
-		// 只认正常完成；`startedAt === null`（没见到 agent_start，比如中途重载）不画。
+		// the marker: the spinner is already cleared by pi here — leave one row of "ran for X · done at Y" in its place.
+		// only normal completion counts; `startedAt === null` (never saw agent_start, e.g. mid-run reload) draws nothing.
 		if (!TURN_MARKER_ENABLED || !completed || startedAt === null) return;
 		showTurnMarker(
 			ctx,
@@ -1256,11 +1375,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * 弹窗期间冻结一切周期性重绘，让用户能上翻看长内容（plan-mode 批准框）。
-	 * 事件由 pi 的 `withUIPrompt` 发出，覆盖 select / confirm / input / editor / custom
-	 * 五种对话框；嵌套弹窗靠 `uiPromptDepth` 计数，只在最外层进出时发事件，所以这里
-	 * 不用自己防嵌套。
-	 */
+ * During dialogs all periodic repaints freeze, letting the user scroll up through long content
+ * (the plan-mode approval box).
+ * The events come from pi's `withUIPrompt`, covering select / confirm / input / editor /
+ * custom dialogs; nested dialogs are counted via `uiPromptDepth`, which only fires on the
+ * outermost enter/exit — no need to guard nesting here.
+ */
 	pi.on("ui_prompt_start", async (_event, ctx) => {
 		pauseForUiPrompt(ctx);
 	});
@@ -1274,8 +1394,8 @@ export default function (pi: ExtensionAPI) {
 		turnOutcome = null;
 		promptText = null;
 		promptSummaryText = null;
-		// 去重键也要清：新会话里用户可能又敲一条与上一会话最后一条完全相同的提示词，
-		// 留着旧值会把它当成「重复的 input」直接跳过。
+		// the dedupe key must be cleared too: in the new session the user may re-type a prompt identical to the last one,
+		// and a stale value would skip it as a "duplicate input".
 		lastInputText = null;
 	});
 }

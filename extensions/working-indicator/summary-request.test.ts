@@ -1,10 +1,12 @@
 /**
- * Tests for summary-request.ts — 「提示词太长时请模型压成一句话」的纯逻辑。
+ * Tests for summary-request.ts — the pure logic of "when the prompt is too long, ask the model
+ * to compress it into one line".
  *
  * Run with:  node --test clients/pi/extensions/working-indicator/summary-request.test.ts
  *
- * 被测模块不 import pi / pi-tui（宽度是调用方量好的列数），所以这里也喂假宽度概念：
- * 参数直接就是列数，不需要任何测量函数。
+ * The module under test imports no pi / pi-tui (widths arrive pre-measured by the caller), so
+ * this test feeds a fake notion of width: arguments are already column counts, no measuring
+ * function needed.
  */
 
 import assert from "node:assert/strict";
@@ -28,13 +30,13 @@ describe("planSummaryRequest: trigger", () => {
 	});
 
 	it("with a raised ratio, a mild overflow still does not request", () => {
-		// 显式倍数 2：截断后仍能显示一半原文，不值得请求。
+		// explicit ratio 2: truncation still shows half the original — not worth a request.
 		assert.equal(planSummaryRequest({ promptWidth: 41, budgetWidth: 40, triggerRatio: 2 }).needed, false);
 		assert.equal(planSummaryRequest({ promptWidth: 79, budgetWidth: 40, triggerRatio: 2 }).needed, false);
 	});
 
 	it("requests as soon as the prompt exceeds the budget (default ratio 1)", () => {
-		// 默认倍数 1：40 列的格子，41 列（放不下的第一列）就请求。
+		// default ratio 1: in a 40-column cell, 41 columns (the first one that does not fit) already triggers.
 		assert.equal(planSummaryRequest({ promptWidth: 41, budgetWidth: 40 }).needed, true);
 		assert.equal(planSummaryRequest({ promptWidth: 4000, budgetWidth: 40 }).needed, true);
 	});
@@ -48,14 +50,14 @@ describe("planSummaryRequest: trigger", () => {
 	it("honours a custom trigger ratio", () => {
 		assert.equal(planSummaryRequest({ promptWidth: 60, budgetWidth: 40, triggerRatio: 1.5 }).needed, false);
 		assert.equal(planSummaryRequest({ promptWidth: 61, budgetWidth: 40, triggerRatio: 1.5 }).needed, true);
-		// ratio 1 = 只要放不下就请求。
+		// ratio 1 = request whenever it does not fit.
 		assert.equal(planSummaryRequest({ promptWidth: 41, budgetWidth: 40, triggerRatio: 1 }).needed, true);
 	});
 
 	it("never requests when the available width is too narrow to hold a useful summary", () => {
 		const plan = planSummaryRequest({ promptWidth: 10_000, budgetWidth: MIN_REQUEST_BUDGET - 1 });
 		assert.equal(plan.needed, false);
-		// 恰好到下限就允许（只要原文够长）。
+		// exactly at the floor it is allowed (as long as the original is long enough).
 		assert.equal(planSummaryRequest({ promptWidth: 1000, budgetWidth: MIN_REQUEST_BUDGET }).needed, true);
 	});
 
@@ -72,19 +74,19 @@ describe("planSummaryRequest: target width", () => {
 	it("leaves headroom below the available width", () => {
 		const plan = planSummaryRequest({ promptWidth: 1000, budgetWidth: 40 });
 		assert.equal(plan.targetWidth, Math.floor(40 * TARGET_WIDTH_RATIO));
-		assert.ok(plan.targetWidth < 40, "目标必须小于可用宽度，否则模型略超一点就被截");
+		assert.ok(plan.targetWidth < 40, "the target must be under the available width, or a slightly-over model answer gets clipped");
 	});
 
 	it("floors fractional budgets and keeps a tenth of the width as headroom", () => {
 		assert.equal(planSummaryRequest({ promptWidth: 1000, budgetWidth: 40.9 }).targetWidth, 36);
-		// 最窄的可请求格子：10 列预算 → 目标 9 列。
+		// the narrowest requestable cell: 10-column budget → 9-column target.
 		assert.equal(planSummaryRequest({ promptWidth: 1000, budgetWidth: MIN_REQUEST_BUDGET }).targetWidth, 9);
 	});
 });
 
 describe("buildSummaryRequestPrompt", () => {
 	it("states the target width and the display-column unit", () => {
-		const prompt = buildSummaryRequestPrompt("把 working 摘要改成模型压缩", 48);
+		const prompt = buildSummaryRequestPrompt("replace the working summary with model compression", 48);
 		assert.match(prompt, /48 display columns/);
 		assert.match(prompt, /CJK\/full-width character counts as 2 columns/);
 	});
@@ -97,29 +99,29 @@ describe("buildSummaryRequestPrompt", () => {
 	});
 
 	it("embeds the input prompt verbatim", () => {
-		const input = "优化 summary 截断逻辑\n第二行说明";
+		const input = "optimize summary truncation logic\nsecond-line detail";
 		const prompt = buildSummaryRequestPrompt(input, 30);
-		assert.ok(prompt.includes(input), "原文应原样带上（压平等加工由调用方负责）");
+		assert.ok(prompt.includes(input), "the original should be embedded verbatim (flattening and other processing are the caller's job)");
 		assert.ok(prompt.trimEnd().endsWith(input));
 	});
 
 	it("clips a very long prompt to the request cap", () => {
 		const prompt = buildSummaryRequestPrompt("x".repeat(MAX_REQUEST_INPUT_CHARS + 500), 30);
 		assert.ok(prompt.includes("x".repeat(MAX_REQUEST_INPUT_CHARS)));
-		assert.ok(!prompt.includes("x".repeat(MAX_REQUEST_INPUT_CHARS + 1)), "超过上限的部分应被截掉");
-		assert.ok(prompt.includes("…"), "截断处应有省略号");
+		assert.ok(!prompt.includes("x".repeat(MAX_REQUEST_INPUT_CHARS + 1)), "anything past the cap should be clipped");
+		assert.ok(prompt.includes("…"), "the cut should carry an ellipsis");
 	});
 
 	it("does not split a surrogate pair when clipping", () => {
 		const prompt = buildSummaryRequestPrompt("😀".repeat(MAX_REQUEST_INPUT_CHARS + 20), 30);
 		const clipped = prompt.slice(prompt.lastIndexOf("Input:") + "Input:".length + 1);
-		assert.ok(clipped.endsWith("😀…"), `截断点不能落在半个代理对上（实际结尾 ${JSON.stringify(clipped.slice(-3))}）`);
+		assert.ok(clipped.endsWith("😀…"), `the cut must not land on half a surrogate pair (actual tail ${JSON.stringify(clipped.slice(-3))})`);
 	});
 });
 
 describe("cleanSummaryText", () => {
 	it("passes a plain one-liner through", () => {
-		assert.equal(cleanSummaryText("优化提示词摘要的截断逻辑"), "优化提示词摘要的截断逻辑");
+		assert.equal(cleanSummaryText("optimize the prompt-summary truncation logic"), "optimize the prompt-summary truncation logic");
 	});
 
 	it("strips a label prefix in ASCII and Chinese", () => {
@@ -183,7 +185,7 @@ describe("cleanSummaryText", () => {
 	it("caps runaway replies at MAX_SUMMARY_TEXT_CHARS without splitting a surrogate pair", () => {
 		const reply = "😀".repeat(MAX_SUMMARY_TEXT_CHARS + 50);
 		const cleaned = cleanSummaryText(reply);
-		// 上限 + 表示被截的 `…`，按码点算恰好一个。
+		// the cap plus one `…` marking the cut — exactly one extra code point.
 		assert.equal([...cleaned].length, MAX_SUMMARY_TEXT_CHARS + 1);
 		assert.ok(cleaned.endsWith("😀…"));
 	});

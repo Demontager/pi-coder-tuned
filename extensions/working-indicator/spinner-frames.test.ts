@@ -1,9 +1,11 @@
 /**
- * Tests for spinner-frames.ts — working spinner 幻彩帧表的排布、去重与主题指纹。
+ * Tests for spinner-frames.ts — the working spinner rainbow frame table's layout, dedup, and
+ * theme fingerprint.
  *
  * Run with:  node --test clients/pi/extensions/working-indicator/spinner-frames.test.ts
  *
- * 被测模块不 import pi / pi-tui，断言直接比对帧字符串的「颜色前缀 + 盲文字符」两段。
+ * The module under test imports no pi / pi-tui — assertions compare each frame string's
+ * "color prefix + braille char" pair.
  */
 
 import assert from "node:assert/strict";
@@ -18,41 +20,41 @@ import {
 	type SpinnerColorize,
 } from "./spinner-frames.ts";
 
-/** 七个色槽各给一个可区分的「颜色」；`fg` 的形状就是「颜色前缀 + 原文」。 */
+/** Each of the seven slots gets a distinguishable "color"; `fg`'s shape is "color prefix + original". */
 const DISTINCT: Record<string, string> = Object.fromEntries(
 	SPINNER_COLOR_TOKENS.map((token, index) => [token, `<c${index}>`]),
 );
 
-/** 与模块内部同一口径的独立实现，用来交叉验证帧表周期（测公倍数性质，不是抄公式）。 */
+/** An independent implementation matching the module's rule, used to cross-check the table period (testing the lcm property, not copying the formula). */
 function gcd(a: number, b: number): number {
 	return b === 0 ? a : gcd(b, a % b);
 }
 
-/** 帧表周期的独立算法：lcm(盲文帧数, 每色帧数 × 颜色数)。 */
+/** Independent algorithm for the table period: lcm(braille frame count, frames-per-color × color count). */
 function expectedPeriod(framesPerColor: number, colorCount: number): number {
 	const colorCycle = framesPerColor * colorCount;
 	return (10 * colorCycle) / gcd(10, colorCycle);
 }
 
-/** 假主题：`colorize(token, text)` → `颜色 + text`（与 `theme.fg` 同形，颜色靠前缀区分）。 */
+/** Fake theme: `colorize(token, text)` → `color + text` (same shape as `theme.fg`; colors differ by prefix). */
 function fakeTheme(colors: Record<string, string>): SpinnerColorize {
 	return (token, text) => `${colors[token] ?? `<${token}>`}${text}`;
 }
 
-/** 从帧字符串里取回颜色前缀（盲文帧都在 BMP 内，各占 1 个 UTF-16 单元）。 */
+/** Recover the color prefix from a frame string (the braille frames are all in the BMP, one UTF-16 unit each). */
 function colorOf(frame: string, colors: Record<string, string>): string {
 	for (const color of Object.values(colors)) {
 		if (frame.startsWith(color) && frame.length === color.length + 1) return color;
 	}
-	throw new Error(`帧里没有已知颜色前缀：${frame}`);
+	throw new Error(`no known color prefix in frame: ${frame}`);
 }
 
-/** 从帧字符串里取回盲文字符。 */
+/** Recover the braille char from a frame string. */
 function frameOf(frame: string): string {
 	return frame.at(-1) as string;
 }
 
-/** 颜色段：连续同色帧合并成一段。 */
+/** Color segments: consecutive same-color frames merge into one run. */
 function colorRuns(frames: string[], colors: Record<string, string>): Array<{ color: string; length: number }> {
 	const runs: Array<{ color: string; length: number }> = [];
 	for (const frame of frames) {
@@ -65,8 +67,9 @@ function colorRuns(frames: string[], colors: Record<string, string>): Array<{ co
 }
 
 /**
- * 换色点在圈内的**相位**（帧号 % 10）：集合里只有一个元素 = 每圈都在盲文的同一位置换色，
- * 多元素 = 换色点逐圈漂移（`framesPerColor` 不整除 10 时）。
+ * The **phase** inside one revolution where colors change (frame no. % 10): a single-element
+ * set = every revolution changes at the same braille position; multiple elements = the change
+ * point drifts per revolution (when `framesPerColor` does not divide 10).
  */
 function changePhases(frames: string[], colors: Record<string, string>): Set<number> {
 	const phases = new Set<number>();
@@ -79,34 +82,34 @@ function changePhases(frames: string[], colors: Record<string, string>): Set<num
 	return phases;
 }
 
-describe("buildSpinnerPalette 的帧表排布", () => {
-	it("没有配置时用七个色槽、每色 19 帧（默认值），周期 1330 帧", () => {
+describe("buildSpinnerPalette frame-table layout", () => {
+	it("with no config uses the seven slots at 19 frames each (defaults), period 1330 frames", () => {
 		const palette = buildSpinnerPalette(fakeTheme(DISTINCT));
 		assert.deepEqual(palette.tokens, [...SPINNER_COLOR_TOKENS]);
 		assert.equal(DEFAULT_FRAMES_PER_COLOR, 19);
 		assert.equal(SPINNER_INTERVAL_MS, 80);
-		// 19 帧 × 80ms = 1520ms ≈ 1.5s 一换色；周期 = lcm(10, 19 × 7) = 1330 帧 ≈ 106s。
+		// 19 frames × 80ms = 1520ms ≈ one color change per 1.5s; period = lcm(10, 19 × 7) = 1330 frames ≈ 106s.
 		assert.equal(palette.frames?.length, 1330);
 		assert.equal(palette.frames?.length, expectedPeriod(19, 7));
 	});
 
-	it("旋转照旧：第 i 帧的盲文就是 pi 默认序列的第 i % 10 帧", () => {
+	it("rotation unchanged: frame i's braille is pi's default sequence's i % 10", () => {
 		const frames = buildSpinnerPalette(fakeTheme(DISTINCT)).frames as string[];
 		for (const [index, frame] of frames.entries()) {
 			assert.equal(frameOf(frame), SPINNER_FRAMES[index % SPINNER_FRAMES.length]);
 		}
 	});
 
-	it("颜色按帧数推进：每段恰好 framesPerColor 帧，顺序就是 tokens 顺序", () => {
+	it("colors advance by frame count: each run is exactly framesPerColor frames, in tokens order", () => {
 		const runs = colorRuns(buildSpinnerPalette(fakeTheme(DISTINCT)).frames as string[], DISTINCT);
-		assert.equal(runs.length, 70); // 1330 帧 / 每段 19 帧
+		assert.equal(runs.length, 70); // 1330 frames / 19 per run
 		assert.ok(runs.every((run) => run.length === DEFAULT_FRAMES_PER_COLOR));
 		for (const [index, run] of runs.entries()) {
 			assert.equal(run.color, DISTINCT[SPINNER_COLOR_TOKENS[index % SPINNER_COLOR_TOKENS.length] as string]);
 		}
 	});
 
-	it("默认帧表回绕无缝：末帧是本圈末帧 + 调色板末色，换色点相位遍历全部 10 个位置", () => {
+	it("the default table wraps seamlessly: the last frame is the revolution's last braille + the palette's last color, and change-point phases sweep all 10 positions", () => {
 		const frames = buildSpinnerPalette(fakeTheme(DISTINCT)).frames as string[];
 		const last = frames[frames.length - 1] as string;
 		assert.equal(frameOf(last), SPINNER_FRAMES[9]);
@@ -114,13 +117,13 @@ describe("buildSpinnerPalette 的帧表排布", () => {
 		assert.equal(frameOf(frames[0] as string), SPINNER_FRAMES[0]);
 		assert.equal(colorOf(frames[0] as string, DISTINCT), DISTINCT["accent"]);
 
-		// 19 与盲文圈长 10 互质：换色点每换一次就往圈内错一步，相位遍历全部 10 个位置
-		// （帧表周期 lcm(10, 19 × 7) = 1330 帧 ≈ 106s，比一轮调色板的 133 帧长得多）。
+		// 19 is coprime with the 10-frame braille revolution: each color-change point lands one step further inside the revolution, sweeping all 10 positions
+		// (table period lcm(10, 19 × 7) = 1330 frames ≈ 106s — far longer than one palette lap's 133 frames).
 		assert.equal(frames.length, DEFAULT_FRAMES_PER_COLOR * SPINNER_COLOR_TOKENS.length * 10);
 		assert.equal(changePhases(frames, DISTINCT).size, SPINNER_FRAMES.length);
 	});
 
-	it("framesPerColor 可调：1 = 每帧换色，3 = 周期 210 帧且换色点逐圈漂移", () => {
+	it("framesPerColor is tunable: 1 = every frame, 3 = period 210 frames with a per-revolution drifting change point", () => {
 		const perFrame = buildSpinnerPalette(fakeTheme(DISTINCT), { framesPerColor: 1 });
 		assert.equal(perFrame.frames?.length, expectedPeriod(1, 7));
 		assert.ok(colorRuns(perFrame.frames as string[], DISTINCT).every((run) => run.length === 1));
@@ -128,11 +131,11 @@ describe("buildSpinnerPalette 的帧表排布", () => {
 		const holdThree = buildSpinnerPalette(fakeTheme(DISTINCT), { framesPerColor: 3 });
 		assert.equal(holdThree.frames?.length, expectedPeriod(3, 7));
 		assert.ok(colorRuns(holdThree.frames as string[], DISTINCT).every((run) => run.length === 3));
-		// 3 不整除 10：换色点不在盲文的同一个位置（相位多于一个 = 彩带在圈内漂）。
+		// 3 does not divide 10: the change point is not at one braille position (more than one phase = the ribbon drifts inside the revolution).
 		assert.ok(changePhases(holdThree.frames as string[], DISTINCT).size > 1);
 	});
 
-	it("非法 framesPerColor：0 / 负数 / NaN / Infinity 退回默认，小数取整", () => {
+	it("invalid framesPerColor: 0 / negative / NaN / Infinity fall back to the default; fractions are floored", () => {
 		for (const [value, hold] of [
 			[0, DEFAULT_FRAMES_PER_COLOR],
 			[-3, DEFAULT_FRAMES_PER_COLOR],
@@ -146,7 +149,7 @@ describe("buildSpinnerPalette 的帧表排布", () => {
 		}
 	});
 
-	it("tokens 可换成子集：两个色槽、每色 5 帧 → 周期 lcm(10, 10) = 10 帧", () => {
+	it("tokens can shrink to a subset: two slots × 5 frames each → period lcm(10, 10) = 10 frames", () => {
 		const palette = buildSpinnerPalette(fakeTheme(DISTINCT), { framesPerColor: 5, tokens: ["accent", "warning"] });
 		assert.deepEqual(palette.tokens, ["accent", "warning"]);
 		assert.equal(palette.frames?.length, expectedPeriod(5, 2));
@@ -157,9 +160,9 @@ describe("buildSpinnerPalette 的帧表排布", () => {
 	});
 });
 
-describe("buildSpinnerPalette 的颜色去重与降级", () => {
-	it("当前主题里同色的两个槽位只留一个（不留连续两段同色）", () => {
-		// pi-coder-summer-night 实测撞车：success == toolDiffAdded、warning == toolTitle。
+describe("buildSpinnerPalette color dedup and degradation", () => {
+	it("two slots sharing a color under the current theme keep only one (no two consecutive same-color runs)", () => {
+		// measured collision on pi-coder-summer-night: success == toolDiffAdded, warning == toolTitle.
 		const theme = fakeTheme({
 			...DISTINCT,
 			toolDiffAdded: DISTINCT["success"] as string,
@@ -172,31 +175,31 @@ describe("buildSpinnerPalette 的颜色去重与降级", () => {
 		const runs = colorRuns(palette.frames as string[], DISTINCT);
 		assert.ok(runs.every((run) => run.length === 19));
 		for (const [index, run] of runs.entries()) {
-			assert.notEqual(run.color, runs[index + 1]?.color, `第 ${index} 段与下一段同色`);
+			assert.notEqual(run.color, runs[index + 1]?.color, `run ${index} has the same color as the next run`);
 		}
-		// 撞车的是后出现的那个槽位（去重保留首次出现者）。
+		// the collider dropped is the later slot (dedup keeps the first occurrence).
 		assert.ok(!palette.tokens.includes("toolDiffAdded"));
 		assert.ok(!palette.tokens.includes("toolTitle"));
 	});
 
-	it("只剩一种颜色时不下发帧表（调用方保持 pi 默认 spinner）", () => {
+	it("with only one color left, no frame table is issued (the caller keeps pi's default spinner)", () => {
 		const allSame = fakeTheme(Object.fromEntries(SPINNER_COLOR_TOKENS.map((token) => [token, "<all>"])));
 		const palette = buildSpinnerPalette(allSame);
 		assert.equal(palette.frames, null);
 		assert.deepEqual(palette.tokens, ["accent"]);
 	});
 
-	it("恒等主题（NO_COLOR / 非 TUI）也是单色 → frames 为 null", () => {
+	it("an identity theme (NO_COLOR / non-TUI) is also monochrome → frames is null", () => {
 		const identity: SpinnerColorize = (_token, text) => text;
 		assert.equal(buildSpinnerPalette(identity).frames, null);
 	});
 
-	it("指纹随主题变、同主题稳定（换肤后靠它决定重装）", () => {
+	it("the fingerprint changes with the theme and stays stable within one (reinstall decisions rely on it)", () => {
 		const first = buildSpinnerPalette(fakeTheme(DISTINCT)).signature;
 		assert.equal(buildSpinnerPalette(fakeTheme(DISTINCT)).signature, first);
 		assert.notEqual(buildSpinnerPalette(fakeTheme({ ...DISTINCT, accent: "<other>" })).signature, first);
 
-		// 被去重丢掉的槽位（颜色与前一个槽位撞车）改了颜色也不影响指纹 —— 它不参与轮换。
+		// a slot dropped by dedup (its color collided with the previous slot) does not affect the fingerprint — it is not in the rotation.
 		const signatureWithDropped = (dropped: string): string =>
 			buildSpinnerPalette(
 				fakeTheme({ ...DISTINCT, toolDiffAdded: dropped, toolTitle: DISTINCT["warning"] as string }),
@@ -207,7 +210,7 @@ describe("buildSpinnerPalette 的颜色去重与降级", () => {
 		);
 	});
 
-	it("取色探针是非空文本（空串取色分辨不出色槽）", () => {
+	it("the color probe is non-empty text (an empty string cannot distinguish slots)", () => {
 		const probes: string[] = [];
 		buildSpinnerPalette((token, text) => {
 			probes.push(text);

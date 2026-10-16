@@ -1,69 +1,81 @@
 /**
- * spinner-frames.ts — working spinner 的「幻彩」帧表：同一族盲文帧按调色板轮换颜色。
+ * spinner-frames.ts — the working spinner's "rainbow" frame table: the same family of braille
+ * frames cycling through a palette of colors.
  *
- * 抽出来的理由与 `working-summary.ts` / `bash-spinner.ts` 相同：帧表怎么排（周期长度、
- * 第 i 帧配哪个颜色）、调色板怎么去重、主题指纹是什么，全是纯计算，不该活在 `index.ts`
- * 的 ctx 与定时器之间。本模块**不 import pi / pi-tui**，`node --test` 直接跑每个分支
- * （用例见 `spinner-frames.test.ts`）；装着帧表的那半边（什么时候装、什么时候重装）在扩展里。
+ * Extracted for the same reason as `working-summary.ts` / `bash-spinner.ts`: how the frame table
+ * is laid out (cycle length, which color frame i takes), how the palette is deduplicated, and
+ * what the theme fingerprint is — all pure computation that should not live between `index.ts`'s
+ * ctx and its timers. This module **does not import pi / pi-tui** — `node --test` exercises
+ * every branch directly (see `spinner-frames.test.ts`); the half that installs the frame table
+ * (when to install, when to reinstall) lives in the extension.
  *
- * ## 为什么只能预烘颜色
+ * ## Why colors can only be pre-baked
  *
- * pi 的 `Loader` 只有一条上色路径：默认十帧盲文交给 `spinnerColorFn`（非嵌入态就是
- * `theme.fg("accent", frame)`），所以整条 spinner 永远一个颜色 —— 这正是本扩展要改的。
- * 扩展的入口 `ctx.ui.setWorkingIndicator({ frames, intervalMs })` 里**自定义帧是 verbatim
- * 渲染的**（pi 0.85.1 的 Loader：`renderIndicatorVerbatim = indicator !== undefined`，
- * 为真时 `getRenderedIndicator()` 直接返回帧字符串、不套 `spinnerColorFn`），也就是颜色
- * 必须由帧字符串自己带。于是「一帧一个颜色」只能把 ANSI 序列预烘进帧表；代价是换主题后
- * 帧表不会自己更新，得重装一次（重装 = 再调一次 `setWorkingIndicator`，要不要重装由
- * `signature` 判断）。
+ * pi's `Loader` has exactly one coloring path: the default ten braille frames go through
+ * `spinnerColorFn` (`theme.fg("accent", frame)` when not embedded), so the whole spinner is
+ * forever one color — precisely what this extension changes. In the extension's entry point
+ * `ctx.ui.setWorkingIndicator({ frames, intervalMs })`, **custom frames are rendered verbatim**
+ * (pi 0.85.1's Loader: `renderIndicatorVerbatim = indicator !== undefined`; when true,
+ * `getRenderedIndicator()` returns the frame string as-is, skipping `spinnerColorFn`) — meaning
+ * the color must be carried by the frame string itself. So "one color per frame" can only be done
+ * by baking ANSI sequences into the frame table; the cost is that after a theme change the table
+ * does not update by itself — it must be reinstalled (reinstall = call `setWorkingIndicator`
+ * again; whether to is decided by `signature`).
  *
- * ## 帧表怎么排
+ * ## How the frame table is laid out
  *
- * Loader 每 `intervalMs`（默认 80）把帧表索引 +1 再取模回绕，**帧表顺序就是动画顺序**。
- * 把「十帧盲文 × 若干颜色」摊平成一维数组，索引 i 的真身是
+ * The Loader bumps the frame-table index +1 modulo its length every `intervalMs` (default 80) —
+ * **the table's order is the animation order**. Flatten "ten braille frames × several colors"
+ * into a one-dimensional array, where index i means:
  *
- *     盲文 = SPINNER_FRAMES[i % 10]                        （旋转照旧，速度与 pi 默认一致）
- *     颜色 = colors[floor(i / framesPerColor) % colors.length]
+ *     braille = SPINNER_FRAMES[i % 10]                        (rotation unchanged, same speed as pi's default)
+ *     color   = colors[floor(i / framesPerColor) % colors.length]
  *
- * 颜色是**按帧数**推进而不是每帧一换：默认 `framesPerColor = 19`。1500ms 不是 80ms 的
- * 整数倍，19 帧 = 1520ms 是离需求（1.5s 一换色）最近的取值（差 1.3%）；演变轨迹：初版
- * 5 帧 / 400ms 偏快 → 10 帧 / 800ms（减半）→ 19 帧 / 1520ms。每帧一换
- * （`framesPerColor = 1`，80ms）在终端里是频闪不是幻彩；再往上就是「半天不动」——
- * `PI_SPINNER_COLOR_HOLD` 按帧数调。
+ * Color advances **by frame count**, not every frame: default `framesPerColor = 19`. 1500ms is
+ * not a multiple of 80ms; 19 frames = 1520ms is the closest value to the requirement (color
+ * change every 1.5s; off by 1.3%). Evolution: first version 5 frames / 400ms felt fast → 10
+ * frames / 800ms (halved) → 19 frames / 1520ms. One frame per color (`framesPerColor = 1`,
+ * 80ms) is a strobe, not a rainbow; much higher is "stuck half a day" — `PI_SPINNER_COLOR_HOLD`
+ * tunes it by frame count.
  *
- * 一维表必须有周期，否则回绕处会跳色：周期 = lcm(10, framesPerColor × 颜色数)，这样
- * i 与 i+周期 的 (盲文, 颜色) 都对齐。默认 19 帧 × 7 色：一轮调色板 133 帧（10.6s，
- * 盲文转 13.3 圈），帧表周期 lcm(10, 133) = 1330 帧（约 106s）。
- * 19 与盲文圈长 10 互质，所以换色点每换一次就往圈内错一步、相位遍历全部 10 个位置 ——
- * 观感是颜色在漂移的彩带，换色点不会总落在同一个盲文帧上。想让换色点固定在盲文同一
- * 位置（每圈/每两圈换一次色）就把 `framesPerColor` 设成 10 的倍数（如 10 / 20），代价是
- * 调色板周期与旋转周期锁相。
+ * The one-dimensional table must have a period or colors jump at wraparound: period =
+ * lcm(10, framesPerColor × color count), so i and i+period align in both (braille, color).
+ * Default 19 frames × 7 colors: one palette lap is 133 frames (10.6s, 13.3 braille
+ * revolutions); the table period is lcm(10, 133) = 1330 frames (~106s). Since 19 and the
+ * 10-frame revolution are coprime, each color-change point lands one step further inside the
+ * revolution and the phase sweeps all 10 positions — visually a ribbon of drifting color where
+ * change points never land on the same braille frame. To pin color changes to a fixed braille
+ * position (change every revolution / every two), set `framesPerColor` to a multiple of 10
+ * (e.g. 10 / 20) at the cost of locking the palette period to the rotation period.
  *
- * ## 调色板
+ * ## The palette
  *
- * 七个色槽按需求取：accent / success / warning / syntaxKeyword / toolDiffAdded /
- * toolDiffRemoved / toolTitle（需求里的「keyword / added / removed / tool」在主题
- * token 目录里的正式名字）。顺序就照需求这一串排列。换主题后**实际颜色可能撞车**
- * （实测 pi-coder-summer-night：success 与 toolDiffAdded 同为 #8cd6a7、warning 与 toolTitle
- * 同为 #e9c16f），撞车的槽位按 `fg` 的渲染结果去重丢掉 —— 留着会连续两段同一个颜色，
- * 看着像动画卡住了。去重后只剩一种颜色（单色主题 / NO_COLOR）时 `frames = null`：
- * 调用方保持 pi 默认 spinner，不要装一张每帧长得都一样的「动画」表。
+ * Seven color slots per the requirement: accent / success / warning / syntaxKeyword /
+ * toolDiffAdded / toolDiffRemoved / toolTitle (the formal token names for "keyword / added /
+ * removed / tool" in the theme catalog), in exactly this order. After a theme change **actual
+ * colors may collide** (measured on pi-coder-summer-night: success and toolDiffAdded are both
+ * #8cd6a7, warning and toolTitle both #e9c16f); colliding slots are deduplicated by `fg`'s
+ * rendered output — keeping them would paint two consecutive stretches the same color and look
+ * like the animation froze. When only one color survives dedup (monochrome theme / NO_COLOR),
+ * `frames = null`: the caller keeps pi's default spinner rather than installing an "animation"
+ * whose every frame looks identical.
  */
 
-/** 只用到 `fg` 的主题接口 —— 沿用 `index.ts` 的 `WorkingMessageTheme` 形状，但不反向 import。 */
+/** A theme interface using only `fg` — mirrors `index.ts`'s `WorkingMessageTheme` shape without importing back. */
 export type SpinnerColorize = (token: string, text: string) => string;
 
-/** pi 默认的十帧盲文（顺序即旋转方向）。帧表沿用它：动画读起来与改动前是同一族。 */
+/** pi's default ten braille frames (order = rotation direction). The table reuses them: the animation reads as the same family as before. */
 export const SPINNER_FRAMES: readonly string[] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /**
- * pi 默认帧间隔（毫秒）。自定义帧必须自己给间隔（不给就退回 pi 的默认值，数值一样但
- * 依赖 pi 的实现细节），所以这里写死一份并与 pi 的 `DEFAULT_INTERVAL_MS` 对齐 —— 它同时
- * 是「颜色持续多久」的换算基准（`framesPerColor × SPINNER_INTERVAL_MS`）。
+ * pi's default frame interval (ms). Custom frames must supply their own interval (or they fall
+ * back to pi's default — same value but a dependency on pi's implementation detail), so it is
+ * pinned here and kept aligned with pi's `DEFAULT_INTERVAL_MS` — it is also the conversion
+ * basis for "how long a color lasts" (`framesPerColor × SPINNER_INTERVAL_MS`).
  */
 export const SPINNER_INTERVAL_MS = 80;
 
-/** 参与轮换的主题色槽，按需求顺序（「幻彩」的色序）。 */
+/** Theme color slots in the rotation, in requirement order (the "rainbow" sequence). */
 export const SPINNER_COLOR_TOKENS: readonly string[] = [
 	"accent",
 	"success",
@@ -75,23 +87,24 @@ export const SPINNER_COLOR_TOKENS: readonly string[] = [
 ];
 
 /**
- * 每种颜色持续的帧数（默认 19 帧 × 80ms = 1520ms ≈ 1.5s 一换色）。
- * 1500ms 不是 80ms 的整数倍，19 是最近的帧数（1520ms，差 1.3%）。
+ * Frames each color lasts (default 19 frames × 80ms = 1520ms ≈ one color change per 1.5s).
+ * 1500ms is not a multiple of 80ms; 19 is the nearest frame count (1520ms, off by 1.3%).
  */
 export const DEFAULT_FRAMES_PER_COLOR = 19;
 
 /**
- * 取色探针字符：给 `fg` 一个非空文本，拿到的就是「该色槽的染色结果」，用来比对两个
- * 色槽在当前主题下是否同色（`fg` 的返回值带上 ANSI 前缀，不能只看槽位名字）。
+ * Color-probe character: handing `fg` a non-empty text returns "this slot's colored result",
+ * used to compare whether two slots resolve to the same color under the current theme (`fg`'s
+ * return carries the ANSI prefix — slot names alone cannot be compared).
  */
 const COLOR_PROBE = "x";
 
 export interface SpinnerPalette {
-	/** 去重后真正参与轮换的色槽（保持原顺序）。 */
+	/** The slots that actually rotate after dedup (original order preserved). */
 	tokens: string[];
-	/** 主题指纹：同一主题同一配色下稳定，换主题 / 换配色后必变。 */
+	/** Theme fingerprint: stable under the same theme + palette; guaranteed to change after a theme / palette change. */
 	signature: string;
-	/** 帧表（已上色，逐帧字符串）；`null` = 当前主题挑不出两种可区分的颜色。 */
+	/** The frame table (colored, one string per frame); `null` = the current theme cannot produce two distinguishable colors. */
 	frames: string[] | null;
 }
 
@@ -106,13 +119,13 @@ function gcd(a: number, b: number): number {
 	return left;
 }
 
-/** 帧表周期（帧数）：盲文圈（10）与颜色周期（每色帧数 × 颜色数）的最小公倍数。 */
+/** Frame-table period (in frames): the lcm of the braille revolution (10) and the color cycle (frames-per-color × color count). */
 function spinnerFramePeriod(framesPerColor: number, colorCount: number): number {
 	const colorCycle = framesPerColor * colorCount;
 	return (colorCycle / gcd(SPINNER_FRAMES.length, colorCycle)) * SPINNER_FRAMES.length;
 }
 
-/** 非整数 / <1 / 非有限值一律退回默认（环境变量解析出来的数还可能是 NaN）。 */
+/** Non-integer / <1 / non-finite values all fall back to the default (an env-parsed number can still be NaN). */
 function normalizeFramesPerColor(value: number | undefined): number {
 	return value !== undefined && Number.isFinite(value) && value >= 1
 		? Math.floor(value)
@@ -120,10 +133,11 @@ function normalizeFramesPerColor(value: number | undefined): number {
 }
 
 /**
- * 按当前主题算出幻彩帧表。
+ * Compute the rainbow frame table for the current theme.
  *
- * 颜色去重按**渲染结果**（`colorize(token, COLOR_PROBE)`）而不是槽位名字：两个槽位在当前
- * 主题里可能是同一个颜色（见文件头）。去重后不足两种颜色就返回 `frames: null`。
+ * Colors dedupe by **rendered output** (`colorize(token, COLOR_PROBE)`), not slot names — two
+ * slots may resolve to the same color under the current theme (see file header). Fewer than two
+ * colors left → `frames: null`.
  */
 export function buildSpinnerPalette(
 	colorize: SpinnerColorize,
