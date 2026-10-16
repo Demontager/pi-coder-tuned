@@ -1,10 +1,13 @@
 /**
- * codemode-tree — 纯逻辑：把 pi 内置 codemode 渲染器产出的**行数组**重排成一棵树。
+ * codemode-tree — pure logic: reflow the **line arrays** produced by pi's built-in codemode
+ * renderers into a tree.
  *
- * 本模块不 import pi、不碰 pi-tui，所以 `node --test` 能直跑（与 `fenceless-code-block/render.ts`、
- * `user-message-bar/bar.ts` 同一条路子）。着色只用到注入进来的 `theme.fg`。
+ * This module imports neither pi nor pi-tui, so `node --test` runs it directly (the same
+ * approach as `fenceless-code-block/render.ts` and `user-message-bar/bar.ts`). Coloring uses
+ * only the injected `theme.fg`.
  *
- * ## 目标形状（用户 2026-10-01 定，与 `bash-command-collapse.ts` 的树同构）
+ * ## Target shape (user's decision, 2026-10-01; isomorphic to the tree in
+ * `bash-command-collapse.ts`)
  *
  * ```
  * • codemode
@@ -19,70 +22,79 @@
  *     … (36 more lines, ctrl+o to expand)
  * ```
  *
- * 圆点三态（用户 2026-10-01 定）：执行中白（`text`）/ 成功绿（`toolDiffAdded`，与 bash 同色）/ 失败红
- *（`toolDiffRemoved`）—— 见 `stateDotSlot`。
+ * Three dot states (user's decision, 2026-10-01): white while executing (`text`) / green on
+ * success (`toolDiffAdded`, same color as bash) / red on failure (`toolDiffRemoved`) — see
+ * `stateDotSlot`.
  *
- * ## 列位（实测钉过，必须与 bash / read 块逐列对齐）
+ * ## Columns (pinned by measurement; must align column-for-column with the bash / read blocks)
  *
- * | 元素 | 列 | 谁占的 |
+ * | Element | Column | Occupied by |
  * | --- | --- | --- |
- * | 圆点 `•` | 0 | 左边距（`MARGIN_WIDTH` = 2） |
- * | `codemode` / `│` / `└` | 2 | 左边距之后 |
- * | `│ ` `└ ` 之后的正文 | 4 | gutter 再占 2 列 |
+ * | dot `•` | 0 | left margin (`MARGIN_WIDTH` = 2) |
+ * | `codemode` / `│` / `└` | 2 | after the left margin |
+ * | text after `│ ` `└ ` | 4 | the gutter takes 2 more columns |
  *
- * 于是**所有子内容都按 `width - 4` 渲染**（`CONTENT_OFFSET`）—— 命令侧也一样，虽然它在
- * 「还没出结果」时只挂 2 列缩进（那两列刻意空着）：预算按最宽的前缀算，折行宽度才不会在
- * 结果到达的那一刻跳变（bash 侧踩过同款「提前折行 / 折行跳变」，见其文件头）。
+ * So **all child content renders at `width - 4`** (`CONTENT_OFFSET`) — the command side too,
+ * even though it carries only 2 columns of indent while "no result yet" (those two columns are
+ * deliberately left empty): budget for the widest prefix so the wrap width does not jump the
+ * moment the result arrives (the bash side hit the same "premature wrap / wrap jump", see its
+ * file header).
  *
- * ## 为什么是「后处理行数组」而不是「自己解析 result」
+ * ## Why "post-process line arrays" instead of "parse the result ourselves"
  *
- * 结果里的嵌套调用清单（`✓ bash {…} 158ms`）、成本汇总行、输出预览与截断提示全是内置
- * 渲染器画的，而 `getTextOutput` 没有从包根导出 —— 自己解析 `result.content` 等于复刻
- * 一遍内置逻辑，pi 升级时会静默漂移。所以入口（`index.ts`）把内置的两个渲染器
- * **委托执行一次**拿到渲染好的行，再用本模块重排：形状由我们定，行的内容始终跟着 pi 走。
+ * The nested-call list in the result (`✓ bash {…} 158ms`), the cost summary line, the output
+ * preview, and the truncation hints are all drawn by the built-in renderers, and
+ * `getTextOutput` is not exported from the package root — parsing `result.content` ourselves
+ * would replicate the built-in logic and silently drift as pi upgrades. So the entry
+ * (`index.ts`) **delegates once** to the built-in's two renderers to get the rendered lines,
+ * then reflows them with this module: we own the shape; the line contents always follow pi.
  */
 
-/** 圆点那一列：`• ` = 1 个字符 + 1 个空格 = 2 列。 */
+/** The dot column: `• ` = 1 char + 1 space = 2 columns. */
 export const MARGIN_WIDTH = 2;
-/** 结构符占的列数：`│ ` / `└ ` = 1 个 box-drawing 字符 + 1 个空格 = 2 列。 */
+/** Columns taken by the structure glyph: `│ ` / `└ ` = 1 box-drawing char + 1 space = 2 columns. */
 export const GUTTER_WIDTH = 2;
-/** 子内容要扣掉的列数：左边距 + 结构符（结构符落在列 2、正文落在列 4）。 */
+/** Columns to subtract for child content: left margin + structure glyph (glyph at column 2, text at column 4). */
 export const CONTENT_OFFSET = MARGIN_WIDTH + GUTTER_WIDTH;
 
-/** 结构符前面的留白（左边距）：两格。`│` / `└` 因此落在列 2。 */
+/** Whitespace before the structure glyph (left margin): two spaces. `│` / `└` therefore land at column 2. */
 export const GUTTER_LEAD = " ".repeat(MARGIN_WIDTH);
-/** `│ ` / `└ ` 之后的正文列：4 格（与 bash 块同一列）。 */
+/** The text column after `│ ` / `└ `: 4 spaces (the same column as the bash block). */
 export const BODY_INDENT = " ".repeat(CONTENT_OFFSET);
-/** 「还没出结果」时命令续行的缩进：两格（与 `codemode` 的 `c` 同列）。 */
+/** Indent of command continuation lines while "no result yet": two spaces (aligned with the `c` of `codemode`). */
 export const LOOSE_INDENT = " ".repeat(MARGIN_WIDTH);
 
-/** 子组件（pi 内置渲染器渲染出来的那一坨）该按多宽渲染。 */
+/** How wide the child component (the blob pi's built-in renderer produces) should render. */
 export function contentWidth(totalWidth: number): number {
 	return Math.max(1, totalWidth - CONTENT_OFFSET);
 }
 
-/** 去掉 SGR 转义序列 —— 行里可能只有颜色序列。 */
+/** Strip SGR escape sequences — a line may contain nothing but color codes. */
 function stripSgr(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-/** 这一行（带样式）是不是空的。 */
+/** Whether this (styled) line is blank. */
 export function isBlankLine(line: string): boolean {
 	return stripSgr(line).trim() === "";
 }
 
 /**
- * 圆点该用哪个颜色槽（用户 2026-10-01 定）—— 三态：
+ * Which color slot the dot should use (user's decision, 2026-10-01) — three states:
  *
- *   - 执行中（`isPartial`）→ `text`（普通前景色 / 白，用户明确要的，**与 bash 的 `dim` 不同**）
- *   - 执行完且成功 → `toolDiffAdded`（diff 新增行的绿，**与 bash 成功圆点同色**）
- *   - 执行完且失败（脚本 `isError`）→ `toolDiffRemoved`（diff 删除行的红）
+ *   - executing (`isPartial`) → `text` (the normal foreground / white; explicitly requested
+ *     by the user, **unlike bash's `dim`**)
+ *   - finished successfully → `toolDiffAdded` (the diff-added green, **same color as the bash
+ *     success dot**)
+ *   - finished with failure (script `isError`) → `toolDiffRemoved` (the diff-removed red)
  *
- * 中间那个绿槽是 `toolDiffAdded` 而**不是** `success`：bash / read 两颗绿圆点用的都是
- * `toolDiffAdded`，拿 `success` 会在有的皮肤里与它们不同色（两者恰好同值时看不出，换皮就露）。
+ * The middle green slot is `toolDiffAdded` and **not** `success`: the bash / read green dots
+ * both use `toolDiffAdded`; taking `success` would differ from them in some skins (invisible
+ * while the two happen to share a value, exposed the moment the skin changes).
  *
- * 判定读 `context.isError`（pi 调 resultRenderer 时不带 `isError` 字段，只在 getRenderContext
- * 里给 —— 读 `result.isError` 会永远拿到 undefined）。
+ * The verdict reads `context.isError` (pi does not pass an `isError` field when calling the
+ * resultRenderer; it is only present in getRenderContext — reading `result.isError` always
+ * yields undefined).
  */
 export function stateDotSlot(isPartial: boolean, isError: boolean): "text" | "toolDiffAdded" | "toolDiffRemoved" {
 	if (isPartial) return "text";
@@ -90,27 +102,35 @@ export function stateDotSlot(isPartial: boolean, isError: boolean): "text" | "to
 }
 
 /**
- * 截断提示行 —— 内置渲染器里所有「还有 N 条没显示，按 ctrl+o 展开」的写法，本函数必须全部认得。
+ * Truncation hint lines — every "N more entries hidden, press ctrl+o to expand" spelling used
+ * by the built-in renderers must be recognized here.
  *
- * 两种省略号都要认：`...` 是 pi `truncateToWidth` 的写法、`…` 是 pi 预览组件自己的。
+ * Both ellipses must match: `...` is pi `truncateToWidth`'s spelling; `…` is pi's preview
+ * component's own.
  *
- * 名词有**两种**，实测都出现过（少认一种就会把 `└ ` 错挂到提示行上，用户 2026-10-01 在大例子里看出来）：
- *   - `lines` —— 代码预览（`… (N more lines, …)`，`expandHint(theme, n, "lines")`）与输出预览
- *     （`... (N earlier lines, …)`，bash 侧也有同款）
- *   - `calls` —— **嵌套调用清单**的折叠提示（`... (N earlier calls, …)`，只出现在 codemode）
+ * The noun comes in **two** kinds, both seen in practice (missing one would hang `└ ` wrongly
+ * on a hint line — spotted by the user in a big example, 2026-10-01):
+ *   - `lines` — the code preview (`… (N more lines, …)`, `expandHint(theme, n, "lines")`) and
+ *     the output preview (`... (N earlier lines, …)`, the bash side has the same)
+ *   - `calls` — the collapse hint of the **nested-call list** (`... (N earlier calls, …)`,
+ *     appears only in codemode)
  *
- * 所以骨架是「`(数字 [词] <lines|calls>`」——中间那格词可有可无（`(2 earlier calls)` / `(5 lines)`
- * 都出现过），不能写死 `earlier`/`more`。它是**结构提示行**：该挂 `│ ` 而不是吃掉 `└ `。
+ * So the skeleton is "`(digits [word] <lines|calls>`" — the middle word cell is optional
+ * (`(2 earlier calls)` / `(5 lines)` have both occurred); it must not hard-code
+ * `earlier`/`more`. It is a **structural hint line**: it should carry `│ ` rather than eat
+ * the `└ `.
  */
 export function isExpandHintLine(line: string): boolean {
 	return /^\s*(?:\.\.\.|…)\s*\(\d+\s+(?:\S+\s+)?(?:lines?|calls?)\b/.test(stripSgr(line));
 }
 
 /**
- * 命令侧：给每一行挂上树形前缀 —— 首行 `• `（圆点由调用方上好色），其余行按 `connected`
- * 选 `│ `（结果已到，树接上了）或两格缩进（还在跑，与 bash 的「执行中」形态一致）。
+ * Command side: attach tree prefixes to every line — first line `• ` (the dot is pre-colored
+ * by the caller), the rest choose `│ ` (result arrived, the tree is connected) or a two-space
+ * indent (still running, matching the bash "executing" look) per `connected`.
  *
- * 空行保持空行：给空行补空格会把「这一行是空的」这个信息擦掉，外层判空还得先剔 ANSI 再 trim。
+ * Blank lines stay blank: padding blanks with spaces erases the "this line is empty"
+ * information, and the outer blank check would have to strip ANSI and trim first.
  */
 export function withCallGutter(lines: string[], dotAnsi: string, pipe: string, connected: boolean): string[] {
 	const continuation = connected ? `${GUTTER_LEAD}${pipe}` : LOOSE_INDENT;
@@ -121,39 +141,48 @@ export function withCallGutter(lines: string[], dotAnsi: string, pipe: string, c
 }
 
 /**
- * 结果侧：把整块结果的行数组画成树 —— **第一个实质内容行**挂 `└ `，它**上面**的行
- * （分隔空行、截断提示）挂 `│ `，它**下面**的每一行都走四格缩进（树在那里就落地了）。
+ * Result side: draw the result's whole line array as a tree — the **first substantial content
+ * line** carries `└ `, the lines **above** it (separator blanks, truncation hints) carry
+ * `│ `, and every line **below** it takes the four-space indent (the tree lands there).
  *
- * 与 bash 的 `prefixTreeLines` 同一套规则，四个不能想当然的点：
+ * Same rule set as the bash side's `prefixTreeLines`; four points you must not take for
+ * granted:
  *
- *   ① **整块只出现一次 `└ `**：调用方必须先把所有 child 的行拼成一个数组再交给本函数
- *      （内置渲染器把嵌套调用清单和 `Text("\n" + 输出)` 分成两个 child），逐 child 各画
- *      一棵树会长出两个拐角符。
- *   ② **提示行挂 `│ ` 而不是吃 `└ `**：`… (35 lines, ctrl+o to expand)` 是「下文还有」的
- *      标记，`└ ` 要留给真正的正文第一行，否则整块全是提示、看不到内容。
- *   ③ **`└ ` 之上的空行要带 `│ `、之下不补**：上面的空行是内置渲染器 `Spacer(1)` 画的
- *      分隔行（命令与结果之间那一格，用户样例里就是一根 `│`），光秃秃地空着会把树断开；
- *      下面的空行已在树落地之后，再画竖线反而像树还没完。
- *   ④ **前导空行照样带 `│ `**：`inner.render()` 的第一行就是那个 `Spacer(1)` 的空行 ——
- *      它是**结果这一截的开头**，不是整块的上边界（整块的上边界由 pi 的 self shell 给，
- *      见 `index.ts` 的说明）。
+ *   ① **`└ ` appears exactly once per block**: the caller must first stitch all children's
+ *      lines into one array before handing them to this function (the built-in renderer
+ *      splits the nested-call list and the `Text("\n" + output)` into two children); drawing
+ *      one tree per child would grow two corner glyphs.
+ *   ② **hint lines carry `│ ` instead of eating `└ `**: `… (35 lines, ctrl+o to expand)` marks
+ *      "more below"; `└ ` must be reserved for the first real content line, otherwise the
+ *      whole block is hints and no content is visible.
+ *   ③ **blank lines above `└ ` get `│ `, below get nothing**: the blank above is the separator
+ *      drawn by the built-in renderer's `Spacer(1)` (the one cell between command and result;
+ *      in the user's sample it is a lone `│`); left completely empty it would break the tree;
+ *      the blank below is already after the tree lands, and drawing a bar there would look
+ *      like the tree continues.
+ *   ④ **the leading blank line also carries `│ `**: the first line of `inner.render()` is that
+ *      `Spacer(1)` blank — it is **the start of the result section**, not the whole block's
+ *      upper boundary (that boundary is drawn by pi's self shell; see the notes in
+ *      `index.ts`).
  *
- * 只有提示行、没有实质内容（脚本没输出也没有嵌套调用）时，提示行挂 `│ ` 保留下来 ——
- * 整块丢掉会把「还有内容可以展开」这个唯一的线索也一起扔掉。
+ * When there are only hint lines and no substantial content (no script output and no nested
+ * calls), the hint lines are kept with `│ ` — dropping the block would throw away the only
+ * clue that "there is content to expand".
  */
 export function shapeResultLines(lines: string[], theme: { fg: (color: string, text: string) => string }): string[] {
 	if (lines.length === 0) return [];
 
-	// 第一个实质内容行（跳过空行与提示行）
+	// The first substantial content line (skipping blanks and hint lines)
 	let start = 0;
 	while (start < lines.length && (isBlankLine(lines[start]!) || isExpandHintLine(lines[start]!))) start++;
 
 	const pipe = `${GUTTER_LEAD}${theme.fg("muted", "│ ")}`;
 	const corner = `${GUTTER_LEAD}${theme.fg("muted", "└ ")}`;
 
-	// 只有提示行、没有实质内容：整段挂 `│ `，不丢内容。
-	// 但**一个提示行都没有**时（全空输入）要返回空数组 —— pi 的 `updateDisplay()` 靠
-	// 「两个渲染器都没产出」来置 `hideComponent`，这里返回一行空 `│` 会让整块白占一行。
+	// Only hint lines, no substantial content: keep the stretch with `│ `, do not drop content.
+	// But when there is **not even one hint line** (all-blank input), return an empty array —
+	// pi's `updateDisplay()` sets `hideComponent` based on "neither renderer produced
+	// anything"; returning a lone empty `│` here would make the block waste a line.
 	if (start >= lines.length) {
 		if (!lines.some(isExpandHintLine)) return [];
 		return lines.map((line) => (isBlankLine(line) ? pipe : `${pipe}${line}`));

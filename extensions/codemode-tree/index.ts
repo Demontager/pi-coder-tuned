@@ -1,65 +1,88 @@
 /**
- * codemode-tree — codemode 工具块的树形展示（接线）
+ * codemode-tree — tree rendering for the codemode tool block (wiring)
  *
- * 把 pi 内置 `codemode` 工具块的观感改造成与 `bash-command-collapse.ts` / `read-path-collapse.ts`
- * 同一套：`• ` 开头、`│ ` 续段、`└ ` 只出现一次的树，**没有底色、没有上下边界空行**。
- * 形状与列位规则全在 `render.ts`（不 import pi，`node --test` 能直跑），本文件只做三件事：
- * 捕获内置工具定义、委托内置渲染器、把它们的行重排成树。
+ * Reworks the look of pi's built-in `codemode` tool block into the same set as
+ * `bash-command-collapse.ts` / `read-path-collapse.ts`: a tree with a `• ` head, `│ `
+ * continuations, and a single `└ `, **no background fill and no boundary blank lines**.
+ * Shape and column rules all live in `render.ts` (no pi import, `node --test` runs it
+ * directly); this file only does three things: capture the built-in tool definition,
+ * delegate to the built-in renderers, and reflow their lines into a tree.
  *
- * ## 怎么拿到 codemode 的**执行逻辑**（不复制一份）
+ * ## How we obtain codemode's **execution logic** (without copying it)
  *
- * `codemode` 是 pi 的**内置扩展**（`builtin:codemode`），不是内置工具 —— 没有
- * `createCodemodeToolDefinition()` 这种"只给定义"的导出口径（`createCodemodeExtension` 是唯一
- * 入口，它内部才调 `createCodemodeToolDefinition`）。所以这里用同一个工厂**捕获**它注册的定义：
- * 传一个只拦截 `registerTool` 的 Proxy，其余属性一律转发给真 `pi`（`getSettings` / `appendEntry` /
- * `getAllTools` 都是工厂闭包里用到的，且要在**调用时**读到实时值 —— 比如 `getMode()` 每轮读
- * `pi.getSettings().codemode.mode`）。用 Proxy 而不是手写 stub：pi 以后往工厂里加新的 `pi.*` 调用
- * 时不会因为漏转发而崩，也不会在加载期抛异常。
+ * `codemode` is a pi **built-in extension** (`builtin:codemode`), not a built-in tool — there
+ * is no "definitions only" export like `createCodemodeToolDefinition()`
+ * (`createCodemodeExtension` is the only entry, and it calls `createCodemodeToolDefinition`
+ * internally). So we **capture** the definition it registers using that same factory: pass a
+ * Proxy that intercepts only `registerTool` and forwards every other property to the real
+ * `pi` (`getSettings` / `appendEntry` / `getAllTools` are all used inside the factory
+ * closure, and must read live values **at call time** — e.g. `getMode()` reads
+ * `pi.getSettings().codemode.mode` every turn). A Proxy instead of a hand-written stub: if
+ * pi adds new `pi.*` calls to the factory later, nothing breaks from a missed forwarding,
+ * and nothing throws at load time.
  *
- * 实测（真 CLI，2026-10-01）：捕获到的定义的 `parameters` 与 pi 自己那份**是同一个对象引用**
- * （`===` 成立）。这一点是必须的 —— MCP 扩展的 `isCodemodeTool()` 正是靠 schema 引用相等来认
- * "这是本包的 codemode"，据此决定要不要把 codemode 工具自动激活；换成自己写一份 schema 会让
- * 那个自动激活静默失效（只剩 `MCP tools are only reachable from the codemode or tool_search tool…`
- * 那条告警）。
+ * Measured (real CLI, 2026-10-01): the captured definition's `parameters` **is the same
+ * object reference** as pi's own (`===` holds). This is required — the MCP extension's
+ * `isCodemodeTool()` recognizes "this is our package's codemode" precisely by schema
+ * reference equality, and decides whether to auto-activate codemode tools on that; a
+ * hand-rolled schema would silently break that auto-activation (leaving only the
+ * `MCP tools are only reachable from the codemode or tool_search tool…` warning).
  *
- * ## 内置在 settings 里被显式禁用（用户 2026-10-01 决定）
+ * ## The built-in is explicitly disabled in settings (user's decision, 2026-10-01)
  *
- * `codemode` 是 pi 内置扩展里**声明了 `replaceable: true`** 的那一类（与 `tool-search` / `mcp` 同）：
- * 另一个扩展注册了同名工具时，pi 会把内置**整个不加载**，并在启动时打一条 warning
- *（`registers tool `codemode`, so built-in extension `codemode` was not loaded`）。这条 warning 是**预期的**，
- * 不是错误 —— 它就是在说“内置那份已经让位”。但 pi 启动时会把它渲染在**两处**（`[Extension issues]` 块
- * + `Warning: Extension package …` 行），且没有任何开关能关掉（`quietStartup` 只影响资源清单，不影响 diagnostics）。
+ * `codemode` is the kind of pi built-in extension that declares **`replaceable: true`**
+ * (like `tool-search` / `mcp`): when another extension registers a same-named tool, pi skips
+ * loading the built-in **entirely** and prints one warning at startup
+ * (`registers tool `codemode`, so built-in extension `codemode` was not loaded`). That warning
+ * is **expected**, not an error — it literally says "the built-in copy has stepped aside".
+ * But pi renders it in **two places** at startup (the `[Extension issues]` block + the
+ * `Warning: Extension package …` line), and there is no switch to turn it off (`quietStartup`
+ * only affects the resource listing, not diagnostics).
  *
- * 用户决定在 settings.json 写 `extensions: ["-builtin:codemode"]`（2026-10-01），让内置直接不加载，
- * 两条提示从此消失（SDK 实测：warnings 清零、codemode 仍由本扩展提供）。代价：`PI_CODEMODE_TREE=off`
- * 的回退不再成立 —— off 时本扩展不注册、内置又被 settings 禁掉，codemode 工具会**整个消失**
- *（此前 off 意味着“内置顶上”）。想恢复内置观感得先把 settings 里那条删掉。
+ * The user decided to put `extensions: ["-builtin:codemode"]` in settings.json (2026-10-01),
+ * so the built-in simply never loads and both notices disappear (measured via SDK: warnings
+ * drop to zero, codemode still provided by this extension). The cost: the
+ * `PI_CODEMODE_TREE=off` fallback no longer works — when off, this extension registers
+ * nothing while the built-in is disabled by settings, so the codemode tool **disappears
+ * entirely** (previously "off" meant "the built-in takes over"). Restoring the built-in look
+ * requires removing that settings entry first.
  *
- * ## 整块的壳：`renderShell: "self"` + 自绘左边距
+ * ## The block shell: `renderShell: "self"` + self-drawn left margin
  *
- * `renderShell: "self"` 让 pi 不再给整块套 `contentBox`（`Box(1, 1, bgFn)`），于是
- * ① **没有底色**（pending / 成功 / 失败三种底都不画；是"不去画"而不是"画上再擦"）、
- * ② **没有上下两条边界空行** —— 与 bash / read 块同一手法（见 README「两个块共用同一套壳」）。
+ * `renderShell: "self"` makes pi stop wrapping the whole block in `contentBox`
+ * (`Box(1, 1, bgFn)`), so ① **no background fill** (pending / success / failure all unpainted
+ * — "not painted", not "painted then erased"), and ② **no boundary blank lines above and
+ * below** — the same technique as the bash / read blocks (see the README, "two blocks share
+ * one shell").
  *
- * 代价得说清楚：pi 的默认壳正是用 `toolErrorBg`（红底）表达「这个工具失败了」的，底色去掉之后
- * 那一层信号就没了 —— 所以**圆点必须承担结局灯**：执行中白（`text`）/ 成功绿（`toolDiffAdded`，
- * 与 bash 同色）/ 失败红（`toolDiffRemoved`），外加正文里 `Script error:` 那几行的红字。
+ * The cost must be said plainly: pi's default shell uses `toolErrorBg` (red fill) to express
+ * "this tool failed"; with the fill gone, that signal layer is gone — so **the dot must carry
+ * the outcome**: white while executing (`text`) / green on success (`toolDiffAdded`, same
+ * color as bash) / red on failure (`toolDiffRemoved`), plus the red `Script error:` lines in
+ * the body.
  *
- * 左边距（首行 `• `、其余行按 `render.ts` 的规则）全由本扩展自己画：self 模式下
- * `ToolExecutionComponent` 直接渲染 `selfRenderContainer`、**没有任何 padding**，所以两个渲染器
- * 拿到的都是整宽，得自己按 `contentWidth()` 扣回 4 列再交给子组件。
+ * The left margin (first line `• `, remaining lines per `render.ts`'s rules) is drawn
+ * entirely by this extension: in self mode, `ToolExecutionComponent` renders the
+ * `selfRenderContainer` directly with **no padding at all**, so both renderers receive the
+ * full width and must subtract 4 columns via `contentWidth()` before handing off to the child
+ * components.
  *
- * ## 委托内置渲染器时必须传对的一处
+ * ## The one thing that must be passed correctly when delegating to the built-in renderers
  *
- * 两个内置渲染器都是 `const component = context.lastComponent ?? new Container(); component.clear();`
- * 的形态 —— `lastComponent` 必须是**它们自己上次返回的那个内层组件**。把我们的 wrapper（没有
- * `clear()` / `addChild()`）传进去会抛 `TypeError`，而 `updateDisplay()` 的 try/catch 会**静默退回**
- * 内置 fallback：看不出是渲染坏了，只是形状回到默认。所以内层组件存在 `context.state` 里跨次复用
- * （`read-path-collapse.ts` 踩过同一个坑）。
+ * Both built-in renderers follow the shape
+ * `const component = context.lastComponent ?? new Container(); component.clear();` — the
+ * `lastComponent` must be **the inner component they themselves returned last time**. Passing
+ * our wrapper (which lacks `clear()` / `addChild()`) throws a `TypeError`, and
+ * `updateDisplay()`'s try/catch **silently falls back** to the built-in fallback renderer:
+ * it does not look broken, the shape just reverts to default. So the inner component is kept
+ * in `context.state` and reused across calls (`read-path-collapse.ts` stepped in the same
+ * pit).
  *
- * `PI_CODEMODE_TREE=off` 关闭（注册期读一次，与 `PI_FENCELESS_CODE` / `PI_READ_COLLAPSE` 同一约定）：
- * 关闭时本扩展不注册 `codemode`。注意：settings 里已有 `-builtin:codemode`（见上），内置不会顶上，
- * codemode 工具会整个消失 —— 这个 env 现在只是“关掉”开关，不再是“恢复内置观感”开关。
+ * Turned off with `PI_CODEMODE_TREE=off` (read once at registration time; same convention as
+ * `PI_FENCELESS_CODE` / `PI_READ_COLLAPSE`): when off, this extension does not register
+ * `codemode`. Note: settings already contains `-builtin:codemode` (see above), so the
+ * built-in will not step in, and the codemode tool disappears entirely — this env is now
+ * purely an "off" switch, no longer a "restore the built-in look" switch.
  */
 
 import { createCodemodeExtension } from "@earendil-works/pi-coding-agent";
@@ -67,7 +90,7 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 
 import { contentWidth, shapeResultLines, stateDotSlot, withCallGutter } from "./render.ts";
 
-/** 只拦截 `registerTool` 的 Proxy：其余 `pi.*` 一律转发给真 API（见文件头）。 */
+/** A Proxy intercepting only `registerTool`: every other `pi.*` is forwarded to the real API (see the file header). */
 function captureCodemodeDefinition(pi: ExtensionAPI): ToolDefinition<any, any, any> {
 	let captured: ToolDefinition<any, any, any> | undefined;
 	const capture = new Proxy(pi, {
@@ -80,7 +103,8 @@ function captureCodemodeDefinition(pi: ExtensionAPI): ToolDefinition<any, any, a
 			return Reflect.get(target, property, receiver);
 		},
 	});
-	// 与 pi 内置加载它时一样的调用方式（不传 options = `models: true`、mode / inlineBudget 走设置）
+	// Invoked exactly the way pi loads it built-in (no options = `models: true`; mode /
+	// inlineBudget follow settings)
 	createCodemodeExtension()(capture);
 	if (!captured) {
 		throw new Error("codemode-tree: could not capture the codemode tool definition from createCodemodeExtension()");
@@ -88,7 +112,7 @@ function captureCodemodeDefinition(pi: ExtensionAPI): ToolDefinition<any, any, a
 	return captured;
 }
 
-/** 把子组件渲染出来的行拼成一维数组（内置渲染器返回的是 `Container`）。 */
+/** Stitch the child components' rendered lines into a flat array (the built-in renderers return a `Container`). */
 function childrenLines(component: any, width: number): string[] {
 	const children: any[] | undefined = component?.children;
 	if (!Array.isArray(children) || children.length === 0) {
@@ -102,10 +126,11 @@ function childrenLines(component: any, width: number): string[] {
 }
 
 /**
- * 按**宽度 + 形状键**缓存行数组：`render(width)` 每帧都调，两条路径都不便宜
- * （代码高亮 / 折行 / 预览组件）。键里必须带上「命令侧用哪套缩进」这个状态 ——
- * `updateDisplay()` 在一次调用里先渲染 renderCall、再渲染 renderResult，所以结果到达那一刻
- * 命令行的 `│ ` 与两格缩进会切一次，只按宽度缓存会把这半帧的形状钉死。
+ * Cache the line array by **width + shape key**: `render(width)` runs every frame and
+ * neither path is cheap (code highlighting / wrapping / the preview component). The key must
+ * include "which indent set the command side uses" — `updateDisplay()` renders renderCall
+ * then renderResult within one call, so the command line's `│ ` vs two-space indent switches
+ * at the moment the result arrives; caching by width alone would pin that half-frame's shape.
  */
 function createCachedComponent(render: (width: number) => string[], cacheKey: () => string, invalidateInner?: () => void) {
 	let cachedWidth: number | undefined;
@@ -136,33 +161,41 @@ export default function (pi: ExtensionAPI) {
 	const base = captureCodemodeDefinition(pi);
 
 	pi.registerTool({
-		// 展开而不是逐字段抄：`execute` / `prepareLoadout`（工具描述靠它按 callable 工具实时生成）/
-		// `description` / `parameters` / `promptSnippet` / `promptGuidelines` / `constrainedSampling` /
-		// `exposure` / `defaultActive` 全部原样继承 —— prompt 元数据不会自动继承，必须显式带上。
+		// Spread, not field-by-field copying: `execute` / `prepareLoadout` (the tool
+		// description is generated live from callable tools via it) / `description` /
+		// `parameters` / `promptSnippet` / `promptGuidelines` / `constrainedSampling` /
+		// `exposure` / `defaultActive` are all inherited as-is — prompt metadata is not
+		// auto-inherited; it must be carried explicitly.
 		...base,
 		renderShell: "self",
 		renderCall(args, theme, context) {
 			const state = context.state as { innerCall?: any; innerResult?: any };
-			// 传给内置实现的 lastComponent 必须是**内层**组件（见文件头）
+			// The lastComponent handed to the built-in implementations must be the
+			// **inner** component (see the file header)
 			const inner =
 				base.renderCall?.(args, theme, { ...context, lastComponent: state.innerCall }) ??
 				({ render: () => [], invalidate() {} } as any);
 			state.innerCall = inner;
 			return createCachedComponent(
 				(width) => {
-					// 圆点三态（用户 2026-10-01 定）：执行中白（`text`）/ 成功绿（`toolDiffAdded`，**与 bash
-					// 成功圆点同色**）/ 失败红（`toolDiffRemoved`）。槽位选择在纯逻辑里（`stateDotSlot`）。
+					// Three dot states (user's decision, 2026-10-01): white while executing
+					// (`text`) / green on success (`toolDiffAdded`, **same color as the bash
+					// success dot**) / red on failure (`toolDiffRemoved`). Slot selection lives
+					// in the pure logic (`stateDotSlot`).
 					const dot = theme.fg(stateDotSlot(context.isPartial === true, context.isError === true), "•");
 					const pipe = theme.fg("muted", "│ ");
-					// 「树接上了没有」看 `state.innerResult`：`updateDisplay()` 先跑 renderCall、再跑
-					// renderResult，但两个组件真正 `render()` 是在之后的容器渲染里 —— 那时本帧的
-					// innerResult 已经就位，所以命令侧与结果侧在**同一帧**切到 `│ `（没有半帧的错位，
-					// 也不需要像 bash 那样在 renderResult 里提前置位）。
+					// "Is the tree connected" reads `state.innerResult`: `updateDisplay()`
+					// runs renderCall first, then renderResult, but both components actually
+					// `render()` in the container render afterwards — by then this frame's
+					// innerResult is in place, so the command side and the result side switch
+					// to `│ ` in **the same frame** (no half-frame mismatch, and no need to
+					// set the flag early in renderResult the way bash does).
 					const connected = state.innerResult !== undefined;
 					return withCallGutter(inner.render(contentWidth(width)), dot, pipe, connected);
 				},
-				// 缓存键必须带上「哪个状态」：圆点的颜色与续行前缀都随状态变，只按宽度缓存会把上一帧
-				// 的颜色 / 形状钉死。
+				// The cache key must include "which state": the dot color and the
+				// continuation prefix change with state; caching by width alone would pin the
+				// previous frame's color / shape.
 				() => `${state.innerResult === undefined ? "loose" : "connected"}:${stateDotSlot(context.isPartial === true, context.isError === true)}`,
 				() => inner.invalidate?.(),
 			);
