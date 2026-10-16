@@ -1,23 +1,34 @@
 /**
- * Tests for index.ts — 端到端：pi 自己的扩展加载器真的加载本扩展，补丁真的落在 **pi 渲染用的
- * 那个** `UserMessageComponent` 上，再用 pi 自己的组件渲染一条用户消息做 A/B 对照
- * （同一份文本、同一个宽度：补丁前 vs 补丁后）。
+ * Tests for index.ts — end-to-end: pi's own extension loader really loads
+ * this extension, the patch really lands on **the `UserMessageComponent` pi
+ * renders with**, and a user message rendered by pi's own component is A/B
+ * compared (same text, same width: before vs after the patch).
  *
  * Run with:  node --test clients/pi/extensions/user-message-bar/index.test.ts
  *
- * 为什么非得绕这一圈（不直接 new 一个组件来渲染）：这个特性的**唯一**风险就是「补丁打在另一个类
- * 上」—— `pi` 命令跑的是 `dist/bundle/cli.js`，pi 的类内联在 chunk 里，而扩展 import 到的是扩展
- * 加载器 virtualModules 给的那一份。只有真过一遍 pi 的加载器 + pi 自己的渲染组件，才能证明这两者
- * **是同一个类**（链路见 `bar.ts` 文件头）。`bar.test.ts` 覆盖纯逻辑与边界条件。
+ * Why this detour is unavoidable (rather than just new-ing a component): the
+ * feature's **only** risk is "the patch landed on a different class" — `pi`
+ * runs `dist/bundle/cli.js` with pi's classes inlined in the chunk, while the
+ * extension's import resolves to whatever the loader's virtualModules hands
+ * it. Only a real pass through pi's loader + pi's own render component proves
+ * the two **are the same class** (the chain is in `bar.ts`'s file header).
+ * `bar.test.ts` covers the pure logic and edge cases.
  *
- * 断言口径（A/B 逐行对照，比"看起来对不对"硬）：
- *   - 每一行的可见宽度与补丁前**完全一致**（pi-tui 对超宽行直接抛错，多一格都不行）；
- *   - 去掉零宽序列后，正文与补丁前逐字相同，只有行首那两格从「空格 + 正文」变成「竖线 + 空格」，
- *     而那多出来的一格是从**行尾补白**里吃的（宽度不变）；
- *   - 竖线颜色 = 皮肤 `accent`（强调色；这里注入的是一份自造皮肤，色值可控）；
- *   - OSC 133 zone 标记仍在首行最前面（不能被竖线挤到后面）；
- *   - 会话替换窗口内（旧 ctx 已作废、新 ctx 未到）渲染不抛异常、只是不画竖线（2026-09-20 回归）。
- * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
+ * The assertions (row-by-row A/B — harder than "looks right"):
+ *   - every row's visible width is **identical** to before (pi-tui throws
+ *     outright on an over-wide row — not one column may differ);
+ *   - zero-width sequences stripped, the text is byte-identical to before —
+ *     only the row start's two columns change from "space + text" to "bar +
+ *     space", and the extra column was eaten from the **trailing padding**
+ *     (width unchanged);
+ *   - the bar color = the skin's `accent` (a hand-made skin is injected —
+ *     values controlled);
+ *   - the OSC 133 zone marker still leads the first row (the bar must not
+ *     push it back);
+ *   - inside a session-swap window (old ctx dead, new one not yet arrived)
+ *     rendering does not throw — it just draws no bar (2026-09-20
+ *     regression).
+ * No local pi library entry → skip wholesale (never fake a pass).
  */
 
 import assert from "node:assert/strict";
@@ -28,34 +39,39 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 const ESC = "\u001b";
 
 const BAR = "\u258e";
-/** 自造皮肤的 `accent`（`#95c4ce` = 本机 `pi-coder-summer-night` 的 sky）—— 默认取色槽。 */
+/** The hand-made skin's `accent` (`#95c4ce` = this machine's `pi-coder-summer-night` sky) — the default color slot. */
 const ACCENT = "#95c4ce";
 const ACCENT_FG = "\u001b[38;2;149;196;206m";
-/** 默认取用的颜色（= accent），A/B 对照与 `undoBar` 用它。 */
+/** The default color (= accent) — the A/B compare and `undoBar` use it. */
 const BAR_FG = ACCENT_FG;
-/** 自造皮肤的 `toolDiffAdded`（`#89b8c2` = 该皮肤的 teal）：仅当 `accent` 缺失时的兜底槽。 */
+/** The hand-made skin's `toolDiffAdded` (`#89b8c2` = that skin's teal): the fallback slot when `accent` is absent. */
 const DIFF_ADDED = "#89b8c2";
 const DIFF_ADDED_FG = "\u001b[38;2;137;184;194m";
-/** `#2d2c5d` = 该皮肤的 select 色：背景槽，用来验证显式指定背景槽时的 38/48 转换。 */
+/** `#2d2c5d` = that skin's select color: a background slot — verifies the 38/48 conversion when a bg slot is named explicitly. */
 const SELECTED_BG = "#2d2c5d";
 const SELECTED_BG_FG = "\u001b[38;2;45;44;93m";
 
 /**
- * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
+ * pi's library entry (not the CLI): bundle is the shape `pi` actually runs,
+ * dist is the node build shape.
  *
- * 先从 `pi` 可执行文件反查**真正的安装位置**（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 后者是**扩展包的安装根**，`pi update --extensions` 会用
- * `--config.auto-install-peers=false` 把自动装进去的 `@earendil-works/pi-*` 同伴包剪掉，
- * 于是那份副本只剩空壳（文件都在、import 报 `ERR_MODULE_NOT_FOUND`；2026-09 升
- * pi-subagents 0.68.0 时实测踩到）。
+ * First back-trace the `pi` executable to the **real install location**
+ * (pnpm/npm shim scripts carry a `# cmd-shim-target=<abs path>` line; npm on
+ * Unix uses a symlink — both are tried), then fall back to the
+ * `~/.pi/agent/npm` copy — the latter is the **extension-package install
+ * root**: `pi update --extensions` trims the auto-installed
+ * `@earendil-works/pi-*` sibling packages with
+ * `--config.auto-install-peers=false`, leaving that copy a hollow shell
+ * (files present, import fails with `ERR_MODULE_NOT_FOUND`; hit live while
+ * upgrading pi-subagents 0.68.0 in 2026-09).
  *
- * 判定方式是**能不能真 import**，不是路径存不存在 —— 只有真 import 一次才分得清空壳。
- * 全都不行就返回 undefined，调用方整体 skip（不假装通过）。
+ * The check is **whether it really imports**, not whether the path exists —
+ * only an actual import can tell a hollow shell apart. All failing →
+ * undefined; the caller skips wholesale (never fakes a pass).
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -65,17 +81,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 		if (!dir) continue;
 		const shimPath = path.join(dir, "pi");
 		try {
-			// npm 的 shim 是符号链接
+			// npm's shim is a symlink
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -88,7 +104,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -129,9 +145,9 @@ interface PiApi {
 let pi: PiApi | undefined;
 if (piEntry) pi = (await import(pathToFileURL(piEntry).href)) as unknown as PiApi;
 
-/** 注入给扩展的 `ctx.ui.theme`：一份自造皮肤，色值可控。
- *  `muted` / `thinkingXhigh` / `text` 是 Theme 构造器做兜底时读的（scrollbarTrack ← muted 等），
- *  少了它们构造器会在 `fgAnsi(undefined)` 上抛。 */
+/** The `ctx.ui.theme` injected into the extension: a hand-made skin with controlled values.
+ *  `muted` / `thinkingXhigh` / `text` are read by the Theme constructor's fallbacks
+ *  (scrollbarTrack ← muted, etc.) — missing any, the constructor throws on `fgAnsi(undefined)`. */
 function createTheme(): unknown {
 	assert.ok(pi);
 	return new pi.Theme(
@@ -171,7 +187,7 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 	};
 }
 
-/** 用 pi 自己的加载器加载本扩展（`./bar.ts` 的 import 也一起验证）。 */
+/** Load this extension via pi's own loader (the `./bar.ts` import is verified along the way). */
 async function loadExtension(workspace: { agentDir: string; projectDir: string }): Promise<LoadedExtension> {
 	assert.ok(pi);
 	const loaded = await pi.discoverAndLoadExtensions(
@@ -180,36 +196,36 @@ async function loadExtension(workspace: { agentDir: string; projectDir: string }
 		workspace.agentDir,
 		createTestBus(),
 	);
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
 	return extension;
 }
 
-/** 触达 pi 真实事件链路的那一步：`session_start` 带 ctx，扩展在这里拿到皮肤。 */
+/** The step that touches pi's real event chain: `session_start` carries the ctx — where the extension gets the skin. */
 async function fireSessionStart(extension: LoadedExtension, theme: unknown): Promise<void> {
 	await fireSessionStartWithCtx(extension, { ui: { theme } });
 }
 
-/** 同上，但直接给整个 ctx —— 用来注入一个「任何属性读取都抛」的作废 ctx。 */
+/** Same as above, but the whole ctx is given — injects a "any property read throws" dead ctx. */
 async function fireSessionStartWithCtx(extension: LoadedExtension, ctx: unknown): Promise<void> {
 	const handlers = extension.handlers.get("session_start") ?? [];
-	assert.ok(handlers.length > 0, "本扩展必须注册 session_start（否则拿不到皮肤）");
+	assert.ok(handlers.length > 0, "this extension must register session_start (or it never gets the skin)");
 	for (const handler of handlers) await handler({ type: "session_start" }, ctx);
 }
 
-/** pi 的会话替换 / reload 先 emit 这个事件，再把旧 ctx 作废（`extensionRunner.invalidate()`）。 */
+/** pi emits this before killing the old ctx on a session swap / reload (`extensionRunner.invalidate()`). */
 async function fireSessionShutdown(extension: LoadedExtension): Promise<void> {
 	const handlers = extension.handlers.get("session_shutdown") ?? [];
-	assert.ok(handlers.length > 0, "本扩展必须注册 session_shutdown（旧 ctx 作废前摘掉取色源）");
+	assert.ok(handlers.length > 0, "this extension must register session_shutdown (the color source must drop before the old ctx dies)");
 	for (const handler of handlers) await handler({ type: "session_shutdown", reason: "new" }, undefined);
 }
 
-/** pi 作废旧 ctx 时抛的那一句（`ExtensionRunner.assertActive()`）。 */
+/** What pi's stale-ctx kill throws (`ExtensionRunner.assertActive()`). */
 const STALE_CTX = "This extension ctx is stale after session replacement or reload.";
 
-/** 一个与作废后的旧 ctx 行为一致的 ctx：读任何属性都抛。 */
+/** A ctx behaving like the dead old one: every property read throws. */
 function staleCtx(): unknown {
 	return new Proxy(
 		{},
@@ -221,7 +237,7 @@ function staleCtx(): unknown {
 	);
 }
 
-/** 走 pi 自己的组件渲染一条用户消息（`outputPad = 1`，与真实渲染一致）。 */
+/** Render one user message with pi's own component (`outputPad = 1` — same as the real render). */
 function renderUserMessage(text: string, width: number): string[] {
 	assert.ok(pi);
 	pi.initTheme("dark");
@@ -229,13 +245,16 @@ function renderUserMessage(text: string, width: number): string[] {
 	return new pi.UserMessageComponent(text, markdownTheme, 1, []).render(width);
 }
 
-/** 去掉 CSI 颜色与 OSC 133 标记（用户消息首尾各挂一个）。 */
+/** Strip the CSI colors and the OSC 133 marker (a user message carries one of each at head/tail). */
 const plainText = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "");
 
 /**
- * 可见列数：剥掉零宽序列后按列数算（fixture 里只有 ASCII、汉字与 `▎`；汉字 2 列，其余 1 列）。
- * 独立实现一份是为了验证 pi 自己算出来的宽度与我们一致 —— 它是会不会撞上 pi-tui 超宽抛错的判据。
+ * The visible column count: zero-width sequences stripped, then columns
+ * counted (the fixture holds only ASCII, Han, and `▎`; Han = 2 columns, the
+ * rest 1).
+ * An independent implementation verifies pi's own width math agrees — it is
+ * the check for whether a row would hit pi-tui's over-wide throw.
  */
 const visibleWidth = (line: string): number => {
 	let width = 0;
@@ -254,61 +273,63 @@ const visibleWidth = (line: string): number => {
 	return width;
 };
 
-/** 竖线（含取色与前景复位）及其后面那一格缩进空白：正好就是扩展写进每一行的那一段。 */
+/** The bar (color + glyph + foreground reset) plus the one indent space after it — exactly the segment the extension writes into every row. */
 const barOf = (fg: string): string => `${fg}${BAR}\u001b[39m `;
 
 /**
- * 把打完补丁的那一行**逐字节还原**成未打补丁的样子：竖线 + 缩进换回行首内边距那一格空格，
- * 再从行尾补白里还回它吃掉的一格。还原不回来就说明补丁动了别的东西。
+ * Restore a patched row **byte for byte** to its unpatched form: bar +
+ * indent become the left padding space again, and the eaten column is
+ * returned to the trailing padding. Anything not restorable means the patch
+ * touched more than it should.
  */
 const undoBar = (line: string, fg: string): string =>
 	line.replace(barOf(fg), " ").replace(/\u001b\[49m$/, (reset) => ` ${reset}`);
 
-const MESSAGE = "第一行正文\n第二行更长的正文正文正文正文正文正文正文正文正文";
+const MESSAGE = "first line\nsecond much textbodybodybodybodybodybodybody";
 const WIDTH = 46;
 
-/** 原型补丁是**进程级**的，一旦装上就活到进程结束 —— 这条必须排在任何一次真实安装之前，
- *  否则看到的是前面用例留下的补丁。真实世界里 off 是启动开关（模块根本不加载），没有这个问题。 */
-test("PI_USER_MESSAGE_BAR=off 时连补丁都不装", { skip, timeout: 30_000 }, async () => {
+/** The prototype patch is **process-wide** — once installed it lives until exit — so this case must run before any real install,
+ *  or it would see a patch left by an earlier test. In the real world off is a startup switch (the module never loads) — no such issue. */
+test("with PI_USER_MESSAGE_BAR=off the patch is not even installed", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	process.env.PI_USER_MESSAGE_BAR = "off";
 	try {
 		const extension = await loadExtension(workspace);
-		assert.equal(extension.handlers.size, 0, "off 时连 session_start 都不注册");
+		assert.equal(extension.handlers.size, 0, "with off, not even session_start is registered");
 		const lines = renderUserMessage(MESSAGE, WIDTH);
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "不画竖线");
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "no bar drawn");
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR;
 		workspace.cleanup();
 	}
 });
 
-test("扩展能被 pi 的加载器加载，并把补丁装在 pi 自己的 UserMessageComponent 上", { skip, timeout: 30_000 }, async () => {
+test("pi's loader can load the extension and the patch lands on pi's own UserMessageComponent", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
-		assert.equal(extension.handlers.get("session_start")?.length, 1, "注册了一个 session_start");
-		assert.equal(extension.handlers.get("session_shutdown")?.length, 1, "注册了一个 session_shutdown");
-		assert.equal(extension.handlers.size, 2, "只注册这两个事件");
+		assert.equal(extension.handlers.get("session_start")?.length, 1, "one session_start registered");
+		assert.equal(extension.handlers.get("session_shutdown")?.length, 1, "one session_shutdown registered");
+		assert.equal(extension.handlers.size, 2, "only these two events registered");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("补丁前 pi 的渲染原样（扩展刚加载、还没拿到皮肤时不加竖线）", { skip, timeout: 30_000 }, async () => {
+test("pi's render before the patch, verbatim (freshly loaded, no skin yet — no bar)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		await loadExtension(workspace);
 
 		const lines = renderUserMessage(MESSAGE, WIDTH);
-		assert.equal(lines.length >= 3, true, "至少上下留白 + 一行正文");
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "没有皮肤时不画竖线");
+		assert.equal(lines.length >= 3, true, "at least top/bottom padding + one text row");
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "no bar without a skin");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("拿到皮肤后：每行行首一条竖线 + 正文前一格缩进，颜色是强调色 accent，行宽与正文一字不差", { skip, timeout: 30_000 }, async () => {
+test("with a skin: a bar at every row's start + one indent before the text, accent color, width and text byte-identical", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -316,47 +337,49 @@ test("拿到皮肤后：每行行首一条竖线 + 正文前一格缩进，颜�
 		await fireSessionStart(extension, createTheme());
 		const after = renderUserMessage(MESSAGE, WIDTH);
 
-		assert.equal(after.length, before.length, "行数不变");
+		assert.equal(after.length, before.length, "the row count is unchanged");
 		for (const [i, line] of after.entries()) {
-			assert.equal(line.includes(`${BAR_FG}${BAR}\u001b[39m`), true, `第 ${i} 行的竖线用的是 accent 色`);
-			assert.equal(plainText(line).startsWith(`${BAR} `), true, `第 ${i} 行行首是竖线 + 一格空白`);
-			// 竖线跟着消息底色：不插任何背景开关序列，底色块左边缘不被抠出缺角
-			assert.equal(line.split("\u001b[49m").length - 1, 1, `第 ${i} 行只有行尾那一个关背景`);
-			assert.equal(undoBar(line, BAR_FG), before[i], `第 ${i} 行只多了竖线 + 缩进、没动别的`);
-			assert.equal(visibleWidth(line), visibleWidth(before[i] ?? ""), `第 ${i} 行可见宽度不变`);
+			assert.equal(line.includes(`${BAR_FG}${BAR}\u001b[39m`), true, `row ${i}'s bar uses the accent color`);
+			assert.equal(plainText(line).startsWith(`${BAR} `), true, `row ${i} starts with bar + one blank`);
+			// the bar follows the message background: no background-toggle sequences are inserted, and the block's left edge keeps no notch
+			assert.equal(line.split("\u001b[49m").length - 1, 1, `row ${i} has only the tail's one background-close`);
+			assert.equal(undoBar(line, BAR_FG), before[i], `row ${i} only gained the bar + indent — nothing else touched`);
+			assert.equal(visibleWidth(line), visibleWidth(before[i] ?? ""), `row ${i}'s visible width is unchanged`);
 		}
-		assert.equal(after[0].startsWith(`${ESC}]133;A\u0007`), true, "zone 标记仍在首行最前");
+		assert.equal(after[0].startsWith(`${ESC}]133;A\u0007`), true, "the zone marker still leads the first row");
 		const joined = after.map(plainText).join("\n");
-		assert.equal(joined.includes("第一行正文"), true, "正文内容在");
-		assert.equal(joined.includes("第二行更长的正文"), true, "折行后的正文也在");
+		assert.equal(joined.includes("first line"), true, "the body text is there");
+		assert.equal(joined.includes("second much text"), true, "the wrapped body is there too");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
 /**
- * 正文折到满行的那些行：Box 给孩子的宽度是 `width - 2`，正文总能留下至少一格行尾补白，
- * 所以竖线 + 缩进永远吃得下。这里用一条长正文把 pi 的折行真的跑出来，逐行验宽度。
+ * Rows whose text wraps to a full line: the Box gives its child `width - 2`
+ * columns, so at least one trailing-padding column always remains and bar +
+ * indent always fit. A long body makes pi really wrap it — every row's
+ * width is verified.
  */
-test("正文折行到满行时也能空出那一格：每行仍然正好 width 列", { skip, timeout: 30_000 }, async () => {
+test("even rows wrapped to a full line spare the column: every row is exactly width columns", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
-		const long = "正文".repeat(60);
+		const long = "body".repeat(60);
 		await fireSessionStart(extension, createTheme());
 		const lines = renderUserMessage(long, WIDTH);
 
-		assert.equal(lines.length > 3, true, "长正文应该折成多行");
+		assert.equal(lines.length > 3, true, "the long body should wrap to multiple rows");
 		for (const [i, line] of lines.entries()) {
-			assert.equal(visibleWidth(line), WIDTH, `第 ${i} 行正好 ${WIDTH} 列（超一格 pi-tui 就抛错）`);
-			assert.equal(plainText(line).startsWith(`${BAR} `), true, `第 ${i} 行行首是竖线 + 缩进`);
+			assert.equal(visibleWidth(line), WIDTH, `row ${i} is exactly ${WIDTH} columns (one over and pi-tui throws)`);
+			assert.equal(plainText(line).startsWith(`${BAR} `), true, `row ${i} starts with bar + indent`);
 		}
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded 显式换成另一个前景槽（不做 38/48 转换）", { skip, timeout: 30_000 }, async () => {
+test("PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded switches to another foreground slot (no 38/48 conversion)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	process.env.PI_USER_MESSAGE_BAR_COLOR = "toolDiffAdded";
 	try {
@@ -365,8 +388,8 @@ test("PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded 显式换成另一个前景槽（�
 		const lines = renderUserMessage(MESSAGE, WIDTH);
 
 		for (const line of lines) {
-			assert.equal(line.includes(`${DIFF_ADDED_FG}${BAR}`), true, "竖线用 toolDiffAdded");
-			assert.equal(line.includes(ACCENT_FG), false, "没有用默认的 accent");
+			assert.equal(line.includes(`${DIFF_ADDED_FG}${BAR}`), true, "the bar uses toolDiffAdded");
+			assert.equal(line.includes(ACCENT_FG), false, "the default accent was not used");
 		}
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR_COLOR;
@@ -374,7 +397,7 @@ test("PI_USER_MESSAGE_BAR_COLOR=toolDiffAdded 显式换成另一个前景槽（�
 	}
 });
 
-test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（38/48）", { skip, timeout: 30_000 }, async () => {
+test("PI_USER_MESSAGE_BAR_COLOR=selectedBg also works: a background slot converted to foreground (38/48)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	process.env.PI_USER_MESSAGE_BAR_COLOR = "selectedBg";
 	try {
@@ -383,9 +406,9 @@ test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（3
 		const lines = renderUserMessage(MESSAGE, WIDTH);
 
 		for (const line of lines) {
-			assert.equal(line.includes(`${SELECTED_BG_FG}${BAR}`), true, "竖线用 selectedBg 的 38 等值");
-			assert.equal(line.includes(BAR_FG), false, "没有用默认的 accent");
-			assert.equal(line.includes(`\u001b[48;2;45;44;93m${BAR}`), false, "不该把背景槽直接当背景铺上去");
+			assert.equal(line.includes(`${SELECTED_BG_FG}${BAR}`), true, "the bar uses selectedBg's 38 equivalent");
+			assert.equal(line.includes(BAR_FG), false, "the default accent was not used");
+			assert.equal(line.includes(`\u001b[48;2;45;44;93m${BAR}`), false, "a background slot must not be painted as a background");
 		}
 	} finally {
 		delete process.env.PI_USER_MESSAGE_BAR_COLOR;
@@ -394,31 +417,37 @@ test("PI_USER_MESSAGE_BAR_COLOR=selectedBg 也能用：背景槽转成前景（3
 });
 
 /**
- * 回归：会话被替换的那一瞬间（`/clear`、`/new`、`/resume`、`/fork`、`/reload`），pi 会让旧 ctx
- * 作废、但旧消息还挂在 `chatContainer` 上、新 ctx 还没到手 —— 这段时间里的渲染 tick 一读旧 ctx
- * 就会抛，而这个异常从渲染回调抛出没人接得住，直接把 pi `exit(1)`（2026-09-20 实测）。
- * 所以「拿不到皮肤」必须是这一帧不画竖线，而不是把异常放出去。
+ * Regression: at the moment a session is replaced (`/clear`, `/new`,
+ * `/resume`, `/fork`, `/reload`), pi kills the old ctx while the old
+ * messages still hang on `chatContainer` and the new ctx has not arrived —
+ * a render tick inside that window throws on any old-ctx read, and an
+ * exception from a render callback is uncatchable — it exits pi (measured
+ * 2026-09-20).
+ * So "no skin available" must mean "no bar this frame", never an escaped
+ * exception.
  */
-test("旧 ctx 已作废时渲染不抛、也不画竖线（渲染 tick 落进替换窗口不能掀翻 pi）", { skip, timeout: 30_000 }, async () => {
+test("a dead old ctx → render does not throw and draws no bar (a render tick inside the swap window must not topple pi)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		await fireSessionStartWithCtx(extension, staleCtx());
 
-		const lines = renderUserMessage(MESSAGE, WIDTH); // 以前这里抛 → 直达 pi 的 uncaughtException
-		assert.equal(lines.some((line) => line.includes(BAR)), false, "读不到皮肤就不画竖线");
-		assert.equal(lines.length >= 3, true, "消息本身照常渲染（上下留白 + 正文）");
-		assert.equal(plainText(lines.join("\n")).includes("第一行正文"), true, "正文一字不少");
+		const lines = renderUserMessage(MESSAGE, WIDTH); // this used to throw → straight into pi's uncaughtException
+		assert.equal(lines.some((line) => line.includes(BAR)), false, "no bar when the skin cannot be read");
+		assert.equal(lines.length >= 3, true, "the message itself still renders (top/bottom padding + body)");
+		assert.equal(plainText(lines.join("\n")).includes("first line"), true, "the body loses nothing");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
 /**
- * 回归：`session_shutdown` 一到就复位取色源。断言方式是「让旧 ctx 之后开始抛」—— 复位生效的话
- * 渲染根本不会去读它；没复位则会像上一条那样抛。
+ * Regression: `session_shutdown` resets the color source on arrival. The
+ * assertion is "let the old ctx start throwing afterwards" — with the reset
+ * effective, render never reads it; without it, the previous case's throw
+ * would fire.
  */
-test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此后开始抛也不炸）", { skip, timeout: 30_000 }, async () => {
+test("after session_shutdown: no bar, and render never touches the old ctx (it may throw from here on — no crash)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -433,14 +462,14 @@ test("session_shutdown 后不画竖线，且渲染不再碰旧 ctx（旧 ctx 此
 			},
 		});
 		const before = renderUserMessage(MESSAGE, WIDTH);
-		assert.equal(before.some((line) => line.includes(`${BAR_FG}${BAR}`)), true, "换之前有皮肤，画竖线");
+		assert.equal(before.some((line) => line.includes(`${BAR_FG}${BAR}`)), true, "a skin before the swap → bars drawn");
 
 		await fireSessionShutdown(extension);
-		live = false; // 此刻起旧 ctx 已作废：只要有人读它就会抛
+		live = false; // from here on the old ctx is dead: any read of it throws
 		const after = renderUserMessage(MESSAGE, WIDTH);
 
-		assert.equal(after.some((line) => line.includes(BAR)), false, "shutdown 之后不画竖线");
-		for (const [i, line] of after.entries()) assert.equal(line, undoBar(before[i] ?? "", BAR_FG), `第 ${i} 行回到未打补丁的样子`);
+		assert.equal(after.some((line) => line.includes(BAR)), false, "no bar after shutdown");
+		for (const [i, line] of after.entries()) assert.equal(line, undoBar(before[i] ?? "", BAR_FG), `row ${i} is back to its unpatched form`);
 	} finally {
 		workspace.cleanup();
 	}

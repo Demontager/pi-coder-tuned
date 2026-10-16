@@ -1,55 +1,75 @@
 /**
- * theme-command — /theme 指令：列出全部主题，上下键**实时预览**，回车落盘，Esc 取消。
+ * theme-command — the /theme command: list all themes, **live-preview** with the
+ * arrow keys, Enter to persist, Esc to cancel.
  *
- * 为什么需要它：内置只有 `/settings` → Theme 这条深路径（还混着 light/dark 自动模式），
- * 想换皮肤要点好几层。`/theme` 是一步直达的选择器，而且带预览。
+ * Why it exists: the built-in path is `/settings` → Theme — several levels deep
+ * (and tangled with the light/dark auto mode). `/theme` is a one-step picker —
+ * with preview.
  *
- * 核心是 `ctx.ui.setTheme()` 的**两条路径语义完全不同**（interactive-mode.js 的 ExtensionUIContext
- * + theme-controller.js）：
- *   - 传 **Theme 对象** → `setThemeInstance()` → 只在内存里换色，**不写 settings.json**；
- *   - 传 **名字字符串** → `setThemeName()` → 应用 **且立刻写 settings.json**（settingsManager.save()）。
- * 所以预览必须走对象路径，只有回车确认才走名字路径 —— Esc 取消后 settings.json 全程没被动过。
+ * The core is that `ctx.ui.setTheme()`'s **two paths mean completely different
+ * things** (interactive-mode.js's ExtensionUIContext + theme-controller.js):
+ *   - a **Theme object** → `setThemeInstance()` → recolors in memory only,
+ *     **does not write settings.json**;
+ *   - a **name string** → `setThemeName()` → applies **and immediately writes
+ *     settings.json** (settingsManager.save()).
+ * So previewing must take the object path, and only Enter takes the name path —
+ * settings.json stays untouched through an Esc cancel.
  *
- * 交互流程：
- *   - `/theme`            → 打开选择器（SelectList + 色板样本区），上下键即预览
- *   - `/theme <name>`     → 直接切换并落盘（名字不存在就报错并列出可用主题）
- *   - 非 TUI 模式         → 只提示，不做任何切换（print/json 模式下 ctx.ui 是 noOpUIContext，
- *                           setTheme 恒返回 {success:false}，没必要静默失败）
+ * The flow:
+ *   - `/theme`            → opens the picker (SelectList + a swatch area); arrow
+ *                         keys preview live
+ *   - `/theme <name>`     → switches and persists directly (an unknown name
+ *                         errors and lists the available themes)
+ *   - non-TUI mode        → just a notice, no switching (in print/json mode
+ *                         ctx.ui is noOpUIContext and setTheme always returns
+ *                         {success:false} — no point failing silently)
  *
- * 预览的两种呈现（都在同一个选择器里）：
- *   1. **整屏换色**：setThemeInstance 会 ui.invalidate() + 重绘，transcript / 编辑器 / statusline
- *      全部跟着换 —— 这是最真实的预览。选择器自身的 SelectList 配色用的是 `getSelectListTheme()`，
- *      它的回调闭包引用的是 pi 的全局 theme proxy（globalThis 共享），所以列表自己也实时换色。
- *   2. **色板样本区**：用候选主题实例自己的 token 画 5 行样本（核心色 / markdown / 代码+diff+tool /
- *      背景块 / thinking 档位），终端太矮看不出整屏差别时也能直接对比。
+ * The two preview surfaces (inside one picker):
+ *   1. **Whole-screen recolor**: setThemeInstance invalidates + repaints —
+ *      transcript / editor / statusline all follow. That is the truest preview.
+ *      The picker's own SelectList colors come from `getSelectListTheme()`, whose
+ *      callback closes over pi's global theme proxy (shared via globalThis) — so
+ *      the list itself recolors live too.
+ *   2. **A swatch area**: five sample rows drawn with the candidate theme's own
+ *      tokens (core colors / markdown / code+diff+tool / background blocks /
+ *      thinking levels) — directly comparable even on a terminal too short to
+ *      read whole-screen differences.
  *
- * 已知取舍（都是刻意选的，别"顺手优化"）：
- *   - 取消时也用**对象路径**恢复原主题，而不是名字路径。名字路径会把 `settings.json` 里
- *     `theme: "light/dark"`（自动模式）或未设置（按终端探测）的情况**改写成固定名字**，
- *     这是取消操作不该有的副作用。代价：`setThemeInstance()` 内部会 `stopThemeWatcher()`，
- *     所以预览过又取消之后，本次进程内主题文件的热重载失效（重启 pi 或回车确认即恢复，
- *     因为 `setTheme(name)` 会带 enableWatcher 重新起 watcher）。
- *   - 没预览过就取消（打开后直接 Esc）→ 什么都不做，不动主题也不动 watcher。
- *   - 色板/标题/边框一律**每次 render 现算**（见 LiveText），不把 theme 颜色预烘进缓存 ——
- *     tui.md「Invalidation and Theme Changes」：预烘的 ANSI 串在换主题后不会更新。
- *   - `DynamicBorder` 在 jiti 加载的扩展里必须显式传色函数（它的无参默认值依赖 pi 自己那份
- *     module cache 里的 theme，扩展侧可能是另一个 cache）。
+ * Known tradeoffs (all deliberate — do not "optimize" them away):
+ *   - Cancel restores the original theme via the **object path** too, not the
+ *     name path. The name path would rewrite `theme: "light/dark"` (auto mode)
+ *     or an unset value (terminal-detected) in settings.json to a fixed name —
+ *     a side effect a cancel must not have. The cost: `setThemeInstance()` runs
+ *     `stopThemeWatcher()` internally, so after a previewed-then-cancelled
+ *     picker, theme-file hot-reload is dead for this process (restarting pi or
+ *     confirming with Enter restores it — `setTheme(name)` starts the watcher
+ *     again via enableWatcher).
+ *   - Cancelling without ever previewing (open → straight Esc) → nothing
+ *     happens: no theme change, no watcher change.
+ *   - Swatch/title/border colors are **recomputed every render** (see LiveText)
+ *     — never baked into a cache: tui.md's "Invalidation and Theme Changes"
+ *     says baked ANSI strings do not update after a theme switch.
+ *   - `DynamicBorder` needs an explicit color function inside jiti-loaded
+ *     extensions (its no-arg default reads pi's own module-cache theme — the
+ *     extension side may hold another cache).
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, Spacer, truncateToWidth, type Component, type SelectItem } from "@earendil-works/pi-tui";
 
-/** SelectList 一次最多显示几行（色板还要占 5 行，别让选择器顶满屏） */
+/** How many SelectList rows show at once (the swatch takes 5 — do not let the picker fill the screen) */
 const MAX_VISIBLE = 8;
 
 type PickerResult = { action: "apply"; name: string } | { action: "cancel"; previewed: boolean };
 
 /**
- * 每次 render 现算文本行的最小组件。
+ * The minimal component that recomputes its text rows every render.
  *
- * pi 的 `Text` 会把内容（含 ANSI）缓存起来，换主题后 `invalidate()` 只清缓存、不会重新着色，
- * 所以预烘过颜色的文本会留着旧主题的颜色。这里干脆不缓存：每帧用当前 theme 重新拼。
+ * pi's `Text` caches its content (incl. ANSI); after a theme switch `invalidate()`
+ * only clears the cache — it does not recolor, so pre-baked text keeps the old
+ * theme's colors. This one caches nothing: every frame is rebuilt from the
+ * current theme.
  */
 class LiveText implements Component {
 	constructor(private readonly build: (width: number) => string[]) {}
@@ -59,16 +79,16 @@ class LiveText implements Component {
 	}
 
 	invalidate(): void {
-		// 无缓存，无需清理
+		// nothing cached — nothing to clear
 	}
 }
 
-/** 色板样本区：用候选主题自己的 token 画几行，覆盖 pi 里最常见的着色场景 */
+/** The swatch area: a few rows drawn with the candidate theme's own tokens, covering pi's most common coloring scenarios */
 function swatchLines(theme: Theme, width: number): string[] {
 	const row = (...parts: string[]) => truncateToWidth(`  ${parts.join("  ")}`, width);
 
 	return [
-		// 核心色
+		// core colors
 		row(
 			theme.fg("accent", "accent"),
 			theme.fg("success", "success"),
@@ -85,14 +105,14 @@ function swatchLines(theme: Theme, width: number): string[] {
 			`${theme.fg("mdListBullet", "•")} item`,
 			theme.fg("mdQuote", "> quote"),
 		),
-		// 语法高亮 + diff + 工具名
+		// syntax highlight + diff + tool name
 		row(
 			`${theme.fg("syntaxKeyword", "function ")}${theme.fg("syntaxFunction", "name")}${theme.fg("syntaxPunctuation", "(")}${theme.fg("syntaxString", '"str"')}${theme.fg("syntaxPunctuation", ")")} ${theme.fg("syntaxComment", "// note")}`,
 			theme.fg("toolDiffAdded", "+added"),
 			theme.fg("toolDiffRemoved", "-removed"),
 			theme.fg("toolTitle", "tool"),
 		),
-		// 背景块（bg token 只有这几个，全列出来）
+		// background blocks (the bg tokens are just these — all listed)
 		row(
 			theme.bg("userMessageBg", theme.fg("userMessageText", " user ")),
 			theme.bg("toolPendingBg", theme.fg("muted", " pending ")),
@@ -100,7 +120,7 @@ function swatchLines(theme: Theme, width: number): string[] {
 			theme.bg("toolErrorBg", theme.fg("error", " err ")),
 			theme.bg("selectedBg", theme.fg("text", " selected ")),
 		),
-		// thinking 档位（编辑器边框色）
+		// thinking levels (the editor border colors)
 		row(
 			theme.fg("thinkingOff", "off"),
 			theme.fg("thinkingMinimal", "minimal"),
@@ -113,7 +133,7 @@ function swatchLines(theme: Theme, width: number): string[] {
 	];
 }
 
-/** 打开选择器；返回用户的选择（undefined = 组件没能打开） */
+/** Open the picker; returns the user's choice (undefined = the component could not open) */
 async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefined> {
 	const themes = ctx.ui.getAllThemes();
 	const currentName = ctx.ui.theme?.name;
@@ -126,7 +146,7 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 	return ctx.ui.custom<PickerResult>((tui, theme, _keybindings, done) => {
 		const container = new Container();
 
-		// 预览状态：色板画哪个主题、以及有没有真的动过全局主题（决定取消时要不要恢复）
+		// the preview state: which theme the swatch draws, and whether the global theme was actually touched (decides whether cancel restores)
 		let previewTheme: Theme = ctx.ui.getTheme(currentName ?? "") ?? theme;
 		let previewed = false;
 
@@ -148,9 +168,9 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		if (currentIndex !== -1) selectList.setSelectedIndex(currentIndex);
 
 		selectList.onSelectionChange = (item) => {
-			// 对象路径 = 内存预览，不写 settings.json
+			// the object path = in-memory preview — settings.json is not written
 			const instance = ctx.ui.getTheme(item.value);
-			if (!instance) return; // 名字在列表里但加载失败：保持当前主题不动
+			if (!instance) return; // a listed name that failed to load: keep the current theme
 			previewTheme = instance;
 			previewed = true;
 			ctx.ui.setTheme(instance);
@@ -160,7 +180,7 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		selectList.onCancel = () => done({ action: "cancel", previewed });
 
 		container.addChild(selectList);
-		// 主题列表与下方色卡之间空一行：两者都是多行块，紧贴在一起分不清两个区域的边界。
+		// one blank row between the theme list and the swatch below: both are multi-row blocks — flush together they have no visible boundary.
 		container.addChild(new Spacer(1));
 		container.addChild(new LiveText((width) => swatchLines(previewTheme, width)));
 		container.addChild(
@@ -170,8 +190,8 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 		);
 		container.addChild(new DynamicBorder((s) => theme.fg("border", s)));
 
-		// Container 不带 handleInput，键盘要自己转发给 SelectList；鼠标交给 Container 分发
-		// （SelectList 自带 handleMouse，点击同样会触发预览/选择）
+		// Container has no handleInput — keyboard is forwarded to the SelectList manually; mouse goes to Container's dispatch
+		// (SelectList's own handleMouse: clicks trigger the same preview/select).
 		return {
 			render: (width: number) => container.render(width),
 			invalidate: () => container.invalidate(),
@@ -185,9 +205,9 @@ async function pickTheme(ctx: ExtensionContext): Promise<PickerResult | undefine
 }
 
 export default function (pi: ExtensionAPI) {
-	// 给 `/theme <TAB>` 用的主题名缓存：getArgumentCompletions 没有 ctx，只能靠这里。
-	// session_start 会在新建 / resume / fork 时刷新；注意 /reload 重载扩展后缓存会清空，
-	// 要等下一次 session_start 或手动跑一次 /theme 才重新有补全。
+	// the theme-name cache for `/theme <TAB>`: getArgumentCompletions has no ctx — this is all it has.
+	// session_start refreshes it on new / resume / fork; note a /reload clears the cache —
+	// the next session_start or one manual /theme run repopulates it.
 	let themeNames: string[] = [];
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -198,9 +218,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("theme", {
 		description: "Switch pi theme (live preview while browsing)",
 		getArgumentCompletions: (prefix: string) => {
-			// getArgumentCompletions 只有 prefix、没有 ctx，拿不到 ctx.ui.getAllThemes()，
-			// 所以用 session_start / 上次调用时缓存下来的名字（见下方 themeNames）。
-			// 缓存为空（例如刚 /reload 还没开新会话）就返回 null，交给内置补全，不瞎猜。
+			// getArgumentCompletions only gets a prefix — no ctx, so no ctx.ui.getAllThemes();
+			// use the names cached by session_start / the last call (see themeNames below).
+			// an empty cache (e.g. right after /reload, before a new session) → null — hand to the built-in completer, never guess.
 			const items = themeNames
 				.filter((name) => name.startsWith(prefix))
 				.map((name) => ({ value: name, label: name }));
@@ -221,7 +241,7 @@ export default function (pi: ExtensionAPI) {
 
 			const arg = args.trim();
 			if (arg) {
-				// 直接切换：先精确匹配，再忽略大小写兜底
+				// a direct switch: exact match first, case-insensitive fallback second
 				const match = themes.find((t) => t.name === arg) ?? themes.find((t) => t.name.toLowerCase() === arg.toLowerCase());
 				if (!match) {
 					ctx.ui.notify(`Unknown theme "${arg}"; available: ${themes.map((t) => t.name).join(" / ")}`, "error");
@@ -241,8 +261,8 @@ export default function (pi: ExtensionAPI) {
 			if (!result) return;
 
 			if (result.action === "cancel") {
-				if (!result.previewed) return; // 没动过主题，无需恢复
-				// 对象路径恢复：settings.json 全程没写过，所以原样不动（代价见文件头注释）
+				if (!result.previewed) return; // nothing previewed → nothing to restore
+				// restore via the object path: settings.json was never written, so it stays untouched (the cost is in the file header)
 				const restore = originalName ? ctx.ui.getTheme(originalName) : undefined;
 				if (restore) ctx.ui.setTheme(restore);
 				else ctx.ui.notify(`Cancelled, but could not restore the original theme (${originalName ?? "unknown"}); use /theme to select it again`, "warning");
@@ -254,7 +274,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-/** 名字路径 = 应用 + 写 settings.json（唯一会落盘的入口） */
+/** The name path = apply + write settings.json (the only path that persists) */
 function applyTheme(ctx: ExtensionContext, name: string): void {
 	const result = ctx.ui.setTheme(name);
 	if (!result.success) {

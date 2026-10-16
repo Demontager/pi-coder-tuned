@@ -80,6 +80,6 @@ describe("chunkToText", () => {
 	});
 
 	it("keeps multi-byte characters intact across a Buffer boundary", () => {
-		assert.equal(chunkToText(Buffer.from("工具调用失败\n", "utf8")), "工具调用失败\n");
+		assert.equal(chunkToText(Buffer.from("tool call failed\n", "utf8")), "tool call failed\n");
 	});
 });

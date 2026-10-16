@@ -1,13 +1,17 @@
 /**
- * answers.ts — 把问卷结果封装成给模型的 tool result（纯函数）。
+ * answers.ts — package the questionnaire result into the tool result for the
+ * model (pure functions).
  *
- * 成功：`User has answered your questions: "<问题>"="<答案>". … You can now
- * continue with the user's answers in mind.`；多选答案用 ", " 连接。
- * 取消 / 无答案段：统一塌缩成 DECLINE_MESSAGE 这一个规范信号，
- * 模型不会把"没答"误读成"拒绝回答内容"之外的任何东西。
+ * Success: `User has answered your questions: "<question>"="<answer>".
+ * … You can now continue with the user's answers in mind.`; a multi-select
+ * answer is joined with ", ".
+ * Cancelled / no answer segments: collapsed to the one canonical
+ * DECLINE_MESSAGE — the model cannot read "unanswered" as anything other
+ * than declined.
  *
- * 错误路径（no_ui / 校验失败等）也走 errorResult：`cancelled: true` +
- * 空 answers + error 码 —— content 文本是写给模型看的，不是日志。
+ * Error paths (no_ui / validation failure, etc.) also take errorResult:
+ * `cancelled: true` + empty answers + an error code — the content text is
+ * written for the model, not a log.
  */
 
 import type { AskAnswer, AskErrorCode, AskParams, AskResult } from "./types.ts";
@@ -22,7 +26,7 @@ export interface AskToolResult {
 	details: AskResult;
 }
 
-/** 单个答案的标量形式：option → label；custom → 输入文本；multi → ", " 连接。 */
+/** One answer's scalar form: option → the label; custom → the typed text; multi → joined with ", ". */
 export function formatAnswerScalar(a: AskAnswer): string {
 	switch (a.kind) {
 		case "multi":
@@ -34,14 +38,15 @@ export function formatAnswerScalar(a: AskAnswer): string {
 	}
 }
 
-/** 单题答案段：`"<问题>"="<答案>".` */
+/** One question's answer segment: `"<question>"="<answer>".` */
 export function buildAnswerSegment(a: AskAnswer): string {
 	return `"${a.question}"="${formatAnswerScalar(a)}".`;
 }
 
 /**
- * 结果 → 给模型的正文。cancelled / null / 零答案段都落到 DECLINE_MESSAGE；
- * 部分提交允许：未回答的题不产生段。
+ * Result → the body text for the model. cancelled / null / zero answer
+ * segments all land on DECLINE_MESSAGE; a partial submit is allowed —
+ * unanswered questions produce no segment.
  */
 export function buildEnvelopeText(result: AskResult | null | undefined, params: AskParams): string {
 	if (!result || result.cancelled) return DECLINE_MESSAGE;
@@ -58,7 +63,7 @@ export function toolResult(text: string, details: AskResult): AskToolResult {
 	return { content: [{ type: "text", text }], details };
 }
 
-/** 完整成功/取消路径：result + params → tool result。 */
+/** The full success/cancel path: result + params → the tool result. */
 export function buildResponse(result: AskResult | null | undefined, params: AskParams): AskToolResult {
 	if (!result || result.cancelled) {
 		return toolResult(DECLINE_MESSAGE, { answers: result?.answers ?? [], cancelled: true });
@@ -66,7 +71,7 @@ export function buildResponse(result: AskResult | null | undefined, params: AskP
 	return toolResult(buildEnvelopeText(result, params), result);
 }
 
-/** 错误路径：content 写给模型的错误说明 + cancelled:true + error 码。 */
+/** The error path: the model-facing error text in content + cancelled:true + the error code. */
 export function errorResult(message: string, error: AskErrorCode, answers: AskAnswer[] = []): AskToolResult {
 	return toolResult(message, { answers, cancelled: true, error });
 }

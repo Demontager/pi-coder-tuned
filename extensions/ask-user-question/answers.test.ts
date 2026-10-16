@@ -1,5 +1,5 @@
 /**
- * Tests for answers.ts — 结果封装 / 信封文本 / 错误路径。
+ * Tests for answers.ts — the result envelope / envelope text / error path.
  *
  * Run with:  node --test clients/pi/extensions/ask-user-question/answers.test.ts
  */
@@ -38,7 +38,7 @@ const emptyMulti: AskAnswer = { questionIndex: 1, question: "Which features?", k
 const customAnswer: AskAnswer = { questionIndex: 0, question: "Which library?", kind: "custom", answer: "use luxon" };
 const emptyCustom: AskAnswer = { questionIndex: 0, question: "Which library?", kind: "custom", answer: "" };
 
-test("formatAnswerScalar: option / custom / multi / 空值", () => {
+test("formatAnswerScalar: option / custom / multi / empty", () => {
 	assert.equal(formatAnswerScalar(optionAnswer), "A");
 	assert.equal(formatAnswerScalar(customAnswer), "use luxon");
 	assert.equal(formatAnswerScalar(multiAnswer), "X, Y");
@@ -46,12 +46,12 @@ test("formatAnswerScalar: option / custom / multi / 空值", () => {
 	assert.equal(formatAnswerScalar(emptyCustom), NO_INPUT_PLACEHOLDER);
 });
 
-test("buildAnswerSegment: \"问题\"=\"答案\".", () => {
+test("buildAnswerSegment: \"question\"=\"answer\".", () => {
 	assert.equal(buildAnswerSegment(optionAnswer), '"Which library?"="A".');
 	assert.equal(buildAnswerSegment(multiAnswer), '"Which features?"="X, Y".');
 });
 
-test("buildEnvelopeText: 全答 → 前缀 + 各段 + 后缀", () => {
+test("buildEnvelopeText: all answered → prefix + segments + suffix", () => {
 	const result: AskResult = { answers: [optionAnswer, multiAnswer], cancelled: false };
 	const text = buildEnvelopeText(result, params);
 	assert.ok(text.startsWith(`${ENVELOPE_PREFIX} `));
@@ -60,21 +60,21 @@ test("buildEnvelopeText: 全答 → 前缀 + 各段 + 后缀", () => {
 	assert.ok(text.includes('"Which features?"="X, Y".'));
 });
 
-test("buildEnvelopeText: 部分提交只产生已答段", () => {
+test("buildEnvelopeText: a partial submit produces only answered segments", () => {
 	const result: AskResult = { answers: [optionAnswer], cancelled: false };
 	const text = buildEnvelopeText(result, params);
 	assert.ok(text.includes('"Which library?"="A".'));
 	assert.ok(!text.includes("Which features?"));
 });
 
-test("buildEnvelopeText: 取消 / null / 零答案段都塌缩成 DECLINE_MESSAGE", () => {
+test("buildEnvelopeText: cancel / null / zero segments all collapse into DECLINE_MESSAGE", () => {
 	assert.equal(buildEnvelopeText({ answers: [], cancelled: true }, params), DECLINE_MESSAGE);
 	assert.equal(buildEnvelopeText(null, params), DECLINE_MESSAGE);
 	assert.equal(buildEnvelopeText(undefined, params), DECLINE_MESSAGE);
 	assert.equal(buildEnvelopeText({ answers: [], cancelled: false }, params), DECLINE_MESSAGE);
 });
 
-test("buildResponse: 成功路径 content 是信封、details 原样带回", () => {
+test("buildResponse: the success path's content is the envelope, details carried verbatim", () => {
 	const result: AskResult = { answers: [optionAnswer], cancelled: false };
 	const out = buildResponse(result, params);
 	assert.equal(out.content.length, 1);
@@ -83,21 +83,21 @@ test("buildResponse: 成功路径 content 是信封、details 原样带回", () 
 	assert.equal(out.details, result);
 });
 
-test("buildResponse: 取消路径 content 是 DECLINE_MESSAGE、cancelled:true", () => {
+test("buildResponse: the cancel path's content is DECLINE_MESSAGE, cancelled:true", () => {
 	const out = buildResponse({ answers: [optionAnswer], cancelled: true }, params);
 	assert.equal(out.content[0].text, DECLINE_MESSAGE);
 	assert.equal(out.details.cancelled, true);
-	// 已答部分仍保留在 details 里（回放/渲染用）
+	// the answered portion stays in details (for replay/rendering)
 	assert.equal(out.details.answers.length, 1);
 });
 
-test("errorResult: cancelled:true + error 码 + 写给模型的正文", () => {
+test("errorResult: cancelled:true + error code + model-facing body", () => {
 	const out = errorResult("Error: boom", "no_ui");
 	assert.equal(out.content[0].text, "Error: boom");
 	assert.deepEqual(out.details, { answers: [], cancelled: true, error: "no_ui" });
 });
 
-test("toolResult: 结构稳定", () => {
+test("toolResult: a stable shape", () => {
 	const out = toolResult("hi", { answers: [], cancelled: false });
 	assert.deepEqual(out.content, [{ type: "text", text: "hi" }]);
 	assert.deepEqual(out.details, { answers: [], cancelled: false });

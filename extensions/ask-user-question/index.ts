@@ -1,32 +1,43 @@
 /**
- * ask-user-question — 给 pi 一个 Claude Code `AskUserQuestion` 式的提问工具。
+ * ask-user-question — a Claude Code `AskUserQuestion`-style asking tool for pi.
  *
- * 模型在需求不明确时不再自己猜，而是调 `ask_user_question`：终端里弹出一份
- * 最多 4 题的问卷（每题 2-4 个带说明的选项），用户 ↑↓ 选、Space 勾多选、
- * 落到自动追加的 "Type something." 行可以自己打字，Esc 整份放弃；答案以
- * 结构化文本回到模型上下文。
+ * When requirements are unclear, the model stops guessing and calls
+ * `ask_user_question`: a questionnaire of up to 4 questions pops up in the
+ * terminal (2-4 described options each); ↑↓ picks, Space checks in multi-select,
+ * landing on the auto-appended "Type something." row types a free answer, Esc
+ * abandons the whole thing; the answers return to the model context as
+ * structured text.
  *
- * 参考 `npm:@juicesharp/rpiv-ask-user-question` 的**契约**（参数形状、保留
- * label、取消语义、非交互宿主把工具从 active 列表摘掉、RPC 宿主回退到
- * select/input 对话框），但自己写实现并砍掉它的 preview 侧栏、逐题/全局
- * note、i18n、overlay 折叠与 ~560ms 的懒加载渲染图 —— 本扩展用
- * `ctx.ui.custom()` 的普通对象组件（examples/extensions/question.ts 同款），
- * 零 npm 依赖、七个文件、可单测的逻辑全在纯模块里。
+ * The **contract** follows `npm:@juicesharp/rpiv-ask-user-question` (the params
+ * shape, reserved labels, cancel semantics, removing the tool from the active
+ * list on non-interactive hosts, falling back to select/input dialogs on RPC
+ * hosts) — the implementation is original, dropping its preview sidebar,
+ * per-question/global notes, i18n, overlay collapse, and ~560ms lazy-loaded
+ * render graph: this extension uses `ctx.ui.custom()` with a plain-object
+ * component (the examples/extensions/question.ts approach) — zero npm
+ * dependencies, seven files, all testable logic in pure modules.
  *
- * 模块划分（`types/validate/answers/dialog/model` 刻意不 import pi / pi-tui，
- * 所以 `node --test clients/pi/extensions/ask-user-question/*.test.ts` 能直接跑；
- * `schema.ts` 要 typebox、`view.ts` 要 pi-tui，只在 pi 运行时加载）：
+ * The module split (`types/validate/answers/dialog/model` deliberately import
+ * no pi / pi-tui, so `node --test clients/pi/extensions/ask-user-question/*.test.ts`
+ * runs directly; `schema.ts` needs typebox and `view.ts` needs pi-tui — loaded
+ * only inside pi's runtime):
  *
- *   types.ts    常量 + 数据模型（单一事实来源）
- *   schema.ts   TypeBox 参数 schema（数量约束在 schema，长度上限在运行时截断）
- *   validate.ts 行终止符归一 / 单行化 / 截断 + 数量与保留 label 校验
- *   answers.ts  结果 → 给模型的 tool result 封装（含取消与错误路径）
- *   dialog.ts   非 TUI 宿主的顺序 select/input 回退
- *   model.ts    问卷状态机（纯 reducer：tab / 光标 / 勾选 / 提交 / 取消）
- *   view.ts     TUI 外壳（按键解码 + 渲染），index.ts 注册工具/命令/reconcile
+ *   types.ts    constants + the data model (single source of truth)
+ *   schema.ts   the TypeBox params schema (count limits in schema, length caps
+ *               truncated at runtime)
+ *   validate.ts line-terminator normalization / single-lining / clipping +
+ *               count & reserved-label checks
+ *   answers.ts  result → the tool-result envelope for the model (incl. cancel
+ *               and error paths)
+ *   dialog.ts   the sequential select/input fallback for non-TUI hosts
+ *   model.ts    the questionnaire state machine (a pure reducer: tab / cursor /
+ *               toggle / submit / cancel)
+ *   view.ts     the TUI shell (key decoding + rendering); index.ts registers
+ *               the tool/command/reconcile
  *
- * 放在 `~/.pi/agent/extensions/ask-user-question/`（pi 自动发现子目录里的
- * index.ts），支持 `/reload` 热重载。`PI_ASK_USER_QUESTION=off` 整体不装。
+ * Lives in `~/.pi/agent/extensions/ask-user-question/` (pi auto-discovers the
+ * index.ts in a subdirectory) and supports `/reload`.
+ * `PI_ASK_USER_QUESTION=off` never installs it.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -45,18 +56,20 @@ import {
 	type AskResult,
 } from "./types.ts";
 
-/** 工具名（也是 reconcile 与 /ask 共用的唯一标识）。 */
+/** The tool name (the one identifier reconcile and /ask share). */
 export const TOOL_NAME = "ask_user_question";
 
 /**
- * 问卷阻塞期间 spinner 冻结在这一帧。选盲文全集字符：与默认动画帧
- * （⠋⠙…）同族，看起来是「spinner 停住了」而不是换了个东西。
+ * The spinner freezes on this frame while the questionnaire blocks. A full
+ * braille char was picked: same family as the default animation frames
+ * (⠋⠙…) — it reads as "the spinner stopped", not "something else appeared".
  */
 const FROZEN_SPINNER_FRAME = "⠿";
 
 /**
- * 两条宿主能力错误的正文都是**写给模型**的：必须说清"用户根本没看到问题"，
- * 否则模型会把静默失败读成用户拒绝回答，然后自顾自继续猜。
+ * Both host-capability error bodies are **written for the model**: they must
+ * make clear "the user never saw the questions" — or the model reads a silent
+ * failure as the user declining to answer and keeps guessing on its own.
  */
 const ERROR_NO_UI =
 	"Error: UI not available (running in non-interactive mode) — the user never saw the questions. Ask them as plain chat text instead, without using this tool.";
@@ -80,9 +93,12 @@ Usage notes:
 const PROMPT_SNIPPET = `Ask the user up to ${MAX_QUESTIONS} structured questions (${MIN_OPTIONS}-${MAX_OPTIONS} options each) when requirements are ambiguous`;
 
 /**
- * 只写「怎么用」，不写「多主动」：提问阈值（什么算值得打断用户）由 AGENTS.md 的 `## Authorization`
- * 一节定义，本文件不再声明。2026-09-18 之前这里有一条「you cannot proceed」——它比本文件 DESCRIPTION
- * 里的「Clarify ambiguous instructions」更窄，同文件两处矛盾，而窄的那条实际生效。
+ * States "how to use it", never "how proactive to be": the asking threshold
+ * (what merits interrupting the user) is AGENTS.md's `## Authorization`
+ * section's job — not declared here. Before 2026-09-18 this file had a
+ * "you cannot proceed" line — narrower than the DESCRIPTION's "Clarify
+ * ambiguous instructions", contradicting it in one file while the narrow
+ * version was the effective one.
  */
 const PROMPT_GUIDELINES: string[] = [
 	`Every ask_user_question option needs a concise label (1-5 words) plus a description of what the choice means or costs. Do NOT author "${CUSTOM_ANSWER_LABEL}" or "Other" labels — a free-text row is appended automatically and reserved labels are rejected.`,
@@ -91,27 +107,35 @@ const PROMPT_GUIDELINES: string[] = [
 ];
 
 /**
- * 真正跑一次问卷。TUI 走 custom 组件；其余模式（RPC / ACP 宿主）走 select/input
- * 顺序对话框；两者都不可用时返回 no_dialog_ui。
+ * Run the questionnaire once. TUI takes the custom component; the other modes
+ * (RPC / ACP hosts) take the sequential select/input dialogs; neither
+ * available → no_dialog_ui.
  *
- * `ctx.ui.custom()` 解析成 `undefined` 只可能是"宿主渲染不了自定义 UI"
- * （TUI 问卷一定会 resolve 一个 AskResult，取消也算），所以那不是用户拒绝，
- * 继续尝试对话框回退。
+ * `ctx.ui.custom()` resolving to `undefined` can only mean "the host cannot
+ * render custom UI" (a TUI questionnaire always resolves an AskResult — a
+ * cancel counts) — so that is not a refusal: fall through to the dialog path.
  *
- * TUI 路径在等待期间**冻结 working spinner 动画**：此刻在等用户作答而不是
- * 模型干活，动画继续转会让人以为还在推理。pi-tui Loader 对单帧 indicator
- * 不动画（`restartAnimation` 遇 `frames.length <= 1` 直接返回），且自定义帧
- * 是 verbatim 渲染（不走 spinnerColorFn），所以颜色自己带上 accent（与默认
- * spinner 同色）。提交/取消后无参 `setWorkingIndicator()` 恢复默认十帧动画。
- * 冻结不怕被每秒刷新的 working 文案顶掉：`setWorkingMessage` 只改文本不重建
- * indicator；即使重建，interactive-mode 也会带上存好的 workingIndicatorOptions。
- * try/finally 保证作答、取消、宿主回退每条路径都恢复；问卷开着时组件持有
- * 输入焦点、用户无法开启新回合，所以冻结帧不会泄漏到下一回合。
- * 本机的 `working-indicator/` 扩展**会**用 `setWorkingIndicator` 装自定义帧
- * （spinner 幻彩：十帧盲文轮换主题色，见那份 README），但它的帧表只在
- * `agent_start` / 主题指纹变化 / `ask_user_question` 的 `tool_execution_end`
- * 这三个时机装 —— 也就是问卷一结束就补装回去，所以这里的无参恢复（回到 pi
- * 默认十帧）只会短暂盖住它，不需要两边共享任何状态。
+ * The TUI path **freezes the working-spinner animation** for the wait: the
+ * user is being asked, not the model working — a still-spinning animation
+ * reads like ongoing reasoning. pi-tui's Loader does not animate a single-
+ * frame indicator (`restartAnimation` early-returns on `frames.length <= 1`),
+ * and a custom frame is rendered verbatim (no spinnerColorFn), so the accent
+ * color is baked in (same tone as the default spinner). On submit/cancel,
+ * parameterless `setWorkingIndicator()` restores the default ten-frame
+ * animation.
+ * The freeze survives the once-per-second working-text refresh:
+ * `setWorkingMessage` only rewrites text — it does not rebuild the indicator;
+ * even if it did, interactive-mode passes the stored workingIndicatorOptions
+ * along. The try/finally restores on answer, cancel, and host fallback
+ * alike; while the questionnaire is open the component holds input focus and
+ * no new turn can start — the frozen frame cannot leak into the next turn.
+ * The local `working-indicator/` extension **does** install its own frame
+ * set via `setWorkingIndicator` (the rainbow spinner: ten braille frames in
+ * theme colors — see its README), but it only installs on `agent_start`, a
+ * changed theme fingerprint, or `ask_user_question`'s `tool_execution_end` —
+ * it re-installs the moment the questionnaire ends, so this parameterless
+ * restore (back to pi's default ten frames) only covers it briefly; no
+ * shared state is needed on either side.
  */
 async function runQuestionnaire(ctx: ExtensionContext, params: AskParams) {
 	if (ctx.mode !== "tui") {
@@ -135,9 +159,11 @@ async function runQuestionnaire(ctx: ExtensionContext, params: AskParams) {
 }
 
 /**
- * 非交互运行（`pi -p` / JSON 模式）里把工具从 active 列表摘掉，模型根本看不到它，
- * 好过每次调用都失败；恢复交互（同一进程里换会话等）再加回来。幂等：状态已正确
- * 就不碰 active 列表（也不碰别的扩展注册的工具）。
+ * On a non-interactive run (`pi -p` / JSON mode) the tool is removed from the
+ * active list — the model never sees it, better than every call failing; an
+ * interactive session later (a session swap inside the same process, etc.)
+ * adds it back. Idempotent: with the state already right, the active list is
+ * untouched (as are other extensions' tools).
  */
 function reconcileTool(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const active = pi.getActiveTools();
@@ -149,7 +175,7 @@ function reconcileTool(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	}
 }
 
-/** /ask 的演示问卷：一题中文单选（验 CJK 折行）+ 一题英文多选（验勾选与提交页）。 */
+/** /ask's demo questionnaire: one Chinese single-select (exercises CJK wrapping) + one English multi-select (checks and the submit page). */
 function demoParams(): AskParams {
 	return {
 		questions: [
@@ -186,11 +212,11 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: PROMPT_SNIPPET,
 		promptGuidelines: PROMPT_GUIDELINES,
 		parameters: AskParamsSchema,
-		// 阻塞式 UI：不能与别的工具调用并行执行，否则同一回合里两个弹窗抢输入焦点。
+		// a blocking UI: it must not run parallel to other tool calls — two popups in one turn would fight for input focus.
 		executionMode: "sequential",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			// 归一化跑在校验之前：保留 label 与重复 label 的比较必须用用户真正看到的文本。
+			// normalization runs before validation: the reserved-label and duplicate-label checks must see the text the user actually sees.
 			const typed = normalizeParams(params as unknown as AskParams);
 			if (!ctx.hasUI) return errorResult(ERROR_NO_UI, "no_ui");
 			const validation = validateQuestionnaire(typed);
@@ -236,8 +262,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (_event, ctx) => reconcileTool(pi, ctx));
 
-	// 不花 token 也能验 UI：/ask 弹一份演示问卷（中文单选 + 英文多选），
-	// 走的是与工具完全相同的 runQuestionnaire 路径。
+	// verifying the UI without burning tokens: /ask pops a demo questionnaire (a Chinese single-select + an English multi-select),
+	// taking the same runQuestionnaire path as the tool.
 	pi.registerCommand("ask", {
 		description: "Preview the ask_user_question dialog with a demo questionnaire",
 		handler: async (_args, ctx) => {

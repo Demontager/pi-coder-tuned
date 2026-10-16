@@ -1,10 +1,12 @@
 /**
- * Tests for bash-prompt.ts — `!` bash 模式的模式判定与「把行首 `!` 从渲染行里摘掉」。
+ * Tests for bash-prompt.ts — `!` bash mode's detection and "drop the row's
+ * leading `!` from the rendered row".
  *
  * Run with:  node --test clients/pi/extensions/prompt-editor/bash-prompt.test.ts
  *
- * 被测模块不 import pi / pi-tui，用例直接喂 pi-tui Editor 真正会写出来的渲染行字符串
- * （光标反显 `\x1b[7m!\x1b[0m`、CURSOR_MARKER `\x1b_pi:c\x07`）。
+ * The module under test imports no pi / pi-tui — the cases feed it exactly
+ * the rendered rows a pi-tui Editor really emits (cursor reverse
+ * `\x1b[7m!\x1b[0m`, CURSOR_MARKER `\x1b_pi:c\x07`).
  */
 
 import assert from "node:assert/strict";
@@ -15,26 +17,26 @@ import { BASH_MARKER, dropLeadingBang, resolveBashPrompt } from "./bash-prompt.t
 const CURSOR_MARKER = "\x1b_pi:c\x07";
 
 describe("resolveBashPrompt", () => {
-	it("普通正文不算 bash 模式", () => {
+	it("plain text is not bash mode", () => {
 		assert.deepEqual(resolveBashPrompt(""), { active: false, hidden: false });
 		assert.deepEqual(resolveBashPrompt("ls -la"), { active: false, hidden: false });
 		assert.deepEqual(resolveBashPrompt("ls!"), { active: false, hidden: false });
 		assert.deepEqual(resolveBashPrompt("/recap"), { active: false, hidden: false });
 	});
 
-	it("字面以 `!` 开头：算 bash 模式，且那个 `!` 要藏起来", () => {
+	it("a literal `!` start: bash mode, and that `!` must be hidden", () => {
 		assert.deepEqual(resolveBashPrompt("!"), { active: true, hidden: true });
 		assert.deepEqual(resolveBashPrompt("!ls"), { active: true, hidden: true });
 		assert.deepEqual(resolveBashPrompt("! ls -la"), { active: true, hidden: true });
 		assert.deepEqual(resolveBashPrompt("!ls\n-l"), { active: true, hidden: true });
 	});
 
-	it("`!!`（不进上下文的那种）同样只藏第一个 `!`，第二个留在正文里", () => {
+	it("`!!` (the not-entering-context kind) likewise hides only the first `!` — the second stays in the text", () => {
 		assert.deepEqual(resolveBashPrompt("!!ls"), { active: true, hidden: true });
 		assert.deepEqual(resolveBashPrompt("!!"), { active: true, hidden: true });
 	});
 
-	it("前导空白 / 换行后跟 `!`：pi 也算 bash 模式，但位置对不上第一列，不藏", () => {
+	it("`!` after leading whitespace/newline: pi still counts bash mode, but it does not line up with the first column — not hidden", () => {
 		assert.deepEqual(resolveBashPrompt(" !ls"), { active: true, hidden: false });
 		assert.deepEqual(resolveBashPrompt("\n!ls"), { active: true, hidden: false });
 		assert.deepEqual(resolveBashPrompt("\t!ls"), { active: true, hidden: false });
@@ -42,30 +44,30 @@ describe("resolveBashPrompt", () => {
 });
 
 describe("dropLeadingBang", () => {
-	it("摘掉行首的 `!`，其余逐字保留", () => {
+	it("the leading `!` is dropped — the rest verbatim", () => {
 		assert.deepEqual(dropLeadingBang("!ls -la"), { text: "ls -la", dropped: true });
 		assert.deepEqual(dropLeadingBang("!"), { text: "", dropped: true });
 		assert.deepEqual(dropLeadingBang("! ls"), { text: " ls", dropped: true });
 	});
 
-	it("`!!` 只摘一个（第二个 `!` 是 pi 的「不进上下文」标记，要留在正文里看得见）", () => {
+	it("`!!` drops only one (the second `!` is pi's \"not entering context\" marker — it must stay visible in the text)", () => {
 		assert.deepEqual(dropLeadingBang("!!ls"), { text: "!ls", dropped: true });
 	});
 
-	it("没有可摘的 `!` 时原样返回，并且不报 dropped", () => {
+	it("nothing to drop → verbatim, and dropped stays false", () => {
 		assert.deepEqual(dropLeadingBang("ls -la"), { text: "ls -la", dropped: false });
 		assert.deepEqual(dropLeadingBang(""), { text: "", dropped: false });
 		assert.deepEqual(dropLeadingBang("ls!"), { text: "ls!", dropped: false });
 	});
 
-	it("光标反显包在 `!` 上时只摘 `!`，转义序列原样留下", () => {
-		// 行首那串零宽序列（`\x1b[7m`）属于 head，整段保留；紧跟其后的 `\x1b[0m` 仍然收尾，
-		// 所以不会把反显漏给行内其余字符。
+	it("reverse-video wrapped around the `!` drops only `!` — the escapes stay verbatim", () => {
+		// the leading zero-width run (`\x1b[7m`) belongs to head — kept whole; the `\x1b[0m` right after still closes,
+		// so the reverse video never leaks onto the rest of the row.
 		assert.deepEqual(dropLeadingBang("\x1b[7m!\x1b[0mls"), { text: "\x1b[7m\x1b[0mls", dropped: true });
 		assert.deepEqual(dropLeadingBang("\x1b[7m!\x1b[0m"), { text: "\x1b[7m\x1b[0m", dropped: true });
 	});
 
-	it("CURSOR_MARKER 在行首时保留（它不占列）", () => {
+	it("a leading CURSOR_MARKER is kept (it takes no column)", () => {
 		assert.deepEqual(dropLeadingBang(`${CURSOR_MARKER}!ls`), {
 			text: `${CURSOR_MARKER}ls`,
 			dropped: true,
@@ -80,7 +82,7 @@ describe("dropLeadingBang", () => {
 		});
 	});
 
-	it("零宽序列后面不是 `!` 就一个字都不动（防御性）", () => {
+	it("zero-width sequences not followed by `!` → not one char touched (defensive)", () => {
 		assert.deepEqual(dropLeadingBang("\x1b[7mls"), { text: "\x1b[7mls", dropped: false });
 		assert.deepEqual(dropLeadingBang(`${CURSOR_MARKER}ls`), {
 			text: `${CURSOR_MARKER}ls`,
@@ -88,7 +90,7 @@ describe("dropLeadingBang", () => {
 		});
 	});
 
-	it("导出的标记字符就是 Claude Code 的那个 `!`", () => {
+	it("the exported marker char is Claude Code's `!`", () => {
 		assert.equal(BASH_MARKER, "!");
 	});
 });
