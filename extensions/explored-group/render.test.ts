@@ -1,9 +1,10 @@
 /**
- * explored-group / render —— 端到端渲染测试。
+ * explored-group / render — end-to-end rendering tests.
  *
- * 手法与 `bash-command-collapse/render.test.ts` 一致：pi 自己的加载器真加载三个扩展，
- * 再用 pi 自己的 `ToolExecutionComponent` 渲染真实块，对**渲染出来的行**做断言 ——
- * 这个特性的全部价值就是「屏幕上长什么样」，只测内部函数会漏掉分层叠出来的问题。
+ * Same technique as `bash-command-collapse/render.test.ts`: pi's own loader really loads the
+ * three extensions, then pi's own `ToolExecutionComponent` renders real blocks, and assertions
+ * run against **the rendered lines** — this feature's whole value is "what the screen looks
+ * like", and testing only internal functions misses problems that emerge from layering.
  *
  * Run with:  node --test clients/pi/extensions/explored-group/render.test.ts
  */
@@ -18,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXT_DIR = path.join(HERE, "..");
 const CWD = "/Users/bachi/jaylli/litellm-any";
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "cannot find the local pi library entry (requires pi installed)";
 
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const packageDir = path.join(os.homedir(), ".pi/agent/npm/node_modules/@earendil-works/pi-coding-agent");
@@ -33,7 +34,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个
+			// hollow copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -76,12 +77,12 @@ interface PiApi {
 let pi: PiApi | undefined;
 if (piEntry) {
 	pi = (await import(pathToFileURL(piEntry).href)) as unknown as PiApi;
-	// 渲染要读主题（`theme.getFgAnsi` / `theme.fg`），不初始化会直接抛
-	// 「Theme not initialized」。默认皮肤在别处被改过，这里固定用 1337。
+	// Rendering reads the theme (`theme.getFgAnsi` / `theme.fg`); without init it throws
+	// "Theme not initialized" outright. The default skin is changed elsewhere, so pin 1337 here.
 	pi.initTheme("pi-coder-1337", false);
 }
 
-/** 三个扩展一起加载：分组状态是跨扩展的 `globalThis` 单例，必须真加载才建得起来。 */
+/** All three extensions load together: group state is a cross-extension `globalThis` singleton and only a real load can build it. */
 const loaded = pi
 	? await pi.discoverAndLoadExtensions(
 			[
@@ -100,21 +101,21 @@ const definitionOf = (name: string): any =>
 
 const registry = piEntry ? await import(pathToFileURL(path.join(HERE, "registry.ts")).href) : undefined;
 
-/** 剥掉 ANSI / OSC，只留可见文本。 */
+/** Strip ANSI / OSC, leaving only visible text. */
 const plain = (line: string): string =>
 	line.replace(/\u001b\][^\u0007]*\u0007/g, "").replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "").replace(/\s+$/, "");
-/** 整块渲染 + 去 ANSI + 去掉 ToolExecutionComponent 自己加的那个前导空行。 */
+/** Render a whole block + strip ANSI + drop the leading blank line ToolExecutionComponent adds itself. */
 function renderBlock(name: string, id: string, args: unknown, expanded = false, width = 100): string[] {
 	const component = new pi!.ToolExecutionComponent(name, id, args, {}, definitionOf(name), { requestRender() {} }, CWD);
 	component.markExecutionStarted();
-	component.setArgsComplete?.(); // 不置位的话 bash 块会一直按「命令还在流」隐藏（原有行为）
+	component.setArgsComplete?.(); // without this, bash blocks stay hidden as "command still streaming" (existing behavior)
 	component.setExpanded(expanded);
 	const lines = component.render(width).map(plain);
 	if (lines[0] === "") lines.shift();
 	return lines;
 }
 
-/** 整块渲染，**保留 ANSI**（加粗断言用；`plain` 会把粗体一起剥掉）。 */
+/** Render a whole block, **keeping ANSI** (for bold assertions; `plain` would strip bold too). */
 function renderBlockRaw(name: string, id: string, args: unknown, width = 100, expanded = false): string[] {
 	const component = new pi!.ToolExecutionComponent(name, id, args, {}, definitionOf(name), { requestRender() {} }, CWD);
 	component.markExecutionStarted();
@@ -125,9 +126,9 @@ function renderBlockRaw(name: string, id: string, args: unknown, width = 100, ex
 	return lines;
 }
 
-/** 该行里 `Read` 这个词是不是粗体（只看动词，不看后续路径）。 */
+/** Whether the word `Read` on this line is bold (the verb only, not the path that follows). */
 function readVerbIsBold(line: string): boolean {
-	// 字形周围的粗体开关：pi 用 `\u001b[1m` … `\u001b[22m`（`theme.bold()` = chalk.bold）
+	// bold toggles around the glyph: pi uses `\u001b[1m` … `\u001b[22m` (`theme.bold()` = chalk.bold)
 	const at = line.indexOf("Read");
 	if (at < 0) return false;
 	const before = line.slice(0, at);
@@ -137,28 +138,32 @@ function readVerbIsBold(line: string): boolean {
 }
 
 /**
- * 建一条 assistant 消息并重放（断组与登记的权威入口）。
+ * Build an assistant message and replay it (the authoritative entry for breaks and registration).
  *
- * 走的是与 `index.ts` 的 `message_end` 处理器**相同的两步**：先 `replayMessage`（断组 + 登记），
- * 再 `markMessageReady`（开闸让成员进树）。少第二步的话，测试会把「历史里的消息」
- * 当成「正在流的消息」，所有行都停在未就绪态而渲染成空 —— 那是测试没模拟对，不是实现错。
+ * Goes through the **same two steps** as `index.ts`'s `message_end` handler: first
+ * `replayMessage` (break + register), then `markMessageReady` (open the gate so members enter
+ * the tree). Without the second step, the test treats "a message from history" as "a message
+ * currently streaming", and every line stays not-ready and renders empty — that is the test
+ * mis-simulating, not an implementation bug.
  *
- * 需要「只登记、不开闸」（测流式期隐身）时用 `replayStreaming()`。
+ * Use `replayStreaming()` when you need "register only, do not open the gate"
+ * (testing streaming-time invisibility).
  */
 function replay(content: unknown[]): void {
 	registry!.replayMessage({ role: "assistant", content });
 	registry!.markMessageReady({ role: "assistant", content });
 }
 
-/** 只重放消息（模拟 `message_update` 那一刻：已登记，但命令还没吐完）。 */
+/** Replay the message only (simulating the moment of `message_update`: registered, but the command has not finished streaming). */
 function replayStreaming(content: unknown[]): void {
 	registry!.replayMessage({ role: "assistant", content });
 }
 
 function reset(): void {
 	registry!.resetForTesting();
-	// `resetForTesting` 会把「已接手」闸门一起清掉，而真实会话里 `session_start` 会开它；
-	// 不开的话渲染层不会遮任何东西 —— 测试就测不到流式那一帧了。
+	// `resetForTesting` clears the "taken over" gate too, while a real session opens it at
+	// `session_start`; without opening it the rendering layer hides nothing — and the test
+	// could never exercise the streaming frame.
 	registry!.arm();
 }
 
@@ -166,12 +171,15 @@ const BASH = (command: string) => ({ command });
 const READ = (p: string) => ({ path: p });
 
 /**
- * 流式帧渲染：模拟 pi 在参数**还没到齐**时的真实调用序列。
+ * Streaming-frame rendering: simulate pi's real call sequence while arguments have **not yet
+ * arrived**.
  *
- * `renderBlock` 一上来就 `markExecutionStarted` + `setArgsComplete`，那是**参数已齐**的终态；
- * 而实时会话里 pi 先构造组件（args 为 `{}` 或半截），之后每收一个 `input_json_delta`
- * 调一次 `updateArgs()` —— 用户 2026-10-06 报的「先流出一段灰文本再折叠」就在这段里。
- * 返回每一步渲染出的行（已去 ANSI），供断言「中途一帧都不许出」。
+ * `renderBlock` calls `markExecutionStarted` + `setArgsComplete` up front — that is the
+ * end state with **arguments complete**; in a live session pi first constructs the component
+ * (args are `{}` or partial) and then calls `updateArgs()` once per `input_json_delta` — the
+ * user's 2026-10-06 report "a stretch of grey text streams out first, then it folds" lives in
+ * this window. Returns the lines rendered at each step (ANSI stripped), to assert "not a single
+ * intermediate frame may appear".
  */
 function renderStreamingFrames(name: string, id: string, argsSteps: unknown[], width = 100): string[][] {
 	const frames: string[][] = [];
@@ -189,20 +197,22 @@ function renderStreamingFrames(name: string, id: string, argsSteps: unknown[], w
 	return frames;
 }
 
-test("流式：参数未吐完不进树，吐完那一刻直接出折叠行（用户 2026-10-07 报「先流灰文本再折叠」）", { skip }, () => {
-	// 用户原话：「不要先输出原始流式文本，bash 指令被吐完后…直接输出为折叠后的 Search」。
-	// 两段都要拦：
-	//   1. **不能冒原生帧** —— `ensureRegistered` 在 pending 时返回 null，渲染器假设
-	//      「null = 不可折叠」而退回内置渲染，屏幕上先闪一帧 `grep // in .`。
-	//   2. **也不能在树里逐字长** —— 行内文字跟着 token 变（`└ bash` → `Search "auth"` → …）
-	//      仍然是「先看到流式文本」，只是换了个地方。
+test("streaming: not in the tree until arguments finish; the folded line appears the moment they do (user's 2026-10-07 report: grey text streams first, then folds)", { skip }, () => {
+	// The user's words: "don't output raw streaming text first; once the bash command finishes
+	// streaming … output directly as the collapsed Search". Both windows must be caught:
+	//   1. **no native frame may pop** — `ensureRegistered` returns null while pending, and a
+	//      renderer that assumes "null = non-foldable" falls back to the built-in renderer,
+	//      flashing one frame of `grep // in .` first.
+	//   2. **nor may it grow character by character in the tree** — in-line text changing with
+	//      tokens (`└ bash` → `Search "auth"` → …) is still "streaming text first", just
+	//      relocated.
 	reset();
 	const frames = renderStreamingFrames("grep", "s1", [{ pattern: "" }, { pattern: "a" }, { pattern: "authorization", path: "proxy/proxy-core" }]);
-	// 全程（命令还在流）一行都不出 —— 既不是原生帧，也不是半截的 Explored 行
+	// Nothing at all while the command is still streaming — no native frame, no half-built Explored line
 	for (const [i, lines] of frames.entries()) {
-		assert.deepEqual(lines, [], `第 ${i} 帧（命令还没吐完）不该出任何行，实际：${JSON.stringify(lines)}`);
+		assert.deepEqual(lines, [], `frame ${i} (command not finished streaming) must render nothing, actual: ${JSON.stringify(lines)}`);
 	}
-	// 「吐完」那一刻（真实 pi 里是 message_end）→ 直接就是完整的一行
+	// The moment it "finishes streaming" (in real pi: message_end) → the complete line, directly
 	registry!.markMessageReady({ role: "assistant", content: [{ type: "toolCall", id: "s1", name: "grep", arguments: { pattern: "authorization", path: "proxy/proxy-core" } }] });
 	const after = new pi!.ToolExecutionComponent("grep", "s1", { pattern: "authorization", path: "proxy/proxy-core" }, {}, definitionOf("grep"), { requestRender() {} }, CWD);
 	after.markExecutionStarted();
@@ -212,46 +222,49 @@ test("流式：参数未吐完不进树，吐完那一刻直接出折叠行（�
 	assert.deepEqual(lines, ["• Explored", '  └ Search "authorization" in proxy/proxy-core']);
 });
 
-test("流式：被中断（args 永远不齐）的块不得永久隐身 —— 仍要能看到报错", { skip }, () => {
-	// pi 在 message_end(aborted / error) 时对每个未完成的块调 `updateResult({...}, false)`，
-	// **既不置 argsComplete 也不补 args**。只看 «参数未到齐» 就遮的话，这个块会永久隐身，
-	// 用户连那条 `Operation aborted` 都看不到 —— 所以遮的条件必须同时要求 `isPartial`
-	//（与 bash 侧同一条口径，见 `shouldHideWhilePending`）。
+test("streaming: an interrupted block (args never complete) must not stay permanently invisible — the error must still be visible", { skip }, () => {
+	// On message_end (aborted / error), pi calls `updateResult({...}, false)` for each unfinished
+	// block, **setting neither argsComplete nor filling args**. If hiding keyed only on
+	// "arguments not yet arrived", this block would be permanently invisible and the user would
+	// never see the `Operation aborted` line — so the hide condition must also require
+	// `isPartial` (same convention as the bash side, see `shouldHideWhilePending`).
 	reset();
 	const component = new pi!.ToolExecutionComponent("grep", "abort-1", {}, {}, definitionOf("grep"), { requestRender() {} }, CWD);
-	// 中断前：args 未到齐 + 还在跑（构造时 isPartial 默认 true）→ 隐身（不画原生帧）
-	assert.deepEqual(component.render(100).map(plain).filter((l: string) => l !== ""), [], "中断前应隐身，不得画原生帧");
-	// 模拟 pi：带错误结果、isPartial=false，args 仍是空的
+	// Before interruption: args incomplete + still running (isPartial defaults to true at
+	// construction) → invisible (no native frame drawn)
+	assert.deepEqual(component.render(100).map(plain).filter((l: string) => l !== ""), [], "should be invisible before the interrupt; must not draw a native frame");
+	// Simulate pi: an error result with isPartial=false, args still empty
 	component.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true }, false);
 	const lines = component.render(100).map(plain).filter((l: string) => l !== "");
-	assert.ok(lines.length > 0, `中断后必须画出内容（否则永久隐身），实际：${JSON.stringify(lines)}`);
-	assert.ok(lines.join("\n").includes("Operation aborted"), `中断后应能看到报错，实际：${JSON.stringify(lines)}`);
-	// 同时把「快退化成永久隐身」的失效形态钉住：带 `isPartial=false` 时**不能**再遮。
-	// `shouldHideWhilePending` 的三个条件缺一不可；去掉 `isPartial` 这一项时，
-	// 这个块会只剩报错行、`grep` 标题消失（实测过）。
-	assert.ok(lines.some((l: string) => l.includes("grep")), `中断后标题也应恢复（不能只剩报错），实际：${JSON.stringify(lines)}`);
+	assert.ok(lines.length > 0, `content must be drawn after the interrupt (otherwise permanently invisible), actual: ${JSON.stringify(lines)}`);
+	assert.ok(lines.join("\n").includes("Operation aborted"), `the error must be visible after the interrupt, actual: ${JSON.stringify(lines)}`);
+	// Also pin the degenerate form that made it permanently invisible: with `isPartial=false`
+	// it must **no longer** hide. All three conditions of `shouldHideWhilePending` are required;
+	// drop the `isPartial` one and this block is left with only the error line, the `grep`
+	// title gone (observed in practice).
+	assert.ok(lines.some((l: string) => l.includes("grep")), `the title must also come back (not just the error), actual: ${JSON.stringify(lines)}`);
 });
 
-test("流式：原生 find / ls / read 同样不先出原生帧", { skip }, () => {
-	// find：`{}` / `pattern:""` 隐藏，pattern 一到就 Explored（曾冒出 `find  in .`）
+test("streaming: native find / ls / read likewise show no native frame first", { skip }, () => {
+	// find: hidden at `{}` / `pattern:""`, Explored as soon as pattern arrives (once popped a `find  in .`)
 	reset();
 	const findFrames = renderStreamingFrames("find", "st-find", [{ pattern: "" }, { pattern: "*.ts", path: "clients" }]);
-	for (const [i, lines] of findFrames.entries()) assert.deepEqual(lines, [], `find 第 ${i} 帧（命令还在流）不该出，实际：${JSON.stringify(lines)}`);
+	for (const [i, lines] of findFrames.entries()) assert.deepEqual(lines, [], `find frame ${i} (command still streaming) must render nothing, actual: ${JSON.stringify(lines)}`);
 
-	// read：同样（曾冒出 `• Read ...`）
+	// read: same (once popped a `• Read ...`)
 	reset();
 	const readFrames = renderStreamingFrames("read", "st-read", [
 		{ path: "" },
 		{ path: "/Users/bachi/jaylli/litellm-any/README.md" },
 	]);
-	for (const [i, lines] of readFrames.entries()) assert.deepEqual(lines, [], `read 第 ${i} 帧（参数还在流）不该出，实际：${JSON.stringify(lines)}`);
+	for (const [i, lines] of readFrames.entries()) assert.deepEqual(lines, [], `read frame ${i} (arguments still streaming) must render nothing, actual: ${JSON.stringify(lines)}`);
 
-	// ls：同样要等（曾冒出一帧原生 `ls`）
+	// ls: must also wait (once popped one native `ls` frame)
 	reset();
 	const lsFrames = renderStreamingFrames("ls", "st-ls", [{ path: "clients/pi" }]);
-	for (const [i, lines] of lsFrames.entries()) assert.deepEqual(lines, [], `ls 第 ${i} 帧不该出，实际：${JSON.stringify(lines)}`);
+	for (const [i, lines] of lsFrames.entries()) assert.deepEqual(lines, [], `ls frame ${i} must render nothing, actual: ${JSON.stringify(lines)}`);
 
-	// 「吐完」之后三者都直接出折叠行
+	// After "finishing streaming", all three show the folded line directly
 	for (const [name, id, args, expected] of [
 		["find", "st-find", { pattern: "*.ts", path: "clients" }, ['  └ Find *.ts in clients']],
 		["read", "st-read", { path: "/Users/bachi/jaylli/litellm-any/README.md" }, ["  └ Read README.md"]],
@@ -264,15 +277,17 @@ test("流式：原生 find / ls / read 同样不先出原生帧", { skip }, () =
 		c.setArgsComplete?.();
 		const lines = c.render(100).map(plain);
 		if (lines[0] === "") lines.shift();
-		assert.deepEqual(lines, ["• Explored", ...expected], `${name} 吐完后应直接出折叠行`);
+		assert.deepEqual(lines, ["• Explored", ...expected], `${name} must show the folded line directly once streaming finishes`);
 	}
 });
 
-test("流式：异常路径不许让块永久隐身（漏了 message_end / 中断 / 只有 execution_end）", { skip }, () => {
-	// 「命令未吐完就不进树」天然带一个风险：开闸信号没跟上时那个块会**永久隐身**。
-	// 主信号是 `message_end`，但实测有三条路径拿不到它（或拿到时 args 已不能读），
-	// 所以 `index.ts` 还挂了 `tool_execution_end`、渲染器里还有 `markReadyIfSettled` 兜底。
-	// 这三条都是实测发现的真缺陷形态，删掉任何一层兜底都会把它们放回来。
+test("streaming: error paths must not leave a block permanently invisible (missing message_end / interrupt / only execution_end)", { skip }, () => {
+	// "Not in the tree until the command finishes streaming" carries an inherent risk: when the
+	// gate-opening signal does not arrive, that block stays **permanently invisible**.
+	// The primary signal is `message_end`, but three measured paths never get it (or get it
+	// when args are already unreadable), so `index.ts` also hooks `tool_execution_end`, and the
+	// renderer has the `markReadyIfSettled` fallback. All three are real defect shapes found by
+	// measurement; removing any fallback layer reintroduces them.
 	const CMD = "grep -n authorization f.ts";
 	const content = [{ type: "toolCall", id: "ab1", name: "bash", arguments: { command: CMD } }];
 	const renderOne = (): string[] => {
@@ -283,28 +298,28 @@ test("流式：异常路径不许让块永久隐身（漏了 message_end / 中�
 		return lines;
 	};
 
-	// ① 结果回了但 message_end 从未到（只有 tool_execution_end）
+	// ① result returned but message_end never came (only tool_execution_end)
 	reset();
 	registry!.replayMessage({ role: "assistant", content });
-	registry!.markMemberReady("ab1"); // 等价于 index.ts 里 tool_execution_end 的那一下
-	assert.ok(renderOne().length > 0, "① 只有 execution_end 时也不能隐身");
+	registry!.markMemberReady("ab1"); // equivalent to index.ts's tool_execution_end handler
+	assert.ok(renderOne().length > 0, "① must not be invisible when only execution_end happened");
 
-	// ② 中断：args 完整但从未 ready（message_end 到了，但那时已不再补开闸）
+	// ② interrupt: args complete but never marked ready (message_end arrives, but by then the gate is no longer back-filled)
 	reset();
 	registry!.replayMessage({ role: "assistant", content });
 	const c2 = new pi!.ToolExecutionComponent("bash", "ab1", { command: CMD }, {}, definitionOf("bash"), { requestRender() {} }, CWD);
 	c2.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true }, false);
 	const lines2 = c2.render(100).map(plain).filter((l: string) => l !== "");
-	assert.ok(lines2.length > 0, `② 中断后也不能隐身，实际：${JSON.stringify(lines2)}`);
+	assert.ok(lines2.length > 0, `② must not be invisible after an interrupt, actual: ${JSON.stringify(lines2)}`);
 
-	// ③ 只有 message_end、工具还没执行完（既无结果也无 execution_end）
+	// ③ only message_end, the tool has not finished executing (neither result nor execution_end)
 	reset();
 	registry!.replayMessage({ role: "assistant", content });
 	registry!.markMessageReady({ role: "assistant", content });
-	assert.ok(renderOne().length > 0, "③ 吐完后即执行中，应当已可见");
+	assert.ok(renderOne().length > 0, "③ after streaming finishes and while executing, it must already be visible");
 });
 
-test("形态：Search 与原生 Read 合在同一块（用户 2026-10-06 第二轮定）", { skip }, () => {
+test("shape: Search and native Read merged into one block (user's second-round decision, 2026-10-06)", { skip }, () => {
 	reset();
 	const content = [
 		{ type: "thinking", text: "let me look" },
@@ -314,18 +329,19 @@ test("形态：Search 与原生 Read 合在同一块（用户 2026-10-06 第二�
 	];
 	replay(content);
 
-	// 三条合为一棵：Search 一行，两个连续原生 read 合并成下一行（不再分两块）
+	// Three entries in one tree: Search on one line, the two consecutive native reads merged
+	// into the next (no longer two separate blocks)
 	assert.deepEqual(renderBlock("bash", "g1", content[1]!.arguments), [
 		"• Explored",
 		'  └ Search "bashOutput" in clients/pi',
 		"    Read …/jaylli/ttt/CLAUDE.md, …/jaylli/ttt/package.json",
 	]);
-	// 同组成员隐身：原生 read 也不再另起块
+	// Group members are hidden: the native reads no longer form their own blocks
 	assert.equal(renderBlock("read", "g2", content[2]!.arguments).length, 0);
 	assert.equal(renderBlock("read", "g3", content[3]!.arguments).length, 0);
 });
 
-test("形态：Search/List/Git 同族各占一行，连续 read 合并成一行", { skip }, () => {
+test("shape: Search/List/Git in the same family each get one line; consecutive reads merge into one line", { skip }, () => {
 	reset();
 	const content = [
 		{ type: "toolCall", id: "m1", name: "bash", arguments: BASH("grep -rn x . --include=*.ts | head") },
@@ -333,7 +349,7 @@ test("形态：Search/List/Git 同族各占一行，连续 read 合并成一行"
 		{ type: "toolCall", id: "m5", name: "grep", arguments: { pattern: "Explored", path: "clients/pi" } },
 	];
 	replay(content);
-	// 非 read 三件（bash search / 原生 ls / 原生 grep）同族，共一棵树、各占一行
+	// Three non-reads (bash search / native ls / native grep) in the same family: one tree, one line each
 	assert.deepEqual(renderBlock("bash", "m1", content[0]!.arguments), [
 		"• Explored",
 		'  └ Search "x" in .',
@@ -342,7 +358,7 @@ test("形态：Search/List/Git 同族各占一行，连续 read 合并成一行"
 	]);
 });
 
-test("断组：thinking 插在中间 → 两个独立 Explored 块", { skip }, () => {
+test("breaks: thinking in between → two independent Explored blocks", { skip }, () => {
 	reset();
 	replay([
 		{ type: "toolCall", id: "k1", name: "bash", arguments: BASH("grep -n a f1.ts") },
@@ -350,20 +366,20 @@ test("断组：thinking 插在中间 → 两个独立 Explored 块", { skip }, (
 		{ type: "toolCall", id: "k2", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	]);
 	assert.deepEqual(renderBlock("bash", "k1", BASH("grep -n a f1.ts")), ["• Explored", '  └ Search "a" in f1.ts']);
-	// k2 自己成了新组的组长 —— 两个块，各自一棵树
+	// k2 became the leader of a new group — two blocks, one tree each
 	assert.deepEqual(renderBlock("bash", "k2", BASH("grep -n b f2.ts")), ["• Explored", '  └ Search "b" in f2.ts']);
 });
 
-test("断组：旁白（非空 text）插在中间同样拆开", { skip }, () => {
+test("breaks: narration (non-empty text) in between splits the group the same way", { skip }, () => {
 	reset();
 	replay([
 		{ type: "toolCall", id: "n1", name: "bash", arguments: BASH("grep -n a f1.ts") },
-		{ type: "text", text: "先看一下 A，再去看 B。" },
+		{ type: "text", text: "Let me look at A first, then B." },
 		{ type: "toolCall", id: "n2", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	]);
 	assert.equal(renderBlock("bash", "n1", BASH("grep -n a f1.ts"))[0], "• Explored");
 	assert.equal(renderBlock("bash", "n2", BASH("grep -n b f2.ts"))[0], "• Explored");
-	// 空 text 不断组（流式里会先来一个空 text 块）
+	// Empty text does not break (streaming sends an empty text block first)
 	reset();
 	replay([
 		{ type: "toolCall", id: "p1", name: "bash", arguments: BASH("grep -n a f1.ts") },
@@ -375,10 +391,10 @@ test("断组：旁白（非空 text）插在中间同样拆开", { skip }, () =>
 		'  └ Search "a" in f1.ts',
 		'    Search "b" in f2.ts',
 	]);
-	assert.equal(renderBlock("bash", "p2", BASH("grep -n b f2.ts")).length, 0, "p2 是同组成员，应隐身");
+	assert.equal(renderBlock("bash", "p2", BASH("grep -n b f2.ts")).length, 0, "p2 is a group member and should be hidden");
 });
 
-test("断组：不可折叠的 bash（跑测试）打断分组，且自己原样渲染", { skip }, () => {
+test("breaks: non-foldable bash (running tests) breaks the group and renders itself as-is", { skip }, () => {
 	reset();
 	const testCmd = "node --test index.test.ts 2>&1 | grep -E '^ℹ (tests|pass|fail)' | head -70";
 	replay([
@@ -387,16 +403,16 @@ test("断组：不可折叠的 bash（跑测试）打断分组，且自己原样
 		{ type: "toolCall", id: "q3", name: "bash", arguments: BASH("grep -n c f3.ts") },
 	]);
 	assert.equal(renderBlock("bash", "q1", BASH("grep -n a f1.ts"))[0], "• Explored");
-	// q2 不折叠 —— 它自己渲染成原来的 bash 块（有 `Run ` 前缀，不是 Explored）
+	// q2 does not fold — it renders as the original bash block (with the `Run ` prefix, not Explored)
 	const q2 = renderBlock("bash", "q2", BASH(testCmd));
-	assert.ok(q2.length > 0, "跑测试的块必须可见");
-	assert.ok(q2.some((l) => l.includes("Run ")), "应走原有 bash 渲染");
-	assert.ok(!q2.some((l) => l.includes("Explored")), "不该被折进 Explored");
-	// q3 因 q2 断组而另开一组
+	assert.ok(q2.length > 0, "the test-running block must be visible");
+	assert.ok(q2.some((l) => l.includes("Run ")), "it should use the original bash rendering");
+	assert.ok(!q2.some((l) => l.includes("Explored")), "it must not be folded into an Explored");
+	// q3 opens a new group because q2 broke it
 	assert.equal(renderBlock("bash", "q3", BASH("grep -n c f3.ts"))[0], "• Explored");
 });
 
-test("断组：用户消息断组", { skip }, () => {
+test("breaks: a user message breaks the group", { skip }, () => {
 	reset();
 	replay([{ type: "toolCall", id: "u1", name: "bash", arguments: BASH("grep -n a f1.ts") }]);
 	registry!.noteUserMessage();
@@ -405,13 +421,13 @@ test("断组：用户消息断组", { skip }, () => {
 	assert.deepEqual(renderBlock("bash", "u2", BASH("grep -n b f2.ts")), ["• Explored", '  └ Search "b" in f2.ts']);
 });
 
-test("增长：成员依次到达，组长的树跟着长（不需要重新登记）", { skip }, () => {
+test("growth: members arrive one by one and the leader's tree grows with them (no re-registration needed)", { skip }, () => {
 	reset();
-	// 用**同族**的两个 bash（原生 read 会另开一组，见 `familyOf`）
+	// Two bash calls from the **same family** (a native read would open its own group, see `familyOf`)
 	const content: any[] = [{ type: "toolCall", id: "r1", name: "bash", arguments: BASH("grep -n a f1.ts") }];
 	replay(content);
 	assert.deepEqual(renderBlock("bash", "r1", content[0].arguments), ["• Explored", '  └ Search "a" in f1.ts']);
-	// 流式追加第二个成员（`message_update` 反复触发，registry 按内容指纹去重）
+	// Stream the second member in (`message_update` fires repeatedly; the registry dedupes by content fingerprint)
 	content.push({ type: "toolCall", id: "r2", name: "bash", arguments: BASH("ls -la /tmp") });
 	replay(content);
 	assert.deepEqual(renderBlock("bash", "r1", content[0].arguments), [
@@ -419,7 +435,8 @@ test("增长：成员依次到达，组长的树跟着长（不需要重新登�
 		'  └ Search "a" in f1.ts',
 		"    List /tmp",
 	]);
-	// 原生 read 也并进这棵树（2026-10-06 第二轮：家族不再断组），行内按来源切段
+	// The native read joins this tree too (second round, 2026-10-06: family no longer breaks),
+	// with the line split by source
 	content.push({ type: "toolCall", id: "r3", name: "read", arguments: READ("/tmp/a/b/c.ts") });
 	replay(content);
 	assert.deepEqual(renderBlock("bash", "r1", content[0].arguments), [
@@ -428,34 +445,37 @@ test("增长：成员依次到达，组长的树跟着长（不需要重新登�
 		"    List /tmp",
 		"    Read …/a/b/c.ts",
 	]);
-	assert.equal(renderBlock("read", "r3", READ("/tmp/a/b/c.ts")).length, 0, "成员应隐身");
+	assert.equal(renderBlock("read", "r3", READ("/tmp/a/b/c.ts")).length, 0, "the member should be hidden");
 });
 
-test("回归：流式反复更新不得拆组（pi 每次 message_update 都发新对象）", { skip }, () => {
-	// 用户 2026-10-06 报的「两个相邻 Explored」：每个 assistant 消息都以 thinking 开头，
-	// 而 `replayMessage` 曾用**消息对象**做去重键 —— pi 发的是 `{...partialMessage}`（新对象），
-	// 于是每次 token 更新都重跑一遍 content[0] 的 thinking、再断一次组，工具块全部各自成组。
+test("regression: repeated streaming updates must not split the group (pi sends a fresh object on every message_update)", { skip }, () => {
+	// The user's 2026-10-06 report of "two adjacent Explored blocks": every assistant message
+	// starts with a thinking block, and `replayMessage` once used the **message object** as its
+	// dedup key — but pi sends `{...partialMessage}` (a new object), so every token update
+	// re-ran content[0]'s thinking and broke the group again, leaving every tool block in its
+	// own group.
 	reset();
 	const th = { type: "thinking", text: "x" };
 	const a = { type: "toolCall", id: "A", name: "bash", arguments: BASH("grep -n a f1.ts") };
 	const b = { type: "toolCall", id: "B", name: "bash", arguments: BASH("grep -n b f2.ts") };
-	// 注意 `replay()` 收的是 **content 数组**（它自己包 role），别传 {role, content} 进去
+	// Note `replay()` takes the **content array** (it wraps role itself); do not pass {role, content}
 	replay([th]);
-	// 模拟 pi 的流式：每次一个新对象，content 逐步追加；工具块一被创建就 renderCall 登记
+	// Simulate pi's streaming: a new object each time, content appends; each tool block
+	// registers via renderCall the moment it is created
 	registry!.ensureRegistered("A", "bash", a.arguments);
 	replay([th, a]);
 	registry!.ensureRegistered("B", "bash", b.arguments);
 	replay([th, a, b]);
 	assert.equal(registry!.groupOf("A")?.leaderId, "A");
-	assert.equal(registry!.groupOf("B")?.leaderId, "A", "同一条消息里的第二个可折叠块必须并进同一组");
-	// 但**下一条** assistant 消息的 thinking 仍然断组（用户明确要求 Think 依断）
+	assert.equal(registry!.groupOf("B")?.leaderId, "A", "the second foldable block in the same message must join the same group");
+	// But the thinking of the **next** assistant message still breaks (the user explicitly wants Thinking to break)
 	replay([{ type: "thinking", text: "y" }, { type: "toolCall", id: "C", name: "bash", arguments: BASH("grep -n c f3.ts") }]);
-	assert.equal(registry!.groupOf("C")?.leaderId, "C", "新消息的 thinking 必须断组");
+	assert.equal(registry!.groupOf("C")?.leaderId, "C", "the new message's thinking must break the group");
 });
 
-test("回归：组长块折叠态也不画自己的输出（整组都不看内容）", { skip }, () => {
-	// 用户 2026-10-06 报的第一个问题：短语树下面跟了一大片 grep 命中行。
-	// 根因是 renderResult 只隐了**成员**、没隐**组长**。
+test("regression: the leader block also hides its own output when collapsed (the whole group shows no content)", { skip }, () => {
+	// The user's first problem reported on 2026-10-06: a whole wall of grep hits trailing below
+	// the phrase tree. Root cause: renderResult hid only the **members**, not the **leader**.
 	reset();
 	replay([
 		{ type: "toolCall", id: "L1", name: "bash", arguments: BASH("grep -n needle f1.ts") },
@@ -476,16 +496,17 @@ test("回归：组长块折叠态也不画自己的输出（整组都不看内�
 	const collapsed = renderLeader(false);
 	assert.ok(
 		!collapsed.some((l) => l.includes("ThreadingHTTPServer")),
-		`折叠态不得出现输出内容：${JSON.stringify(collapsed)}`,
+		`collapsed mode must not show output content: ${JSON.stringify(collapsed)}`,
 	);
-	// 展开态（ctrl+o）仍然给出内容 —— 那是唯一看得到内容的地方
+	// Expanded mode (ctrl+o) still shows the content — that is the only place it is visible
 	const expanded = renderLeader(true);
-	assert.ok(expanded.some((l) => l.includes("ThreadingHTTPServer")), "展开态必须能看到内容");
+	assert.ok(expanded.some((l) => l.includes("ThreadingHTTPServer")), "expanded mode must show the content");
 });
 
-test("回归：流式早期拿到空 args，后续真实 args 必须刷新（曾出现 `└ Read read`）", { skip }, () => {
-	// `renderCall` 在参数还在流式到达时就会跑，第一次登记常常拿到空 args。
-	// `register` 幂等他不能「定了就不改」，否则 path 永远不进来了。
+test("regression: empty args early in streaming must refresh once the real args arrive (once produced `└ Read read`)", { skip }, () => {
+	// `renderCall` runs while arguments are still streaming, so the first registration often
+	// gets empty args. An idempotent `register` must not "settle and never change", otherwise
+	// the path never arrives.
 	reset();
 	registry!.ensureRegistered("R1", "read", {});
 	registry!.ensureRegistered("R1", "read", READ("/Users/bachi/jaylli/ttt/a/b/c/CLAUDE.md"));
@@ -494,27 +515,30 @@ test("回归：流式早期拿到空 args，后续真实 args 必须刷新（曾
 		{ type: "toolCall", id: "R2", name: "read", arguments: READ("/Users/bachi/jaylli/ttt/a/b/c/package.json") },
 	]);
 	const lines = renderBlock("read", "R1", READ("/Users/bachi/jaylli/ttt/a/b/c/CLAUDE.md"));
-	assert.ok(!lines.some((l) => /└ Read read\b/.test(l)), `不得出现 Read read：${JSON.stringify(lines)}`);
+	assert.ok(!lines.some((l) => /└ Read read\b/.test(l)), `must not show Read read: ${JSON.stringify(lines)}`);
 	assert.ok(
 		lines.some((l) => l.includes("CLAUDE.md") && l.includes("package.json")),
-		`应显示两个真实路径且缩略到两层目录：${JSON.stringify(lines)}`,
+		`should show both real paths, shortened to two directory levels: ${JSON.stringify(lines)}`,
 	);
 });
 
-test("回归：参数未到齐时不得断组（曾拆出三个相邻 Explored）", { skip }, () => {
-	// 用户 2026-10-06 第二轮报的：同一条消息里三个连续只读 bash，却渲染成三个独立
-	// `Explored`。根因在 pi 的流累加 —— 一个工具块刚出现时 `arguments` 是 `{}`
-	//（`content_block_start` 里 `event.content_block.input ?? {}` 的种子），之后靠
-	// `input_json_delta` 逐片填。旧代码拿空 args 去分类，`classifyBash("")` 回 `null`，
-	// 于是每个块出现的那一刻都触发一次 `beginBreak()`，把上一块刚开的组关掉。
+test("regression: incomplete arguments must not break the group (once produced three adjacent Explored blocks)", { skip }, () => {
+	// The user's second-round report on 2026-10-06: three consecutive read-only bash calls in
+	// the same message rendered as three separate `Explored` blocks. Root cause is pi's stream
+	// accumulation — at the moment a tool block appears, `arguments` is `{}` (the seed from
+	// `content_block_start`'s `event.content_block.input ?? {}`), filled piece by piece via
+	// `input_json_delta`. The old code classified on the empty args, `classifyBash("")` returned
+	// `null`, so every block triggered a `beginBreak()` the moment it appeared, closing the
+	// group the previous block had just opened.
 	reset();
 	const th = { type: "thinking", text: "x" };
 	const mk = (id: string, cmd: string) => ({ type: "toolCall", id, name: "bash", arguments: { command: cmd } });
 	const b1 = mk("B1", "cd /tmp; git status 2>&1 | head -3");
 	const b2 = mk("B2", "cd /tmp; ls -t sessions/ | head -5");
-	// 三条都取非 read 族（`sed -n` 归 read，会合法地另开一组）
+	// All three from non-read families (`sed -n` is read-family and would legitimately open its own group)
 	const b3 = mk("B3", "cd /tmp; grep -n version CHANGELOG.md");
-	// 逐块流式：每块出现时 args 还是 {}，紧接着 args 到齐（renderCall 会跑两次）
+	// Block-by-block streaming: each block appears with args still {}, then its args arrive
+	// (renderCall runs twice)
 	for (const [n, block] of [[1, b1], [2, b2], [3, b3]] as const) {
 		const filled = [b1, b2, b3].slice(0, n - 1);
 		replay([th, ...filled, { ...block, arguments: {} }]);
@@ -523,9 +547,10 @@ test("回归：参数未到齐时不得断组（曾拆出三个相邻 Explored�
 		replay([th, ...filled, block]);
 	}
 	assert.equal(registry!.groupOf("B1")?.leaderId, "B1");
-	assert.equal(registry!.groupOf("B2")?.leaderId, "B1", "参数未到齐不得把 B1 的组关掉");
-	assert.equal(registry!.groupOf("B3")?.leaderId, "B1", "第三个也必须并进同一组");
-	// 渲染出来应该只有一棵树、三行成员（首行 `└ ` + 两行四格缩进）
+	assert.equal(registry!.groupOf("B2")?.leaderId, "B1", "incomplete arguments must not close B1's group");
+	assert.equal(registry!.groupOf("B3")?.leaderId, "B1", "the third one must join the same group too");
+	// The render should be a single tree with three member lines (first line `└ ` + two lines
+	// of four-space indent)
 	const lines = renderBlock("bash", "B1", b1.arguments);
 	assert.equal(lines.filter((l) => l.startsWith("• Explored")).length, 1);
 	assert.deepEqual(lines, [
@@ -534,52 +559,60 @@ test("回归：参数未到齐时不得断组（曾拆出三个相邻 Explored�
 		"    List sessions/",
 		'    Search "version" in CHANGELOG.md',
 	]);
-	// `└ ` 整块只出现一次（用户 2026-10-06 第三轮定），后续成员行四格缩进
-	assert.equal(lines.filter((l) => l.includes("└ ")).length, 1, `应只有一个 └：${JSON.stringify(lines)}`);
+	// `└ ` appears exactly once per block (user's third-round decision, 2026-10-06);
+	// subsequent member lines indent four spaces
+	assert.equal(lines.filter((l) => l.includes("└ ")).length, 1, `there should be exactly one └: ${JSON.stringify(lines)}`);
 });
-test("pending：read / grep 缺必填参数也算未到齐，ls 则不算", { skip }, () => {
-	// `ls` 的 `path` 是可选的（缺省 = 当前目录），所以不能把它当「还没到」而漏掉分组
+test("pending: read / grep missing required arguments also count as not-arrived; ls does not", { skip }, () => {
+	// `ls`'s `path` is optional (default = current directory), so it must not be treated as
+	// "not yet arrived" and thereby miss grouping
 	reset();
 	registry!.replayMessage({ role: "assistant", content: [{ type: "thinking", text: "x" }] });
-	assert.equal(registry!.ensureRegistered("P1", "read", {}), null, "read 缺 path → 这一帧不接管");
-	assert.equal(registry!.ensureRegistered("P2", "grep", {}), null, "grep 缺 pattern → 不接管");
-	assert.ok(registry!.ensureRegistered("P3", "ls", {}) !== null, "ls 缺 path 是合法取值，应正常入组");
+	assert.equal(registry!.ensureRegistered("P1", "read", {}), null, "read without path → this frame does not take over");
+	assert.equal(registry!.ensureRegistered("P2", "grep", {}), null, "grep without pattern → does not take over");
+	assert.ok(registry!.ensureRegistered("P3", "ls", {}) !== null, "ls without path is a legal value and should join normally");
 });
 
-test("回归：读 SKILL.md 不被折进 Explored，恢复 pi 的 `[skill] <名字>` 紧凑形态", { skip }, () => {
-	// 用户 2026-10-06 报：读 skill 文件变成了 `└ Read …/skills/commit/SKILL.md`，
-	// 而他预期的是 pi 原来的 `• [skill] commit (ctrl+o to expand)`。
-	// 只豁免 SKILL.md（用户定的范围）—— `read docs` / `read resource` 仍照常折叠。
+test("regression: reading SKILL.md is not folded into Explored; pi's `[skill] <name>` compact shape is restored", { skip }, () => {
+	// The user's 2026-10-06 report: reading a skill file became
+	// `└ Read …/skills/commit/SKILL.md`, while they expected pi's original
+	// `• [skill] commit (ctrl+o to expand)`.
+	// Only SKILL.md is exempt (the user's chosen scope) — `read docs` / `read resource` still
+	// fold as usual.
 	reset();
 	replay([
 		{ type: "toolCall", id: "S1", name: "read", arguments: READ("/Users/bachi/.pi/agent/git/github.com/jayli/superpowers/skills/commit/SKILL.md") },
 	]);
 	const lines = renderBlock("read", "S1", READ("/Users/bachi/.pi/agent/git/github.com/jayli/superpowers/skills/commit/SKILL.md"));
 	const joined = lines.join("\n");
-	assert.ok(!joined.includes("Explored"), `SKILL.md 不得折成 Explored：${JSON.stringify(lines)}`);
-	assert.ok(joined.includes("[skill]"), `应走 pi 的 [skill] 形态：${JSON.stringify(lines)}`);
-	assert.ok(joined.includes("commit"), `标签应是所在目录名：${JSON.stringify(lines)}`);
+	assert.ok(!joined.includes("Explored"), `SKILL.md must not fold into an Explored: ${JSON.stringify(lines)}`);
+	assert.ok(joined.includes("[skill]"), `it should use pi's [skill] shape: ${JSON.stringify(lines)}`);
+	assert.ok(joined.includes("commit"), `the label should be the containing directory name: ${JSON.stringify(lines)}`);
 });
 
-test("回归：读 SKILL.md 既不断组也不入组，但要打断前后两个只读组", { skip }, () => {
-	// SKILL.md 是「确定的不可折叠」（不是 pending），所以它像「跑测试」那个块一样：
-	// 自己原样渲染 + 把上一组封口。读 skill 前后的探查不该被并成一组。
+test("regression: reading SKILL.md neither breaks the group nor joins it, but must separate the read-only groups before and after it", { skip }, () => {
+	// SKILL.md is a "definite non-foldable" (not pending), so it behaves like the
+	// "running tests" block: it renders as-is and seals the previous group. Lookups before and
+	// after a skill read should not merge into one group.
 	reset();
 	replay([
 		{ type: "toolCall", id: "Z1", name: "bash", arguments: BASH("grep -n a f1.ts") },
 		{ type: "toolCall", id: "Z2", name: "read", arguments: READ("/a/b/skills/x/SKILL.md") },
 		{ type: "toolCall", id: "Z3", name: "bash", arguments: BASH("grep -n c f3.ts") },
 	]);
-	assert.equal(registry!.groupOf("Z2"), undefined, "SKILL.md 不得入组");
+	assert.equal(registry!.groupOf("Z2"), undefined, "SKILL.md must not join a group");
 	assert.deepEqual(renderBlock("bash", "Z1", BASH("grep -n a f1.ts")), ["• Explored", '  └ Search "a" in f1.ts']);
-	// Z3 在 SKILL.md **之后** → 必须另开一组（说明 Z2 真的断组了，而不是被跳过）
+	// Z3 comes **after** the SKILL.md → must open a new group (proving Z2 really broke the
+	// group, rather than being skipped)
 	assert.deepEqual(renderBlock("bash", "Z3", BASH("grep -n c f3.ts")), ["• Explored", '  └ Search "c" in f3.ts']);
 });
 
-test("标记：原生 read 的 `Read` 加粗，bash 转义的 Read 不加粗（只加粗动词，路径不加粗）", { skip }, () => {
-	// 用户 2026-10-06 定：`cat f` 与原生 `read({path: f})` 短语一模一样，屏幕分不出 ——
-	// 所以只有**原生 read 工具**那一行的 `Read` 加粗。
-	// 只渲**原生 read** 组（家族规则保证同组内不可能混入 bash 转义的 Read）。
+test("marker: the native read's `Read` is bold, bash-derived Reads are not (bold the verb only, never the path)", { skip }, () => {
+	// The user's 2026-10-06 decision: `cat f` and the native `read({path: f})` produce
+	// identical phrases, indistinguishable on screen — so only the **native read tool**'s line
+	// gets a bold `Read`.
+	// Render only the **native read** group (family rules guarantee no bash-derived Read can
+	// mix in).
 	reset();
 	replay([
 		{ type: "toolCall", id: "b1", name: "read", arguments: READ("/tmp/native.ts") },
@@ -587,17 +620,18 @@ test("标记：原生 read 的 `Read` 加粗，bash 转义的 Read 不加粗（�
 	]);
 	const nativeLines = renderBlockRaw("read", "b1", READ("/tmp/native.ts"));
 	const nativeRow = nativeLines.find((l) => l.includes("native.ts"))!;
-	assert.ok(readVerbIsBold(nativeRow), `原生 read 必须加粗：${JSON.stringify(nativeRow)}`);
-	// **路径不能加粗**：`Read` 词后紧跟着粗体关闭序列（否则路径也被包进去了）
+	assert.ok(readVerbIsBold(nativeRow), `the native read must be bold: ${JSON.stringify(nativeRow)}`);
+	// **The path must not be bold**: right after the word `Read` comes the bold-off sequence
+	// (otherwise the path would be inside the bold too)
 	const afterVerb = nativeRow.slice(nativeRow.indexOf("Read") + "Read".length);
 	assert.ok(
 		afterVerb.startsWith("\u001b[22m"),
-		`粗体必须在 \`Read\` 之后立即关掉（路径不加粗）：${JSON.stringify(nativeRow)}`,
+		`bold must turn off immediately after \`Read\` (path not bold): ${JSON.stringify(nativeRow)}`,
 	);
-	assert.ok(!afterVerb.includes("\u001b[1m"), `路径里不得再开粗体：${JSON.stringify(afterVerb)}`);
+	assert.ok(!afterVerb.includes("\u001b[1m"), `no bold may open inside the path: ${JSON.stringify(afterVerb)}`);
 
-	// 同一个文件用 bash 的 `cat` 读 —— 形态一模一样，但 Read 不加粗。
-	// 两边都只读**一个**文件，去掉颜色后才应是逐字相同的字符串。
+	// The same file read via bash `cat` — identical shape, but Read is not bold.
+	// Both sides read exactly **one** file, so after stripping color they must be identical strings.
 	reset();
 	replay([{ type: "toolCall", id: "b1", name: "read", arguments: READ("/tmp/native.ts") }]);
 	const singleNativeRow = renderBlockRaw("read", "b1", READ("/tmp/native.ts")).find((l) => l.includes("native.ts"))!;
@@ -605,42 +639,46 @@ test("标记：原生 read 的 `Read` 加粗，bash 转义的 Read 不加粗（�
 	replay([{ type: "toolCall", id: "c1", name: "bash", arguments: BASH("cat /tmp/native.ts") }]);
 	const bashLines = renderBlockRaw("bash", "c1", BASH("cat /tmp/native.ts"));
 	const bashRow = bashLines.find((l) => l.includes("native.ts"))!;
-	assert.ok(!readVerbIsBold(bashRow), `bash 转义的 Read 不得加粗：${JSON.stringify(bashRow)}`);
-	// 两者去掉颜色后必须完全一致 —— 差别**只在**加粗这一个标记上
+	assert.ok(!readVerbIsBold(bashRow), `the bash-derived Read must not be bold: ${JSON.stringify(bashRow)}`);
+	// The two must be identical after removing color — the difference is **only** the bold marker
 	assert.equal(plain(singleNativeRow).trim(), plain(bashRow).trim());
 });
 
-test("回归：长文件名折行时，续行不重画 Read（用户 2026-10-07 报，width=79 实测）", { skip }, () => {
-	// 用户报的形态：bash 转义出的 `cat <长名>`，名字恰好一行装不下，于是屏幕上成了
+test("regression: with a long file name wrapping, the continuation line must not redraw Read (user's 2026-10-07 report, measured at width=79)", { skip }, () => {
+	// The reported shape: a bash-derived `cat <long name>`, the name just barely not fitting,
+	// so the screen showed
 	//
 	//     └ Read pi-session-…-c7ec684628
-	//       Read 7d.html                 ← 续行多了一个动词，看着像读了两个文件
+	//       Read 7d.html                 ← the continuation got an extra verb, looking like two files were read
 	//
-	// 根因在 `layoutRows`：`flatMap` 把每个条目的折行块卷平后**丢掉了「它属于哪个条目」**，
-	// 于是续行与「下一个文件」在循环里长得一模一样，都拿到一行 `Read ` 前缀。
-	// 修法：折行后保留「本块属于哪个条目、是不是该条目的开头」两个位。
+	// Root cause in `layoutRows`: after `flatMap` flattened each entry's wrap chunks, it **lost
+	// "which entry it belongs to"**, so continuation chunks looked identical to "the next file"
+	// in the loop and both got a `Read ` prefix. Fix: after wrapping, keep two bits — "which
+	// entry this chunk belongs to" and "is it that entry's first chunk".
 	const NAME = "pi-session-2026-10-06T13-48-58-965Z_01a11179-84d5-77fd-bf01-c7ec6846287d.html";
 	reset();
 	const args = BASH(`cat ${NAME}`);
 	replay([{ type: "toolCall", id: "n1", name: "bash", arguments: args }]);
 	const lines = renderBlock("bash", "n1", args, false, 79);
 
-	// 该行折了两行：组头 1 行 + 成员 2 行
-	assert.equal(lines.length, 3, `应折成「组头 + 2 行成员」：${JSON.stringify(lines)}`);
-	assert.ok(lines[1]!.startsWith("  └ Read "), `首行仍带 └ 与 Read：${JSON.stringify(lines[1])}`);
-	// 续行必须**只有缩进**，不得再出现 `Read`；把它拼回去要恰好等于原文件名
+	// The entry wraps into two lines: 1 header + 2 member lines
+	assert.equal(lines.length, 3, `should wrap into "header + 2 member lines": ${JSON.stringify(lines)}`);
+	assert.ok(lines[1]!.startsWith("  └ Read "), `the first line still carries └ and Read: ${JSON.stringify(lines[1])}`);
+	// The continuation must have **indent only**, with no `Read` reappearing; stitched back
+	// together it must equal the original file name
 	const body = lines.slice(1);
-	assert.ok(!body[1]!.includes("Read"), `续行不得重画 Read：${JSON.stringify(body[1])}`);
-	assert.equal(body[1]!.trim(), "7d.html", `续行只应是尾部：${JSON.stringify(body[1])}`);
+	assert.ok(!body[1]!.includes("Read"), `the continuation must not redraw Read: ${JSON.stringify(body[1])}`);
+	assert.equal(body[1]!.trim(), "7d.html", `the continuation should be only the tail: ${JSON.stringify(body[1])}`);
 	const rebuilt = body[0]!.replace("  └ Read ", "") + body[1]!.trim();
-	assert.equal(rebuilt, NAME, `两行拼回必须等于原文件名：${JSON.stringify(rebuilt)}`);
+	assert.equal(rebuilt, NAME, `the two lines stitched back must equal the original file name: ${JSON.stringify(rebuilt)}`);
 });
 
-test("回归：单文件折行后不得与后一个文件用 `, ` 缝在一起", { skip }, () => {
-	// 同一根因的第二个症状（更难发现、也更错）：条目 A 的**尾部碎块**在下一轮循环里
-	// 被当成了「另一个条目」，于是与真实的 b.ts 用 `, ` 拼成 `Read z, b.ts` ——
-	// 屏幕上看起来像「读了两个文件」，实际上 A 的名字被切断、多出一个不存在的 `z`。
-	// 实测：A 长 71（70 个 a + z）、宽度 79 时稳定复现。
+test("regression: a single wrapped file must not be stitched to the next file with `, `", { skip }, () => {
+	// The second symptom of the same root cause (harder to spot, and more wrong): entry A's
+	// **tail fragment** was treated in the next loop iteration as "another entry" and stitched
+	// with the real b.ts into `Read z, b.ts` — on screen it looks like "two files were read",
+	// when in fact A's name was cut and a nonexistent `z` appeared.
+	// Measured: A is 71 chars (70 a's + z), stably reproduced at width 79.
 	reset();
 	const A = `${"a".repeat(70)}z`;
 	const content = [
@@ -650,17 +688,17 @@ test("回归：单文件折行后不得与后一个文件用 `, ` 缝在一起",
 	replay(content);
 	const lines = renderBlock("read", "t1", READ(A), false, 79);
 	const body = lines.slice(1);
-	assert.ok(!body.some((l) => /z, b\.ts/.test(l)), `A 的尾块不得与 b.ts 缝合：${JSON.stringify(body)}`);
-	// A 的两块拼起来仍是 A（中间不插任何分隔符）
+	assert.ok(!body.some((l) => /z, b\.ts/.test(l)), `A's tail chunk must not be stitched to b.ts: ${JSON.stringify(body)}`);
+	// A's two chunks still form A (with nothing inserted between)
 	const aLines = body.filter((l) => !l.includes("b.ts"));
 	assert.equal(
 		aLines.map((l) => l.replace(/^\s*(└ )?Read /, "").replace(/^\s+/, "")).join(""),
 		A,
-		`A 的折行碎块拼回应等于 A：${JSON.stringify(aLines)}`,
+		`A's wrapped chunks joined back must equal A: ${JSON.stringify(aLines)}`,
 	);
 });
 
-test("标记：read 合并行折行时，续行的 Read 也跟着加粗", { skip }, () => {
+test("marker: when a read-merged line wraps, the continuation's Read is bold too", { skip }, () => {
 	reset();
 	const long = (n: string): string => `/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/a-very-long-file-name-${n}.ts`;
 	replay([
@@ -669,26 +707,28 @@ test("标记：read 合并行折行时，续行的 Read 也跟着加粗", { skip
 		{ type: "toolCall", id: "l3", name: "read", arguments: READ(long("c")) },
 	]);
 	const lines = renderBlockRaw("read", "l1", READ(long("a")), 80);
-	// 用 `plain` 过滤：原始行里 `Read` 后面紧跟粗体关闭序列，`includes("Read ")` 匹配不到
+	// Filter with `plain`: in raw lines the bold-off sequence immediately follows `Read`, so
+	// `includes("Read ")` cannot match
 	const readRows = lines.filter((l) => plain(l).includes("Read "));
-	assert.ok(readRows.length >= 2, `窄宽度下应折成多行：${JSON.stringify(lines.map(plain))}`);
+	assert.ok(readRows.length >= 2, `at narrow width it should wrap into multiple lines: ${JSON.stringify(lines.map(plain))}`);
 	for (const row of readRows) {
-		assert.ok(readVerbIsBold(row), `每一行的 Read 都要加粗：${JSON.stringify(plain(row))}`);
+		assert.ok(readVerbIsBold(row), `every line's Read must be bold: ${JSON.stringify(plain(row))}`);
 	}
 });
 
-test("合并：跨 assistant 消息的连续探查合为一块（用户 2026-10-06 第二轮定）", { skip }, () => {
-	// 用户实测的观感问题：每条 assistant 消息开头都断一次，于是满屏都是一行的 Explored。
-	// 现在只由旁白 / Thinking / 不可折叠工具 / 用户消息断开，**消息边界不断**。
+test("merge: consecutive lookups across assistant messages merge into one block (user's second-round decision, 2026-10-06)", { skip }, () => {
+	// The visual problem the user measured: every assistant message broke the group at its
+	// start, so the screen was full of single-line Explored blocks. Now only narration /
+	// Thinking / non-foldable tools / user messages break; **message boundaries do not**.
 	reset();
 	replay([{ type: "toolCall", id: "m1", name: "bash", arguments: BASH("grep -n a f1.ts") }]);
-	// 第二条 assistant 消息（中间没有旁白 / thinking）
+	// A second assistant message (no narration / thinking in between)
 	replay([
 		{ type: "toolCall", id: "m2", name: "read", arguments: READ("/a/x.ts") },
 		{ type: "toolCall", id: "m3", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	]);
-	assert.equal(registry!.groupOf("m2")?.leaderId, "m1", "跨消息不得断组");
-	assert.equal(registry!.groupOf("m3")?.leaderId, "m1", "跨消息不得断组");
+	assert.equal(registry!.groupOf("m2")?.leaderId, "m1", "crossing a message must not break the group");
+	assert.equal(registry!.groupOf("m3")?.leaderId, "m1", "crossing a message must not break the groups");
 	assert.deepEqual(renderBlock("bash", "m1", BASH("grep -n a f1.ts")), [
 		"• Explored",
 		'  └ Search "a" in f1.ts',
@@ -696,41 +736,45 @@ test("合并：跨 assistant 消息的连续探查合为一块（用户 2026-10-
 		'    Search "b" in f2.ts',
 	]);
 
-	// 但消息里出现旁白就断（这条规则不变）
+	// But narration inside a message still breaks (this rule is unchanged)
 	reset();
 	replay([{ type: "toolCall", id: "n1", name: "bash", arguments: BASH("grep -n a f1.ts") }]);
 	replay([
-		{ type: "text", text: "先看到这里。" },
+		{ type: "text", text: "Stopping here for now." },
 		{ type: "toolCall", id: "n2", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	]);
-	assert.equal(registry!.groupOf("n2")?.leaderId, "n2", "旁白仍要断组");
+	assert.equal(registry!.groupOf("n2")?.leaderId, "n2", "narration must still break the group");
 });
 
-test("回归：回放历史（resume / fork）也要断组，不得整段并成一块", { skip }, () => {
-	// pi 重建历史时不发 `message_*`（`renderInitialMessages` 只构造组件就渲染），
-	// 所以历史里的断组事件由 `index.ts` 的 `hydrateFromHistory` 重放 `buildContextEntries()` 补上。
-	// 不补的话：因为消息边界不再断组，整个会话会并成一块 —— 实测最大 326 个成员、
-	// 屏幕只显示 5 行，历史等于全丢（本轮实测 367 个会话里 319 个中招）。
+test("regression: replaying history (resume / fork) must also break groups, not merge everything into one block", { skip }, () => {
+	// pi does not emit `message_*` when rebuilding history (`renderInitialMessages` just
+	// constructs components and renders), so the break events for history are replayed by
+	// `index.ts`'s `hydrateFromHistory` over `buildContextEntries()`.
+	// Without it: since message boundaries no longer break, the whole session merges into one
+	// block — measured worst case 326 members with only 5 rows on screen, history effectively
+	// lost (319 of 367 measured sessions affected).
 	reset();
-	// 直接重放「历史条目」的形态（与 hydrateFromHistory 同源：按序 replayMessage / noteUserMessage）
+	// Replay the "history entries" shape directly (same source as hydrateFromHistory:
+	// in-order replayMessage / noteUserMessage)
 	const history = [
 		{ type: "thinking", text: "a" },
 		{ type: "toolCall", id: "H1", name: "bash", arguments: BASH("grep -n a f1.ts") },
 		{ type: "toolCall", id: "H2", name: "read", arguments: READ("/a/one.ts") },
-		// 下一条 assistant 消息：thinking 断组
+		// the next assistant message: thinking breaks the group
 		{ type: "thinking", text: "b" },
 		{ type: "toolCall", id: "H3", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	];
-	// 分成两条消息重放（历史的形态就是多条）
+	// Replay as two messages (history's shape is multiple messages)
 	replay(history.slice(0, 3));
 	replay(history.slice(3));
-	assert.equal(registry!.groupOf("H2")?.leaderId, "H1", "同一条消息里的 Search 与 Read 合一块");
-	assert.equal(registry!.groupOf("H3")?.leaderId, "H3", "下一条消息的 thinking 必须断组（不得整段并一块）");
+	assert.equal(registry!.groupOf("H2")?.leaderId, "H1", "Search and Read in the same message merge into one block");
+	assert.equal(registry!.groupOf("H3")?.leaderId, "H3", "the next message's thinking must break the group (no merging into one block)");
 });
 
-test("混来源：同一块里原生 Read 与 bash 转义 Read 分行，加粗只落在原生那行", { skip }, () => {
-	// 2026-10-06 第二轮：分组不再按家族拆，所以「同组内 read 只可能同来源」不再成立 ——
-	// 改由**行内按来源切段**来保住「加粗 = 原生工具」。
+test("mixed sources: native Reads and bash-derived Reads take separate lines within one block; bold lands only on the native line", { skip }, () => {
+	// Second round, 2026-10-06: groups no longer split by family, so "within a group, reads can
+	// only be of one source" no longer holds — instead, **splitting the line by source**
+	// preserves "bold = native tool".
 	reset();
 	const content = [
 		{ type: "toolCall", id: "c1", name: "bash", arguments: BASH("cat /a/first.ts") },
@@ -739,26 +783,27 @@ test("混来源：同一块里原生 Read 与 bash 转义 Read 分行，加粗�
 		{ type: "toolCall", id: "c2", name: "bash", arguments: BASH("cat /a/fourth.ts") },
 	];
 	replay(content);
-	// 四条同组（不再被家族切开）
+	// All four in one group (no longer split by family)
 	for (const id of ["N1", "N2", "c2"]) {
-		assert.equal(registry!.groupOf(id)?.leaderId, "c1", `${id} 应与 c1 同组`);
+		assert.equal(registry!.groupOf(id)?.leaderId, "c1", `${id} should be in the same group as c1`);
 	}
 	assert.deepEqual(renderBlock("bash", "c1", content[0]!.arguments), [
 		"• Explored",
-		"  └ Read /a/first.ts", // bash 转义：不加粗
-		"    Read /a/second.ts, /a/third.ts", // 两个原生 read 合并
-		"    Read /a/fourth.ts", // 又回到 bash：换行重新写动词
+		"  └ Read /a/first.ts", // bash-derived: not bold
+		"    Read /a/second.ts, /a/third.ts", // the two native reads merged
+		"    Read /a/fourth.ts", // back to bash: a new line rewrites the verb
 	]);
-	// 加粗只落在原生那一行（第二行），bash 的两行都不加粗
+	// Bold lands only on the native line (the second); both bash lines are not bold
 	const lines = renderBlockRaw("bash", "c1", content[0]!.arguments);
-	assert.equal(readVerbIsBold(lines[1]!), false, "第一行是 bash 转义，不该加粗");
-	assert.equal(readVerbIsBold(lines[2]!), true, "第二行是原生 read，应加粗");
-	assert.equal(readVerbIsBold(lines[3]!), false, "第三行又是 bash 转义，不该加粗");
+	assert.equal(readVerbIsBold(lines[1]!), false, "the first line is bash-derived and must not be bold");
+	assert.equal(readVerbIsBold(lines[2]!), true, "the second line is a native read and should be bold");
+	assert.equal(readVerbIsBold(lines[3]!), false, "the third line is bash-derived again and must not be bold");
 });
 
-test("家族已取消：原生 read 与 bash 转义 Read 现在同组（旧规则的反向断言）", { skip }, () => {
-	// 旧实现里 familyOf 把两者拆成两组（2026-10-06 第四轮）；第二轮用户要求合并，
-	// 所以这条改成反向断言 —— 若哪天有人再把家族规则加回来，这里会立刻变红。
+test("family rules cancelled: the native read and bash-derived Reads now share a group (reverse assertion of the old rule)", { skip }, () => {
+	// In the old implementation, familyOf split the two into separate groups (fourth round,
+	// 2026-10-06); the user asked for merging in the second round, so this became a reverse
+	// assertion — if someone ever reintroduces family rules, this test turns red immediately.
 	const B = (id: string, cmd: string) => ({ type: "toolCall", id, name: "bash", arguments: BASH(cmd) });
 	reset();
 	replay([
@@ -770,17 +815,17 @@ test("家族已取消：原生 read 与 bash 转义 Read 现在同组（旧规�
 		B("s2", "cd /tmp; grep -n c f2.ts"),
 	]);
 	for (const id of ["l1", "r1", "R1", "s2"]) {
-		assert.equal(registry!.groupOf(id)?.leaderId, "g1", `${id} 应与 g1 同组（家族与类别都不再断组）`);
+		assert.equal(registry!.groupOf(id)?.leaderId, "g1", `${id} should be in the same group as g1 (family and category no longer break)`);
 	}
 });
 
-test("状态：组头圆点按全组状态变色（跑=白，全 ok=绿，有错=红）", { skip }, () => {
+test("status: the header dot recolors with the whole group's status (running=white, all ok=green, any error=red)", { skip }, () => {
 	reset();
 	replay([
 		{ type: "toolCall", id: "s1", name: "bash", arguments: BASH("grep -n a f1.ts") },
 		{ type: "toolCall", id: "s2", name: "bash", arguments: BASH("grep -n b f2.ts") },
 	]);
-	// 用 pi-coder-1337：text=`#f8f8f2` 白、toolDiffAdded=`#8bc391` 绿、toolDiffRemoved=`#e27878` 红
+	// With pi-coder-1337: text=`#f8f8f2` white, toolDiffAdded=`#8bc391` green, toolDiffRemoved=`#e27878` red
 	pi!.initTheme("pi-coder-1337", false);
 	const WHITE = "\u001b[38;2;248;248;242m";
 	const GREEN = "\u001b[38;2;139;195;145m";
@@ -792,33 +837,33 @@ test("状态：组头圆点按全组状态变色（跑=白，全 ok=绿，有错
 		const line = component.render(100).find((l) => l.includes("\u2022")) ?? "";
 		return line.slice(0, 22);
 	};
-	assert.ok(dotOf().startsWith(WHITE), `还有成员在跑 → 白，实际 ${JSON.stringify(dotOf())}`);
+	assert.ok(dotOf().startsWith(WHITE), `a member still running → white, actual ${JSON.stringify(dotOf())}`);
 	registry!.setMemberStatus("s1", "ok");
-	assert.ok(dotOf().startsWith(WHITE), `仍有一个在跑 → 还是白，实际 ${JSON.stringify(dotOf())}`);
+	assert.ok(dotOf().startsWith(WHITE), `one still running → still white, actual ${JSON.stringify(dotOf())}`);
 	registry!.setMemberStatus("s2", "ok");
-	assert.ok(dotOf().startsWith(GREEN), `全部成功 → 绿，实际 ${JSON.stringify(dotOf())}`);
+	assert.ok(dotOf().startsWith(GREEN), `all succeeded → green, actual ${JSON.stringify(dotOf())}`);
 	registry!.setMemberStatus("s2", "error");
-	assert.ok(dotOf().startsWith(RED), `有错 → 红，实际 ${JSON.stringify(dotOf())}`);
+	assert.ok(dotOf().startsWith(RED), `an error → red, actual ${JSON.stringify(dotOf())}`);
 });
 
-test("行上限：超过 GROUP_MAX_ROWS 折成 `… +N`，展开态全出", { skip }, () => {
+test("row limit: beyond GROUP_MAX_ROWS it folds into `… +N`; expanded mode shows everything", { skip }, () => {
 	reset();
 	const content = Array.from({ length: 8 }, (_, i) => ({
 		type: "toolCall",
 		id: `c${i}`,
 		name: "bash",
-		// 每行一个独立 search，避免被 read 合并
+		// one independent search per line, avoiding read merging
 		arguments: BASH(`grep -n needle${i} file${i}.ts`),
 	}));
 	replay(content);
 	const collapsed = renderBlock("bash", "c0", content[0]!.arguments);
-	assert.ok(collapsed.some((l) => /… \+\d+$/.test(l)), `应有折叠行：${JSON.stringify(collapsed)}`);
+	assert.ok(collapsed.some((l) => /… \+\d+$/.test(l)), `there should be a folding line: ${JSON.stringify(collapsed)}`);
 	const expanded = renderBlock("bash", "c0", content[0]!.arguments, true);
-	assert.ok(!expanded.some((l) => /… \+\d+$/.test(l)), "展开态不该折");
+	assert.ok(!expanded.some((l) => /… \+\d+$/.test(l)), "expanded mode should not fold");
 	assert.ok(expanded.length > collapsed.length);
 });
 
-test("宽度：每行可见宽度不超过终端宽", { skip }, () => {
+test("width: every line's visible width stays within the terminal width", { skip }, () => {
 	reset();
 	replay([
 		{ type: "toolCall", id: "w1", name: "bash", arguments: BASH("grep -rn 'a-very-long-pattern-indeed-with-many-chars' some/deeply/nested/directory/path | head") },
@@ -827,20 +872,21 @@ test("宽度：每行可见宽度不超过终端宽", { skip }, () => {
 	]);
 	for (const width of [40, 60, 80, 120]) {
 		for (const line of renderBlock("bash", "w1", BASH("grep -rn x f | head"), false, width)) {
-			const visible = [...line].length; // fixture 全 ASCII
-			assert.ok(visible <= width, `width=${width} 超宽 ${visible}: ${JSON.stringify(line)}`);
+			const visible = [...line].length; // fixture is all ASCII
+			assert.ok(visible <= width, `width=${width} over-wide ${visible}: ${JSON.stringify(line)}`);
 		}
 	}
 });
 
-test("展开态：成员各自显示内容（折叠态则隐身）", { skip }, () => {
+test("expanded mode: members show their own content (while collapsed they are hidden)", { skip }, () => {
 	reset();
-	// 原生 read 自成一组（家族规则），所以两个原生 read 才能同组
+	// The native read forms its own group (family rules), so the two native reads can share a group
 	replay([
 		{ type: "toolCall", id: "x1", name: "read", arguments: READ("/tmp/leader.ts") },
 		{ type: "toolCall", id: "x2", name: "read", arguments: READ("/tmp/a.ts") },
 	]);
-	// 结果必须真给：展开态放的正是「成员自己的内容」，没结果时它本来就是 0 行
+	// The result must be really provided: expanded mode shows exactly "the member's own
+	// content"; without a result it renders 0 lines anyway
 	const result = { content: [{ type: "text", text: "line1\nline2\nline3" }], details: {} };
 	const renderWith = (expanded: boolean): string[] => {
 		const c = new pi!.ToolExecutionComponent("read", "x2", READ("/tmp/a.ts"), {}, definitionOf("read"), { requestRender() {} }, CWD);
@@ -852,14 +898,15 @@ test("展开态：成员各自显示内容（折叠态则隐身）", { skip }, (
 		if (lines[0] === "") lines.shift();
 		return lines;
 	};
-	assert.equal(renderWith(false).length, 0, "折叠态成员必须隐身");
+	assert.equal(renderWith(false).length, 0, "a collapsed member must be hidden");
 	const expanded = renderWith(true);
-	assert.ok(expanded.some((l) => l.includes("line1")), `展开态必须能看到内容：${JSON.stringify(expanded)}`);
+	assert.ok(expanded.some((l) => l.includes("line1")), `expanded mode must show the content: ${JSON.stringify(expanded)}`);
 });
 
-test("形态：└ 整块只出现一次，后续成员行四格缩进", { skip }, () => {
-	// 用户 2026-10-06 第三轮定：树拐角只在第一行。后续成员行（以及 read 合并行的折行续行）
-	// 一律四格缩进 —— 与 bash / codemode / web-search 结果树同一条语言。
+test("shape: └ appears exactly once per block; subsequent member lines indent four spaces", { skip }, () => {
+	// The user's third-round decision, 2026-10-06: the tree corner is only on the first line.
+	// Subsequent member lines (and the wrapped continuations of read-merged lines) all indent
+	// four spaces — the same language as the bash / codemode / web-search result trees.
 	reset();
 	replay([
 		{ type: "thinking", text: "x" },
@@ -872,14 +919,16 @@ test("形态：└ 整块只出现一次，后续成员行四格缩进", { skip 
 		'  └ Search "alpha" in clients/pi',
 		"    List clients/pi/extensions",
 	]);
-	// 首行 `└ ` 在列 2；续行是四格空格，正文（`List` 的 L）与首行正文同列（列 4）
+	// The first line's `└ ` is at column 2; continuations are four spaces, and their text (the
+	// L of `List`) aligns with the first line's text (column 4)
 	assert.equal(lines[1]!.indexOf("Search"), 4);
 	assert.equal(lines[2]!.indexOf("List"), 4);
 });
 
-test("回归：read 合并行折行时续行不重画 └（但保留 Read 与行号）", { skip }, () => {
-	// 折行的续行重画 `Read `（动词，不重画就成了光秃秃一串路径），但不重画 `└ `。
-	// fixture 用长路径强制在窄宽度下折行（行号区间必须跟着各自那一段走）。
+test("regression: when a read-merged line wraps, the continuation does not redraw └ (but keeps Read and the line numbers)", { skip }, () => {
+	// A wrapped continuation redraws `Read ` (the verb; without it the line is a bare list of
+	// paths), but not `└ `. The fixture uses long paths to force wrapping at a narrow width
+	// (the line-number span must follow its own piece).
 	reset();
 	const a = "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/very-long-name-a.ts";
 	const b = "/Users/bachi/jaylli/litellm-any/clients/pi/extensions/explored-group/very-long-name-b.ts";
@@ -888,18 +937,20 @@ test("回归：read 合并行折行时续行不重画 └（但保留 Read 与�
 		{ type: "toolCall", id: "f2", name: "read", arguments: { path: b } },
 	]);
 	const lines = renderBlock("read", "f1", { path: a, offset: 100, limit: 70 }, false, 80);
-	assert.equal(lines.filter((l) => l.includes("└ ")).length, 1, `└ 只该出现一次：${JSON.stringify(lines)}`);
-	for (const line of lines.slice(2)) assert.ok(line.startsWith("    Read "), `续行应四格缩进且重画 Read：${JSON.stringify(line)}`);
-	assert.ok(lines[1]!.includes("100-169"), `行号区间必须保留：${JSON.stringify(lines)}`);
+	assert.equal(lines.filter((l) => l.includes("└ ")).length, 1, `└ should appear exactly once: ${JSON.stringify(lines)}`);
+	for (const line of lines.slice(2)) assert.ok(line.startsWith("    Read "), `continuations should indent four spaces and redraw Read: ${JSON.stringify(line)}`);
+	assert.ok(lines[1]!.includes("100-169"), `the line-number span must be preserved: ${JSON.stringify(lines)}`);
 });
 
-test("颜色：Read 携带行号区间时，数字用 warning、中间的横线用前景色（用户 2026-10-07 定）", { skip }, () => {
-	// 钉 pi-coder-1337 的真实字节。这条测试**故意**断言具体颜色值：判据本身就是「哪个槽位」，
-	// 用宽松正则去「提取颜色」等于没测（memory「渲染测试别断言颜色值」的例外在这里是刻意的 ——
-	// 那条约会的前提是「槽位不重要」，而这里槽位就是需求）。
+test("color: when Read carries a line-number span, the digits use warning and the hyphen between them the foreground color (user's decision, 2026-10-07)", { skip }, () => {
+	// Pin the real bytes of pi-coder-1337. This test **deliberately** asserts concrete color
+	// values: the criterion itself is "which slot", and extracting colors with loose regexes
+	// would test nothing (the "don't assert color values in render tests" convention
+	// deliberately excepts this — that convention assumes the slot doesn't matter, and here
+	// the slot IS the requirement).
 	pi!.initTheme("pi-coder-1337", false);
 	const WARN = "\u001b[38;2;253;176;130m"; // theme.fg("warning", …)
-	const FG = "\u001b[38;2;248;248;242m"; // theme.fg("text", …) —— 主题的 `fg` 变量就是这个槽
+	const FG = "\u001b[38;2;248;248;242m"; // theme.fg("text", …) — the theme's `fg` variable is exactly this slot
 	const OFF = "\u001b[39m";
 	const p = "/Users/bachi/jaylli/litellm-any/a.ts";
 	const span = (args: any): string => {
@@ -908,32 +959,35 @@ test("颜色：Read 携带行号区间时，数字用 warning、中间的横线�
 		return renderBlockRaw("read", "s1", args).find((l) => l.includes("a.ts")) ?? "";
 	};
 
-	// ① offset+limit：`100`(warning) `-`(前景色) `169`(warning)
+	// ① offset+limit: `100`(warning) `-`(foreground) `169`(warning)
 	assert.ok(
 		span({ path: p, offset: 100, limit: 70 }).includes(` ${WARN}100${OFF}${FG}-${OFF}${WARN}169${OFF}`),
-		`①② 应为 100(warning)-（前景）169(warning)：${JSON.stringify(span({ path: p, offset: 100, limit: 70 }))}`,
+		`①② should be 100(warning)-(foreground)169(warning): ${JSON.stringify(span({ path: p, offset: 100, limit: 70 }))}`,
 	);
-	// ② 只给 offset：只有数字上色，不该凭空出现一条横线（也就不会有横线那份前景色）
+	// ② offset only: only the digits get colored; no hyphen may appear out of thin air (hence
+	// none of the hyphen's foreground color)
 	const onlyOffset = span({ path: p, offset: 100 });
-	assert.ok(onlyOffset.includes(` ${WARN}100${OFF}`), `只给 offset 时应上色：${JSON.stringify(onlyOffset)}`);
-	assert.ok(!onlyOffset.includes(FG), `只给 offset 时不该有横线：${JSON.stringify(onlyOffset)}`);
-	// ③ 不带区间：整行不得出现 warning
-	assert.ok(!span({ path: p }).includes(WARN), `无区间时不该上色：${JSON.stringify(span({ path: p }))}`);
+	assert.ok(onlyOffset.includes(` ${WARN}100${OFF}`), `with offset only it should still be colored: ${JSON.stringify(onlyOffset)}`);
+	assert.ok(!onlyOffset.includes(FG), `with offset only there should be no hyphen: ${JSON.stringify(onlyOffset)}`);
+	// ③ no span: no warning anywhere on the line
+	assert.ok(!span({ path: p }).includes(WARN), `without a span nothing should be colored: ${JSON.stringify(span({ path: p }))}`);
 
-	// ④ bash 转义出来的 Read（`sed -n '100,169p' f`）同样上色，但 `Read` 本身不加粗
+	// ④ the bash-derived Read (`sed -n '100,169p' f`) is colored too, but its `Read` is not bold
 	reset();
 	const cmd = { command: `sed -n '100,169p' ${p}` };
 	replay([{ type: "toolCall", id: "s2", name: "bash", arguments: cmd }]);
 	const bashLine = renderBlockRaw("bash", "s2", cmd).find((l) => l.includes("a.ts")) ?? "";
-	assert.ok(bashLine.includes(`${WARN}100${OFF}${FG}-${OFF}${WARN}169${OFF}`), `bash 的区间也要上色：${JSON.stringify(bashLine)}`);
-	assert.ok(!readVerbIsBold(bashLine), `bash 的 Read 不加粗：${JSON.stringify(bashLine)}`);
+	assert.ok(bashLine.includes(`${WARN}100${OFF}${FG}-${OFF}${WARN}169${OFF}`), `the bash span must be colored too: ${JSON.stringify(bashLine)}`);
+	assert.ok(!readVerbIsBold(bashLine), `the bash Read must not be bold: ${JSON.stringify(bashLine)}`);
 });
 
-test("颜色：折行不许把行号区间劈成两半（劈了就只剩半边颜色）", { skip }, () => {
-	// 上色是靠在行尾认「空格 + 数字（-数字）」，而更早的 break-all 折行会在**字符级**断开 ——
-	// 实测宽度 60 时 `…a.ts 100-169` 正好劈在数字中间，第二行成了 `Read -169`：
-	// 区间没了（`-169` 单独毫无意义）颜色也只剩半边。区间是这一行唯一的结构化信息，
-	// 折行时按整体处理：贴不上就整块另起一行。
+test("color: wrapping must not split the line-number span in half (a split leaves half the color)", { skip }, () => {
+	// Coloring works by recognizing "space + digits(-digits)" at the line tail, while the
+	// earlier break-all wrapping cuts at the **character level** — measured at width 60,
+	// `…a.ts 100-169` split exactly between the digits, and the second line became `Read -169`:
+	// the span was gone (`-169` alone is meaningless) and only half the color remained. The
+	// span is this line's only structured information, so wrapping handles it as a whole: if it
+	// does not fit, the whole span starts a new line.
 	pi!.initTheme("pi-coder-1337", false);
 	const WARN = "\u001b[38;2;253;176;130m";
 	const FG = "\u001b[38;2;248;248;242m";
@@ -948,18 +1002,19 @@ test("颜色：折行不许把行号区间劈成两半（劈了就只剩半边�
 	for (const width of [60, 50, 45]) {
 		const lines = renderBlockRaw("read", "w1", args, width);
 		const intact = lines.filter((l) => l.includes(`${WARN}100${OFF}${FG}-${OFF}${WARN}169${OFF}`));
-		assert.equal(intact.length, 1, `width=${width} 时区间应完整出现在某一行且带色：${JSON.stringify(lines)}`);
+		assert.equal(intact.length, 1, `at width=${width} the span should appear intact and colored on some line: ${JSON.stringify(lines)}`);
 		for (const line of lines) {
 			const visible = [...plain(line)].length;
-			assert.ok(visible <= width, `width=${width} 超宽 ${visible}：${JSON.stringify(plain(line))}`);
+			assert.ok(visible <= width, `width=${width} over-wide ${visible}: ${JSON.stringify(plain(line))}`);
 		}
 	}
 });
 
-test("回归：只给 offset / 只给 limit 时行号也得看得见（对齐 pi 原生）", { skip }, () => {
-	// 旧实现的条件是 `offset && limit`，于是只给一个参数时整段区间静默消失（用户 2026-10-06 报
-	// 「行号信息似乎丢失了」）。真实语料里这两种形态都存在：全库 440 个会话统计
-	// `offset+limit` 1176 次 / 只给 `offset` 40 次 / 只给 `limit` 90 次。
+test("regression: with only offset / only limit, the line numbers must still be visible (aligned with pi native)", { skip }, () => {
+	// The old implementation gated on `offset && limit`, so with only one argument the whole
+	// span silently disappeared (the user's 2026-10-06 report: "line-number information seems
+	// lost"). Both shapes exist in the real corpus: across 440 sessions, `offset+limit` 1176
+	// times / `offset` only 40 times / `limit` only 90 times.
 	const p = "/Users/bachi/jaylli/litellm-any/a.ts";
 	const cases: Array<[any, string]> = [
 		[{ path: p, offset: 100, limit: 70 }, " 100-169"],
