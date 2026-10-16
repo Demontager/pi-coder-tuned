@@ -427,9 +427,14 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	/**
 	 * 每轮开始前把当前清单塞进上下文（display: false，不进 TUI），
 	 * 这样模型知道哪些已完成、不必自己猜。
+	 *
+	 * Fix: Don't inject when all tasks are complete — completed state creates
+	 * a strong "everything is done" pattern that can overshadow new instructions
+	 * in the same turn, causing the model to summarize instead of acting.
 	 */
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!enabled || !state.active || state.tasks.length === 0) return;
+		if (isComplete(state)) return;
 		const lines = describeTasks(state);
 		return {
 			message: {
@@ -438,5 +443,5 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 				display: false,
 			},
 		};
-	});
+	});}
 }
