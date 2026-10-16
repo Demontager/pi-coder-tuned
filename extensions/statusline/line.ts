@@ -1,24 +1,25 @@
 /**
- * line.ts — statusline 主行 / 状态行的纯格式化
+ * line.ts — pure formatting of the statusline's main row / status row
  *
- * 这个模块**不 import pi / pi-tui**（只用结构化最小接口描述需要的字段），所以
- * `node --test` 能直接拿假对象跑满每个分支；pi 的真实 `Theme` / `ExtensionContext` /
- * `ReadonlyFooterDataProvider` 结构兼容，index.ts 里原样传进来即可。
+ * This module **imports no pi / pi-tui** (it describes the needed fields via minimal
+ * structural interfaces), so `node --test` can drive every branch with fakes; pi's
+ * real `Theme` / `ExtensionContext` / `ReadonlyFooterDataProvider` are structurally
+ * compatible and index.ts passes them in verbatim.
  */
 
-/** pi 的 Theme.fg 子集（方法声明双变，真实 Theme 可直接赋值）。 */
+/** The pi `Theme.fg` subset (the method is declared bivariant — a real Theme assigns directly). */
 export interface StatuslineTheme {
 	fg(color: string, text: string): string;
 }
 
-/** ctx 里渲染主行需要的部分（`thinkingLevel` 在 pi 的 ctx 上是 live getter，可选且可能抛）。 */
+/** The ctx pieces the main row needs (`thinkingLevel` is a live getter on pi's ctx — optional and can throw). */
 export interface StatuslineSource {
 	model: { id?: string } | undefined;
 	thinkingLevel?: string;
 	getContextUsage(): { tokens?: number | null; contextWindow?: number; percent: number | null | undefined } | undefined;
 }
 
-/** footerData 里需要的部分。 */
+/** The footerData pieces needed. */
 export interface StatuslineGitSource {
 	getGitBranch(): string | null;
 	getExtensionStatuses(): ReadonlyMap<string, string>;
@@ -31,52 +32,65 @@ export interface DiffStat {
 
 export interface StatuslineState {
 	streaming: boolean;
-	/** 渲染路径只读，只有 index.ts 的事件回调会改。 */
+	/** Read-only on the render path — only index.ts's event callbacks mutate it. */
 	activeTools: Map<string, number>;
-	/** undefined = 还没读到 / 不在 git 仓库。 */
+	/** undefined = not read yet / not a git repo. */
 	diffStat: DiffStat | undefined;
 }
 
 export const SEPARATOR = " | ";
 export const ELLIPSIS = "…";
 /**
- * 模型段前缀图标（取代早期的 `Model:` 文字标签，省 4 列）。
- * 刻意**不上色**：emoji 是自带颜色的字形，`theme.fg` 包一层只多出一对没有视觉效果的
- * ANSI 码。宽度按 pi-tui `visibleWidth` 是 2 列（RGI emoji），与终端实际渲染一致，
- * 所以 `truncateToWidth` 的截断数学不受影响。
- * 带 VS16（U+FE0F）强制 emoji 呈现：裸 `\u26a1` 在 pi-tui 里同样量 2 列，但 VS16
- * 能保证个别终端/字体不把它渲染成单色窄字形（那会和宽度口径错位 1 列）。
+ * The model segment's prefix icon (replaces the earlier `Model:` text label — 4
+ * columns saved).
+ * Deliberately **uncolored**: an emoji is a self-colored glyph, and a `theme.fg` wrap
+ * only adds a pair of ANSI codes with no visual effect. pi-tui's `visibleWidth`
+ * measures it as 2 columns (RGI emoji), matching real terminals — `truncateToWidth`'s
+ * math is unaffected.
+ * Carries VS16 (U+FE0F) to force emoji presentation: a bare `\u26a1` also measures 2
+ * columns in pi-tui, but VS16 guarantees individual terminals/fonts do not render it
+ * as a monochrome narrow glyph (which would misalign the width rule by 1 column).
  */
 export const MODEL_ICON = "⚡️";
 /**
- * 分支段前缀图标：`ᗌ`（U+15CC，CANADIAN SYLLABICS CARRIER RE —— 字形恰好是一个分叉的样子）。
- * 它取代了私有区的 Powerline / Nerd Font 字形 U+E0A0 —— 那个码位在字体缺字形时只是一个看不见的
- * 方块（更早还依次用过 `⎇`(U+2387) 与 `⑂`(U+2442, OCR FORK)）。源码里仍写转义、测试仍按码位
- * 钉死，防止以后被换成近形字符（同区块的 `ᗋ`(U+15CB) / `ᗍ`(U+15CD) / `ᗎ`(U+15CE) 长得几乎一样）。
- * 宽度按 pi-tui `visibleWidth` 是 1 列、East Asian Width = Neutral（不是 Ambiguous），
- * 所以 `truncateToWidth` 的截断预算不用动，也不存在 CJK 宽度下按 2 列渲染的错位。
- * 字形可得性（2026-09-20 用 fontTools 扫过本机全部字体）：U+15CC 在 Ghostty 字体栈的三个字体里
- * **都没有**（`Lyth Mono Term` / `JetBrainsMonoNL Nerd Font Mono` / `Maple Mono SC NF`），靠系统
- * 回退渲染 —— macOS 侧有 `Euphemia UCAS`（advance ≈ 0.98 格）与 `Noto Sans CanAborig` 覆盖它，
- * 所以不会掉成缺字方块；终端按固定格宽摆字，0.98 的字面宽度不影响对齐。哪天在没有这类回退字体的
- * 环境里显示成方块，回到 U+2442（Lyth Mono Term 有）或 U+E0A0（Nerd Font 有）。
+ * The branch segment's prefix icon: `ᗌ` (U+15CC, CANADIAN SYLLABICS CARRIER RE —
+ * the glyph happens to look like a fork).
+ * It replaced the private-use Powerline / Nerd Font glyph U+E0A0 — that codepoint is
+ * just an invisible box where the font lacks it (earlier candidates were `⎇`(U+2387)
+ * and `⑂`(U+2442, OCR FORK)). The source still writes the escape and tests pin the
+ * codepoint, preventing a future swap to a lookalike (same block's `ᗋ`(U+15CB) /
+ * `ᗍ`(U+15CD) / `ᗎ`(U+15CE) look nearly identical).
+ * pi-tui's `visibleWidth` measures it 1 column, East Asian Width = Neutral (not
+ * Ambiguous), so `truncateToWidth`'s budget needs no change and no CJK-width
+ * 2-column misalignment exists.
+ * Glyph availability (scanned every local font with fontTools on 2026-09-20): none
+ * of the Ghostty font stack's three fonts (`Lyth Mono Term` / `JetBrainsMonoNL Nerd
+ * Font Mono` / `Maple Mono SC NF`) **has** U+15CC — it falls back to the system;
+ * macOS covers it via `Euphemia UCAS` (advance ≈ 0.98 cells) and
+ * `Noto Sans CanAborig`, so it never drops to a missing-glyph box; the terminal lays
+ * glyphs out at fixed cell width, so a 0.98 advance does not hurt alignment. If it
+ * ever shows as a box somewhere without such fallback fonts, fall back to U+2442
+ * (Lyth Mono Term has it) or U+E0A0 (Nerd Fonts have it).
  */
 export const BRANCH_ICON = "\u15cc";
-/** 行首缩进：整行不顶格。 */
+/** The leading indent: the row is never flush-left. */
 export const LEADING_INDENT = " ";
-/** 本扩展自己的 setStatus key（清残留用，渲染时也跳过）。 */
+/** This extension's own setStatus key (for clearing leftovers; also skipped at render). */
 export const STATUSLINE_KEY = "statusline";
 /**
- * 强制排在最前面的 status key，按这个数组的顺序排；不在表里的按注册顺序跟在后面。
+ * Status keys forced to the front, in this array's order; everything else follows
+ * in registration order.
  *
- * 为什么不是纯注册顺序：**模式指示必须在行首**。它跟着路径、checkpoint 计数这些
- * 会变长的段，而第二行是「超长只截断、不折行」—— 放尾部时一条长路径就能把它挤到看不见。
- * 注册顺序取决于 pi 加载扩展的顺序（目录字母序），写在那里的话改个文件名就会变，太脆。
+ * Why not plain registration order: **the mode indicator must sit at the row's
+ * start**. It follows segments that grow (path, checkpoint counts…), and row two is
+ * "truncate-only, never wrap" — at the tail one long path would push it out of
+ * sight. Registration order follows the order pi loads extensions in (directory
+ * alphabetical) — writing it there means a rename changes it; too fragile.
  */
 export const STATUS_PRIORITY = ["plan-mode"] as const;
 const MAX_STATUS_ITEMS = 5;
 
-/** 主行：`⚡️ x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | 状态]`，各段已着色。 */
+/** The main row: `⚡️ x/xhigh | Ctx 0.0% | \u15cc branch | (+a,-b)[ | status]` — segments already colored. */
 export function formatMainLine(
 	theme: StatuslineTheme,
 	source: StatuslineSource,
@@ -95,9 +109,10 @@ export function formatMainLine(
 }
 
 /**
- * footer 的完整输出：一个主行（+ 可选状态行），行首恒缩进一格，超长只截断省略、绝不折行。
- * `truncate` 由 index.ts 注入 pi-tui 的 `truncateToWidth`（ANSI / 宽字符安全），
- * 这样这条关键约定也能在单测里直接断言。
+ * The footer's full output: one main row (+ an optional status row), always leading
+ * with one space, truncating to ellipsis on overflow, never wrapping.
+ * `truncate` is pi-tui's `truncateToWidth` injected by index.ts (ANSI /
+ * wide-char safe), so even this key rule is asserted in unit tests.
  */
 export function composeFooterLines(
 	theme: StatuslineTheme,
@@ -115,10 +130,13 @@ export function composeFooterLines(
 }
 
 /**
- * 第二行：其它扩展 `ctx.ui.setStatus()` 的文本（模式指示 / cwd / rewind checkpoint …）。
- * 自带 ANSI 的原样渲染（那些扩展已经自己配过色），没色的统一给 muted。
+ * The second row: other extensions' `ctx.ui.setStatus()` texts (mode indicator /
+ * cwd / rewind checkpoint …).
+ * Text arriving with its own ANSI renders verbatim (those extensions already
+ * colored it); uncolored text gets muted.
  *
- * 顺序：先按 `STATUS_PRIORITY`（模式指示排行首），其余按注册顺序。
+ * Order: `STATUS_PRIORITY` first (the mode indicator leads the row), the rest in
+ * registration order.
  */
 export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineGitSource): string {
 	const entries = [...git.getExtensionStatuses().entries()].filter(
@@ -129,7 +147,7 @@ export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineG
 		const index = (STATUS_PRIORITY as readonly string[]).indexOf(key);
 		return index === -1 ? STATUS_PRIORITY.length : index;
 	};
-	// 稳定排序：同 rank 的保持 Map 的插入序（`Array.prototype.sort` 在现代 V8 上稳定）
+	// stable ordering: equal ranks keep Map insertion order (`Array.prototype.sort` is stable on modern V8)
 	const ordered = entries
 		.map((entry, index) => ({ entry, index }))
 		.sort((a, b) => rank(a.entry[0]) - rank(b.entry[0]) || a.index - b.index)
@@ -141,7 +159,7 @@ export function formatExtensionStatuses(theme: StatuslineTheme, git: StatuslineG
 	return visible.join(dim(theme, SEPARATOR));
 }
 
-/** 模型图标 + id + 推理强度：`⚡️ qwen3.8-flash/xhigh`（id 用 accent，斜杠 dim，level 用 syntaxFunction）；level 读不到（stale ctx）时只报 id。 */
+/** Model icon + id + reasoning level: `⚡️ qwen3.8-flash/xhigh` (id in accent, slash dim, level in syntaxFunction); unreadable level (stale ctx) → just the id. */
 function formatModelSegment(theme: StatuslineTheme, source: StatuslineSource): string {
 	const id = readModel(source)?.id ?? "no-model";
 	const level = readThinkingLevel(source);
@@ -179,7 +197,7 @@ function formatDiffSegment(
 	return `${dim(theme, "(")}${theme.fg("success", `+${diffStat?.added ?? 0}`)}${dim(theme, ",")}${theme.fg("error", `-${diffStat?.deleted ?? 0}`)}${dim(theme, ")")}`;
 }
 
-/** 末段状态：有工具在跑 → 工具名（并发带计数），否则流式中 → thinking，空闲 → 整段不出现；整段用 warning 着色。 */
+/** The trailing state segment: a tool running → its name (with a count when concurrent), else streaming → thinking, idle → the segment is absent; the whole segment is warning-colored. */
 function formatStateSegment(theme: StatuslineTheme, state: StatuslineState): string | undefined {
 	const active = [...state.activeTools.entries()];
 	if (active.length > 0) {
@@ -197,7 +215,7 @@ function contextColor(percent: number | null): string {
 	return "success";
 }
 
-/** ctx 的 getter 在会话被换掉后可能抛（stale ctx），状态栏不值得为此挂掉渲染。 */
+/** ctx getters can throw after a session swap (stale ctx) — the statusline is not worth a broken render. */
 function readContextUsage(
 	source: StatuslineSource,
 ): ReturnType<StatuslineSource["getContextUsage"]> {
@@ -208,7 +226,7 @@ function readContextUsage(
 	}
 }
 
-/** thinkingLevel 在 stale ctx 上同样可能抛，一律兜底成「无 level」。 */
+/** thinkingLevel can also throw on a stale ctx — always falls back to "no level". */
 function readThinkingLevel(source: StatuslineSource): string | undefined {
 	try {
 		const level = source.thinkingLevel;
@@ -218,7 +236,7 @@ function readThinkingLevel(source: StatuslineSource): string | undefined {
 	}
 }
 
-/** ctx.model 在 stale ctx 上也可能抛，一律走这里取。 */
+/** ctx.model can throw on a stale ctx too — always read through here. */
 function readModel(
 	source: StatuslineSource,
 ): { id?: string; contextWindow?: number } | undefined {

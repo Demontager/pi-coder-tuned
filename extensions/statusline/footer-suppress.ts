@@ -1,45 +1,59 @@
 /**
- * footer-suppress.ts — 启动窗口内「关掉」pi 内置 footer
+ * footer-suppress.ts — "turning off" pi's built-in footer inside the startup window
  *
- * 要解决的问题：pi 起 TUI 的顺序是 `ui.start()`（内置 footer 早已挂在 footer 容器里）→
- * `ensureTool("fd"/"rg")` → `rebindCurrentSession()` → 才 emit `session_start`
- * （`interactive-mode.js` 的 `init()`）。扩展拿到 ctx、能 `setFooter()` 只能等到最后一步，
- * 而 Runner 的 `emit()` 是**串行 await** 每个扩展的 handler，排在 `statusline` 前面的扩展
- * （本机是 `mcp`，握手要连 MCP server）还会再往后推一点。实测本机冷启动：内置 footer 在
- * ~480ms 出第一帧，我们的 statusline 到 ~1.2s 才装上 —— 中间那 ~0.7s 底部是 pi 默认状态行
- * （`~/path` + `0.0%/1.0M (auto) ... deepseek-flash • max`），然后整块换成 `⚡️ ...`。
- * 用户看到的就是「先默认、后扩展」闪一下。
+ * The problem it solves: pi's TUI startup order is `ui.start()` (the built-in
+ * footer already mounted in the footer container) → `ensureTool("fd"/"rg")` →
+ * `rebindCurrentSession()` → only then emit `session_start`
+ * (`interactive-mode.js`'s `init()`). An extension gets a ctx — and can
+ * `setFooter()` — only at that last step, and the Runner's `emit()` **serially
+ * awaits** every extension's handler, so extensions sorted before `statusline`
+ * (locally `mcp`, whose handshake connects to an MCP server) push it back further.
+ * Measured cold start on this machine: the built-in footer drew its first frame
+ * at ~480ms while our statusline installed at ~1.2s — the ~0.7s between shows
+ * pi's default statusline (`~/path` + `0.0%/1.0M (auto) ... deepseek-flash •
+ * max`), then the whole block swaps to `⚡️ ...`. The user sees a "first default,
+ * then extension" flash.
  *
- * 为什么只能在原型上解决：扩展能拿到 TUI 的最早时刻就是 `session_start`；但扩展的**模块求值 /
- * 工厂**发生在 TUI 创建之前（扩展由 `createAgentSessionServices` → `resourceLoader.reload()`
- * 加载，InteractiveMode 之后才 new）。所以这里在工厂里就把 `FooterComponent.prototype.render`
- * 换掉：窗口内内置 footer 渲染 0 行（底部空着等我们的 statusline），而不是先画一个马上要变的
- * 默认状态行。
+ * Why it can only be solved on the prototype: the earliest an extension can touch
+ * the TUI is `session_start`; but an extension's **module eval / factory** runs
+ * before the TUI is created (extensions load via `createAgentSessionServices` →
+ * `resourceLoader.reload()`, InteractiveMode is new'd after). So inside the
+ * factory, `FooterComponent.prototype.render` is replaced: inside the window the
+ * built-in footer renders 0 rows (the bottom stays empty waiting for our
+ * statusline) instead of painting a default statusline about to be replaced.
  *
- * 为什么打得中：bundle 运行时，扩展解析 `@earendil-works/pi-coding-agent` 走 loader 的
- * `virtualModules`（`dist/bundle/index.js`），与 `interactive-mode.js` 内部用的是同一个类对象
- * （同一个 chunk）—— 和 `fenceless-code-block` 打 `Markdown.prototype` 是同一个前提；
- * 万一打不中也只是退回原样（照旧闪一下），不会坏。
+ * Why the patch lands: under the bundle runtime, an extension resolving
+ * `@earendil-works/pi-coding-agent` goes through the loader's `virtualModules`
+ * (`dist/bundle/index.js`) — the same class objects (same chunk)
+ * `interactive-mode.js` uses internally; the same premise as
+ * `fenceless-code-block` patching `Markdown.prototype`. And if it misses, it only
+ * degrades to the original behavior (the flash as before) — nothing breaks.
  *
- * 约束：
- *   - 只换 `prototype.render`，不碰实例、不碰 pi 内部状态，也不动 children；
- *   - 幂等且可解除：`/reload` 会重新求值模块，新实例先解开旧实例的接管再打自己的；
- *   - `maxAgeMs` 兜底：万一我们的 footer 始终没装上（扩展报错、非 TUI 模式），到点自动交还，
- *     回到 pi 默认行为，不会让底部永远空着；
- *   - 任何一步抛错都当作「没打上」，绝不把异常漏给宿主。
+ * Constraints:
+ *   - only `prototype.render` is replaced — no instances touched, no pi internal
+ *     state, no children;
+ *   - idempotent and releasable: `/reload` re-evals the module — the new instance
+ *     releases the previous takeover before applying its own;
+ *   - `maxAgeMs` fallback: should our footer never install (an extension error,
+ *     non-TUI mode), it auto-releases back to pi's default — the bottom never
+ *     stays empty forever;
+ *   - any throw anywhere counts as "not applied" — an exception never reaches the
+ *     host.
  */
 
-/** 挂在 footer 原型上的接管记录键（全局符号注册表：`/reload` 后新扩展实例也能看到旧实例的接管）。 */
+/** The takeover-record key hung on the footer prototype (global symbol registry: a `/reload`'d new instance can see the old one's). */
 export const FOOTER_SUPPRESS_KEY: symbol = Symbol.for("litellm-any.pi-statusline.footerSuppress");
 
 /**
- * 兜底时长：正常 `session_start` 远早于它解除，只有交接失败才会走到这里。
- * 取 30s 是因为我们排在别的扩展后面 —— `Runner.emit()` 串行 await，`mcp`（字母序在前）
- * 只在握手全部结束后才轮到我们，握手本身的上限就是 20s。
+ * The fallback duration: a normal `session_start` releases it far earlier — only a
+ * failed handover reaches this.
+ * 30s because we sort after other extensions — `Runner.emit()` awaits serially,
+ * and `mcp` (alphabetically earlier) only yields to us once its whole handshake
+ * finishes, and the handshake alone caps at 20s.
  */
 export const FOOTER_SUPPRESS_MAX_AGE_MS = 30_000;
 
-/** 本模块用到的 `FooterComponent` 形状（不 import pi，单测直接塞假类）。 */
+/** The `FooterComponent` shape this module uses (no pi imports — tests feed a fake class). */
 export interface FooterClassLike {
 	prototype: { render(width: number): string[] };
 }
@@ -49,8 +63,10 @@ interface SuppressRecord {
 }
 
 /**
- * 接管记录挂在哪：优先 `target.prototype`（真正被改的那个对象），退而求其次用 target 自身。
- * 传类或传原型都能用；形状对不上返回 undefined（那就什么都不做）。
+ * Where the takeover record hangs: preferably `target.prototype` (the object really
+ * patched), falling back to target itself.
+ * Passing the class or the prototype both work; a shape mismatch → undefined (then
+ * nothing happens).
  */
 export function suppressTarget(target: unknown): { render(width: number): string[] } | undefined {
 	const kind = typeof target;
@@ -67,7 +83,7 @@ export function suppressTarget(target: unknown): { render(width: number): string
 	return undefined;
 }
 
-/** 解除 `target` 上现有的接管（可能是别的扩展实例遗留的）。返回是否解掉了什么。 */
+/** Release whatever takeover `target` carries (possibly a leftover of another extension instance). Returns whether anything was released. */
 export function releaseFooterSuppressor(target: unknown): boolean {
 	try {
 		const holder = suppressTarget(target) as { [FOOTER_SUPPRESS_KEY]?: SuppressRecord } | undefined;
@@ -81,10 +97,13 @@ export function releaseFooterSuppressor(target: unknown): boolean {
 }
 
 /**
- * 把 `footerClass.prototype.render` 换成「返回 0 行」，返回解除函数（幂等）。
+ * Replace `footerClass.prototype.render` with "return 0 rows"; returns the release
+ * function (idempotent).
  *
- * 解除（或超过 `maxAgeMs`）后原型恢复原样，渲染透传；重复接管会先交还上一次，不会叠 wrapper。
- * 形状不对 / 原型只读时返回 undefined（调用方按「没打上」处理，行为退回原样）。
+ * After release (or past `maxAgeMs`) the prototype is restored and rendering passes
+ * through; a repeat takeover first releases the previous — no stacked wrappers.
+ * A wrong shape / read-only prototype → undefined (the caller treats it as "not
+ * applied" — behavior degrades to the original).
  */
 export function suppressBuiltInFooter(
 	footerClass: unknown,
@@ -92,7 +111,7 @@ export function suppressBuiltInFooter(
 ): (() => void) | undefined {
 	const target = suppressTarget(footerClass);
 	if (!target) return undefined;
-	// 先解除已有接管（自己重入 / 上一个扩展实例遗留），拿到的才是真原版。
+	// release any existing takeover first (own re-entry / a leftover of the previous extension instance) — what remains is the real original.
 	releaseFooterSuppressor(target);
 
 	const originalRender = target.render;
@@ -111,7 +130,7 @@ export function suppressBuiltInFooter(
 			if (hadOwnRender) target.render = originalRender;
 			else delete (target as { render?: unknown }).render;
 		} catch {
-			// 原型只读 / 已被换掉：wrapper 自己会因 released 标志透传，不再屏蔽。
+			// read-only prototype / already replaced: the wrapper passes through via its released flag — no more suppressing.
 		}
 	};
 

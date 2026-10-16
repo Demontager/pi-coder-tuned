@@ -9,12 +9,13 @@ import {
 } from "./footer-guard.ts";
 
 /**
- * 仿 pi-tui 的 `Container`：`clear()` 会**换掉**整个 children 数组
- * （`this.children = []`），所以守卫必须每次重读该字段而不是缓存它。
+ * A fake pi-tui `Container`: `clear()` **replaces** the whole children array
+ * (`this.children = []`), so the guard must re-read the field every time rather than
+ * cache it.
  */
 class FakeContainer implements RenderableContainer {
 	children: unknown[] = [];
-	/** 原 render 被调用的次数（断言「默认 footer 一帧都没出」用）。 */
+	/** How many times the original render ran (for asserting "the default footer drew zero frames"). */
 	originalRenders = 0;
 
 	addChild(component: unknown): void {
@@ -31,7 +32,7 @@ class FakeContainer implements RenderableContainer {
 	}
 }
 
-/** 仿叶子组件：行里带上自己的名字和宽度，方便看出行是谁、按哪个宽度渲染的。 */
+/** A fake leaf component: its rows carry its name and the width, so it is clear who rendered and at what width. */
 interface Leaf {
 	render(width: number): string[];
 }
@@ -40,12 +41,12 @@ function leaf(name: string, lines = 1): Leaf {
 	return { render: (width: number) => Array.from({ length: lines }, () => `${name}#${width}`) };
 }
 
-/** 仿 `tui`：只有 children，没有 render（findRenderContainer 只认 children）。 */
+/** A fake `tui`: only children, no render (findRenderContainer only looks at children). */
 function tuiRoot(...children: unknown[]): { children: unknown[] } {
 	return { children };
 }
 
-test("findRenderContainer 按对象身份认出直接持有它的容器", () => {
+test("findRenderContainer identifies the container directly holding it by object identity", () => {
 	const ours = leaf("statusline");
 	const inner = new FakeContainer();
 	inner.addChild(ours);
@@ -56,7 +57,7 @@ test("findRenderContainer 按对象身份认出直接持有它的容器", () => 
 	assert.equal(findRenderContainer(root, ours), inner);
 });
 
-test("findRenderContainer 找不到就返回 undefined，不猜位置", () => {
+test("findRenderContainer returns undefined when not found — never guesses", () => {
 	const inner = new FakeContainer();
 	inner.addChild(leaf("other"));
 	const root = tuiRoot(inner);
@@ -67,7 +68,7 @@ test("findRenderContainer 找不到就返回 undefined，不猜位置", () => {
 	assert.equal(findRenderContainer({ notAContainer: true }, leaf("x")), undefined);
 });
 
-test("findRenderContainer 容忍环状引用与只读 children", () => {
+test("findRenderContainer tolerates cyclic references and read-only children", () => {
 	const a = new FakeContainer();
 	const b = new FakeContainer();
 	a.addChild(b);
@@ -79,7 +80,7 @@ test("findRenderContainer 容忍环状引用与只读 children", () => {
 	assert.equal(findRenderContainer(frozenRoot, leaf("y")), undefined);
 });
 
-test("我们的组件在位时原样透传，被换成内置 footer 时出重放行", () => {
+test("passes through while our component is mounted; replays the frozen rows once swapped to the built-in footer", () => {
 	const ours = leaf("statusline");
 	const builtIn = leaf("pi-default");
 	const container = new FakeContainer();
@@ -92,20 +93,20 @@ test("我们的组件在位时原样透传，被换成内置 footer 时出重放
 	});
 	assert.equal(typeof release, "function");
 
-	// 正常会话：真实渲染照旧。
+	// a normal session: real rendering passes through.
 	assert.deepEqual(container.render(80), ["statusline#80"]);
 	assert.equal(container.originalRenders, 1);
 
-	// 换会话窗口：pi 已经 clear() 并挂上内置 footer。
+	// the session-swap window: pi has already clear()ed and mounted the built-in footer.
 	container.clear();
 	container.addChild(builtIn);
 	assert.deepEqual(container.render(80), ["frozen#80"]);
 	assert.deepEqual(container.render(40), ["frozen#40"]);
-	// 内置 footer 一次都没被渲染 → 屏幕上不会出现默认 footer。
+	// the built-in footer rendered zero times → the default footer never reaches the screen.
 	assert.equal(container.originalRenders, 1);
 });
 
-test("重放行按当前宽度重新截断", () => {
+test("the replayed rows re-truncate at the current width", () => {
 	const ours = leaf("statusline");
 	const container = new FakeContainer();
 	container.addChild(ours);
@@ -121,7 +122,7 @@ test("重放行按当前宽度重新截断", () => {
 	assert.deepEqual(container.render(10), [wide.slice(0, 10)]);
 });
 
-test("解除接管后恢复原渲染，且不留 own render 属性与接管记录", () => {
+test("releasing restores the original render — no own render property or takeover record left", () => {
 	const ours = leaf("statusline");
 	const builtIn = leaf("pi-default");
 	const container = new FakeContainer();
@@ -141,12 +142,12 @@ test("解除接管后恢复原渲染，且不留 own render 属性与接管记�
 	assert.equal((container as { [FOOTER_GUARD_KEY]?: unknown })[FOOTER_GUARD_KEY], undefined);
 	assert.deepEqual(container.render(10), ["pi-default#10"]);
 
-	// 幂等：重复解除不再改动任何东西。
+	// idempotent: a repeat release changes nothing.
 	release();
 	assert.equal(Object.prototype.hasOwnProperty.call(container, "render"), false);
 });
 
-test("对同一容器重复接管会先交还上一次，不叠两层", () => {
+test("a repeat takeover of one container first releases the previous — no stacked wrappers", () => {
 	const first = leaf("first");
 	const second = leaf("second");
 	const container = new FakeContainer();
@@ -156,18 +157,18 @@ test("对同一容器重复接管会先交还上一次，不叠两层", () => {
 	freezeFooterContainer({ container, ownComponent: first, frozenRender: () => ["frozen-first"] });
 	freezeFooterContainer({ container, ownComponent: second, frozenRender: () => ["frozen-second"] });
 
-	// first 在位、second 不在位：若两层的 wrapper 还叠着，这里会出 frozen-first；
-	// 只保留最后一次接管 → 判定 second 不在位 → 出 frozen-second。
+	// first mounted, second not: if two wrapper layers were still stacked this would emit frozen-first;
+	// only the last takeover remains → second judged absent → frozen-second comes out.
 	container.clear();
 	container.addChild(first);
 	assert.deepEqual(container.render(7), ["frozen-second"]);
 
-	// second 回到位 → 透传。
+	// second back in place → pass through.
 	container.addChild(second);
 	assert.deepEqual(container.render(7), ["first#7", "second#7"]);
 });
 
-test("超时后自愈：组件在位与否都交还原渲染", () => {
+test("self-heals past the timeout: releases the original render whether mounted or not", () => {
 	const ours = leaf("statusline");
 	const builtIn = leaf("pi-default");
 	const container = new FakeContainer();
@@ -181,12 +182,12 @@ test("超时后自愈：组件在位与否都交还原渲染", () => {
 		now: () => clock,
 	})!;
 
-	// 组件仍在新位置（正常交接后的样子）+ 已超时 → 透传并交还。
+	// the component is still in its new spot (a completed handover's look) + past the timeout → pass through and release.
 	clock = 1600;
 	assert.deepEqual(container.render(9), ["statusline#9"]);
 	assert.equal(Object.prototype.hasOwnProperty.call(container, "render"), false);
 
-	// 另一侧：新 footer 一直没来（换会话失败）→ 超时后回到 pi 默认行为。
+	// the other side: the new footer never arrived (a failed swap) → after the timeout, back to pi's default behavior.
 	const ours2 = leaf("statusline2");
 	const container2 = new FakeContainer();
 	container2.addChild(ours2);
@@ -205,7 +206,7 @@ test("超时后自愈：组件在位与否都交还原渲染", () => {
 	release();
 });
 
-test("未超时期间无论多少帧都只出重放行", () => {
+test("before the timeout, every frame emits only the replayed rows", () => {
 	const ours = leaf("statusline");
 	const container = new FakeContainer();
 	container.addChild(ours);
@@ -222,7 +223,7 @@ test("未超时期间无论多少帧都只出重放行", () => {
 	}
 });
 
-test("容器形状不对时什么都不做（非 tui 模式 / pi 改了结构）", () => {
+test("a wrong container shape → nothing happens (non-tui mode / pi changed internals)", () => {
 	const noop = () => ["frozen"];
 	assert.equal(freezeFooterContainer({ container: undefined, ownComponent: {}, frozenRender: noop }), undefined);
 	assert.equal(freezeFooterContainer({ container: {}, ownComponent: {}, frozenRender: noop }), undefined);
@@ -241,7 +242,7 @@ test("容器形状不对时什么都不做（非 tui 模式 / pi 改了结构）
 	assert.equal(freezeFooterContainer({ container: new FakeContainer(), ownComponent: undefined, frozenRender: noop }), undefined);
 });
 
-test("接管过程中容器不可写时不抛错", () => {
+test("an unwritable container mid-takeover does not throw", () => {
 	const container = new FakeContainer();
 	const ours = leaf("statusline");
 	container.addChild(ours);
@@ -258,7 +259,7 @@ test("接管过程中容器不可写时不抛错", () => {
 	assert.deepEqual(container.render(4), ["locked#4"]);
 });
 
-test("releaseFooterGuard 能解除别人（别的扩展实例）留下的接管", () => {
+test("releaseFooterGuard releases a takeover another extension instance left behind", () => {
 	const ours = leaf("statusline");
 	const builtIn = leaf("pi-default");
 	const container = new FakeContainer();

@@ -1,36 +1,46 @@
 /**
- * simple-task — 轻量级任务清单扩展。
+ * simple-task — a lightweight task-list extension.
  *
- * 2026-09-23 到 2026-09-24 之间它曾兼作 plan-mode 执行期的唯一进度表（plan-mode 批准
- * 计划时把步骤镜像进来，id = 步号、文案带 `plan: n. ` 前缀）。那套镜像已随 plan-mode
- * 的 execute 态一起删除：计划批准后进度归模型自己，它认为该建清单就调 `task_set`，
- * 扩展不再代它建、也不再读它的状态。本扩展现在是一份普通的任务清单。
+ * Between 2026-09-23 and 2026-09-24 it doubled as plan-mode's execution-phase progress
+ * board (approving a plan mirrored its steps here, id = step number, text prefixed
+ * `plan: n. `). That mirroring was removed together with plan-mode's execute state:
+ * once a plan is approved, progress belongs to the model — it calls `task_set` whenever
+ * it wants a list; the extension no longer builds one for it nor reads its state. This
+ * extension is now an ordinary task list.
  *
- * 功能参照 @thunstack/pi-task-list（会话级、agent 自主管理、无需 plan 模式），
- * 样式参照 @tintinweb/pi-tasks（● 头部统计 + ◻/◼/✔ 符号 + 星形 spinner + 完成项删除线）。
+ * Feature set follows @thunstack/pi-task-list (session-scoped, agent-managed, no plan
+ * mode needed); the look follows @tintinweb/pi-tasks (● header stats + ◻/◼/✔ symbols +
+ * a star spinner + strikethrough on done items).
  *
- * 为什么自己写而不是用现成的两个：
- *   - @tintinweb/pi-tasks 功能全但重（十几个文件 + 文件锁 store + 一堆配置项），
- *     而且默认 taskScope 会把 `.pi/tasks/tasks-<sessionId>.json` 写进工作仓库，
- *     每个仓库都得加一条 .gitignore。
- *   - @thunstack/pi-task-list 够轻，但样式硬编码（☐ ◐ ☑ ⚠ ↷ + 📋 emoji），
- *     想改样式只能 fork 到本地路径包，得自己维护上游同步。
- *   自己写一份就不用背 fork 的维护责任，样式想怎么改都行。
+ * Why write it instead of using the two ready-made ones:
+ *   - @tintinweb/pi-task-list is full-featured but heavy (a dozen files + file-locked
+ *     store + a pile of options), and its default taskScope writes
+ *     `.pi/tasks/tasks-<sessionId>.json` into the working repo — every repo needs a
+ *     .gitignore line;
+ *   - @thunstack/pi-task-list is light enough, but its style is hardcoded
+ *     (☐ ◐ ☑ ⚠ ↷ + 📋 emoji) — changing the style means forking to a local-path
+ *     package and maintaining upstream sync yourself.
+ *   Writing our own avoids the fork's maintenance burden — the style can change freely.
  *
- * 刻意保持轻量：
- *   - 三种状态（pending / in_progress / done），无区块、无依赖图、无 note
- *   - 三个工具 + 一个命令
- *   - 零 npm 依赖：只用宿主提供的 pi / pi-tui（peerDependencies）
- *   - **零文件写入**：状态通过 pi.appendEntry() 挂在会话日志上，从不往工作仓库写东西
- *   - 颜色全走 theme.fg()，无硬编码 —— 换 pi 主题即换配色
- *   - 不强制任务标题字数（pi-task-list 的 3–15 词校验经常误伤短标题）
+ * Deliberately kept lightweight:
+ *   - three states (pending / in_progress / done); no sections, no dependency graph,
+ *     no notes;
+ *   - three tools + one command;
+ *   - zero npm dependencies: only host-provided pi / pi-tui (peerDependencies);
+ *   - **zero file writes**: state hangs on the session log via pi.appendEntry() —
+ *     nothing is written into the working repo;
+ *   - all colors go through theme.fg(), nothing hardcoded — a pi theme change is a
+ *     palette change;
+ *   - no task-title length enforcement (pi-task-list's 3–15-word check keeps hurting
+ *     short titles).
  *
- * 放在 `~/.pi/agent/extensions/simple-task/`（pi 支持 extensions 下的子目录形式：
- * 目录里放 index.ts 作为入口，见 docs/extensions.md 的放置规则表），
- * 属于自动发现目录，所以支持 `/reload` 热重载。
+ * Lives at `~/.pi/agent/extensions/simple-task/` (pi supports a subdirectory form
+ * under extensions: drop an index.ts inside — see the placement table in
+ * docs/extensions.md), an auto-discovery directory — `/reload` hot-reloads it.
  *
- * 注意：注释里不能写 `extensions/`+星号+`/index.ts` 这种 glob —— 里面的星号紧跟斜杠
- * 会提前闭合块注释，导致后面全部被当成代码解析。
+ * Note: never write `extensions/`+asterisk+`/index.ts` globs inside comments — an
+ * asterisk right after a slash would close the block comment early and everything
+ * after parses as code.
  */
 
 import { Type } from "typebox";
@@ -45,7 +55,7 @@ import {
 	type State,
 	type TaskStatus,
 } from "./types.ts";
-// 只引 buildWidgetLines：GLYPHS 只被 widget 自己的渲染用，本文件不再直接碰符号表。
+// only buildWidgetLines is imported: GLYPHS is only used by the widget's own rendering — this file no longer touches the glyph table.
 import { buildWidgetLines } from "./widget.ts";
 import { widgetGaps } from "./gap.ts";
 
@@ -54,7 +64,7 @@ const ENTRY_TYPE = "simple-task-state";
 const SPINNER_MS = 150;
 const TOOL_NAMES = ["task_set", "task_update", "task_get"] as const;
 
-/** 工具返回里携带结构化状态，供 renderResult 读取计数。 */
+/** Tool results carry structured state for renderResult's counts. */
 interface ToolDetails {
 	action: "set" | "update" | "get";
 	state: State;
@@ -69,21 +79,23 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let lastCtx: ExtensionContext | undefined;
 
-	// ── 持久化 ────────────────────────────────────────────────────────────
+	// ── Persistence ─────────────────────────────────────────────────────────
 
 	/**
-	 * 状态挂在会话日志上（pi.appendEntry），不写任何文件。
-	 * 这是本扩展最重要的设计决定：既不污染工作仓库，又能跨 resume 保留。
-	 */
+ * State hangs on the session log (pi.appendEntry) — no file is ever written.
+ * This is the extension's most important design decision: it neither pollutes the
+ * working repo nor loses state across a resume.
+ */
 	function persist(): void {
 		pi.appendEntry(ENTRY_TYPE, { state: cloneState(state), enabled, updatedAt: Date.now() });
 	}
 
 	/**
-	 * 用 getBranch() 而不是 getEntries()：分支导航（回退到旧消息再继续）时必须
-	 * 跟着当前分支走，否则会把已丢弃分支上的任务状态复活。
-	 * 取最后一条 —— 每条都是全量快照，最新的即当前状态。
-	 */
+ * getBranch(), not getEntries(): branch navigation (rewind to an old message and
+ * continue) must follow the current branch — otherwise a discarded branch's task state
+ * resurrects.
+ * Take the last entry — each is a full snapshot, so the newest is the current state.
+ */
 	function reconstruct(ctx: ExtensionContext): void {
 		state = emptyState();
 		enabled = true;
@@ -98,11 +110,12 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 	// ── UI ────────────────────────────────────────────────────────────────
 
 	/**
-	 * spinner 定时器只在有进行中任务时运行。
-	 * 帧递增只发生在这里（照抄 pi-tasks 的做法，它的注释解释得很清楚）：
-	 * 若把递增放进 updateUi()，动画速度就会跟着 agent 的繁忙程度变化，
-	 * 忙的时候飞转、闲的时候卡住。
-	 */
+ * The spinner timer only runs while an in-progress task exists.
+ * The frame increment happens only here (copied from pi-tasks — its comment explains
+ * it well):
+ * if the increment lived inside updateUi(), animation speed would track the agent's
+ * busyness — spinning fast when busy, freezing when idle.
+ */
 	function stopTimer(): void {
 		if (timer !== undefined) {
 			clearInterval(timer);
@@ -115,10 +128,10 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		if (needsAnimation && timer === undefined) {
 			timer = setInterval(() => {
 				frame += 1;
-				// 定时器可能比会话活得久：ctx 失效后访问 ctx.ui 会抛
-				// （docs/extensions.md：捕获的 ctx 在会话替换后是 stale，使用即抛），
-				// 而抛出发生在 render 之前，render 里的 try/catch 拦不住。
-				// 所以这里自己兜住，并且直接停表 —— ctx 没了，动画也没意义了。
+				// the timer can outlive the session: touching ctx.ui after it goes stale throws
+				// (docs/extensions.md: a captured ctx is stale after session replacement — using it throws),
+				// and the throw happens before render, where render's try/catch cannot catch it.
+				// so it is guarded here and the timer stopped outright — no ctx, no point animating.
 				try {
 					updateUi(lastCtx);
 				} catch {
@@ -137,29 +150,29 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 
 		const visible = enabled && state.active && state.tasks.length > 0;
 		if (!visible) {
-			// ctx 可能已 stale（会话结束 / reload / 切换会话），ctx.ui 的 getter 会抛。
-			// 吞掉即可 —— 界面本来就要消失，没什么可渲染的。
+			// ctx may already be stale (session ended / reload / session switch) — the ctx.ui getter throws.
+			// swallow it — the UI was going away anyway; nothing to render.
 			try {
 				ctx.ui.setWidget(WIDGET_KEY, undefined);
 			} catch {
-				/* ctx 已失效 */
+				/* ctx is dead */
 			}
 			ensureTimer();
 			return;
 		}
 
-		// 快照 + 每次重新注册：工厂闭包住快照（所以状态不会边渲染边变），
-		// 而 frame 是可变变量、在 render 时才读 —— 这就是 spinner 能转的原因。
+		// snapshot + re-register every time: the factory closes over the snapshot (state cannot mutate mid-render),
+		// while `frame` is mutable and read at render time — that is why the spinner spins.
 		const snapshot = cloneState(state);
 		try {
 			ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
-				// 自引用：render 时要用组件自己的身份，去编辑器上方的 widget 容器里定位自己，
-				// 从而判断上下是否还挨着别的 widget（pi-subagents 的 async 块、recap 摘要…）
-				// 并补一行空行。细节与理由见 gap.ts 的文件头。
+				// self-reference: at render time the component needs its own identity to locate itself inside the above-editor widget container —
+				// that is how it knows whether other widgets (pi-subagents's async block, the recap…) still sit above/below
+				// and pads a blank row accordingly. Details and rationale in gap.ts's file header.
 				const component = {
 					render(width: number): string[] {
-						// 渲染异常绝不能逃出去崩掉宿主进程 —— 最坏情况只是这一帧 widget 为空。
-						// pi-tasks 有同样的保护，它的注释说明了理由。
+						// a render exception must never escape and crash the host process — worst case, this widget's frame is empty.
+						// pi-tasks has the same guard; its comment gives the reason.
 						try {
 							const lines = buildWidgetLines(snapshot, frame, theme, width);
 							if (lines.length === 0) return lines;
@@ -197,19 +210,19 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		if (!enabled) throw new Error("Task tracking is disabled for this session. Use /tasks on to re-enable.");
 	}
 
-	// ── 工具 ──────────────────────────────────────────────────────────────
+	// ── Tools ───────────────────────────────────────────────────────────────
 
-	// 三个工具都带 `renderShell: "self"`：让 pi 不再给整块套 `contentBox`
-	//（tool-execution.js 里那是个 `Box(1, 1, bgFn)`），于是
-	//   ① **没有底色**（pending 的 `toolPendingBg` / 成功的 `toolSuccessBg` /
-	//      失败的 `toolErrorBg` 都不画 —— selfRenderContainer 是纯 Container，
-	//      `renderContainer instanceof Box` 为 false，bgFn 套不上去），
-	//   ② **没有上下边界空行与左右 padding**（都是那个 Box 画的）。
-	// 与 bash（bash-command-collapse.ts）/ read（read-path-collapse.ts）块同一套观感：
-	// 块上方只剩 pi self 模式固定的那一行留白（render() 里 `lines.push("")`），下方紧贴
-	// 下一条消息。renderCall / renderResult 返回的 Text 用 `new Text(…, 1, 0)`：
-	// **paddingX = 1** 补回默认壳 `Box(1, 1)` 原本提供的那一列左边距 —— 每行前置一个空格、
-	// 不顶格（用户 2026-09-26 定）；**paddingY = 0** 保持上下不留空行；无 bgFn，所以不包 Box。
+	// all three tools carry `renderShell: "self"`: pi stops wrapping the block in `contentBox`
+	// (tool-execution.js's `Box(1, 1, bgFn)`) — so
+	//   ① **no background** (pending's `toolPendingBg` / success's `toolSuccessBg` /
+	//      failure's `toolErrorBg` are all skipped — selfRenderContainer is a plain Container,
+	//      `renderContainer instanceof Box` is false, and bgFn cannot attach),
+	//   ② **no top/bottom border rows and no left/right padding** (all drawn by that Box).
+	// same look as the bash (bash-command-collapse.ts) / read (read-path-collapse.ts) blocks:
+	// above the block only pi self-mode's fixed blank row remains (`lines.push("")` in render()); below, it hugs
+	// the next message. The Text returned by renderCall / renderResult is `new Text(…, 1, 0)`:
+	// **paddingX = 1** restores the one-column left margin the default `Box(1, 1)` shell used to give — each line leads with a space,
+	// not flush-left (user 2026-09-26); **paddingY = 0** keeps no blank rows above/below; no bgFn, so no Box wrap.
 	pi.registerTool({
 		name: "task_set",
 		label: "Task Set",
@@ -231,7 +244,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			assertEnabled();
 			const raw = Array.isArray(params?.tasks) ? params.tasks : [];
-			// 只去空白与空串，不校验字数 —— pi-task-list 的 3–15 词限制经常误伤短标题。
+			// only whitespace and empty strings are filtered — no word-count validation; pi-task-list's 3–15-word rule keeps hurting short titles.
 			const texts = raw.map((item) => String(item).trim()).filter((text) => text.length > 0);
 
 			if (texts.length === 0) {
@@ -314,7 +327,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			);
 		},
 		renderResult(result, _options, theme) {
-			// content 元素可能是 ImageContent，必须先判别再取 text
+			// a content element may be ImageContent — its type must be checked before reading text
 			const first = result?.content?.[0];
 			const text =
 				first && "text" in first && typeof first.text === "string" ? first.text : "updated";
@@ -353,7 +366,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ── 命令 ──────────────────────────────────────────────────────────────
+	// ── Command ─────────────────────────────────────────────────────────────
 
 	async function handleTasksCommand(args: string, ctx: ExtensionContext): Promise<void> {
 		lastCtx = ctx;
@@ -373,7 +386,7 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		// 默认（含 "status" 与无参数）：打印当前清单
+		// the default (incl. "status" and no args): print the current list
 		if (!enabled) {
 			ctx.ui.notify("Task tracking is disabled. Use /tasks on to re-enable.", "info");
 			return;
@@ -395,14 +408,15 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => handleTasksCommand(args, ctx),
 	});
 
-	// ── 事件 ──────────────────────────────────────────────────────────────
+	// ── Events ──────────────────────────────────────────────────────────────
 
 	/**
-	 * 会话结束必须立刻停表 —— spinner 定时器会在会话结束后继续 tick，
-	 * 而那时 lastCtx 已被 pi 作废，读 ctx.ui 会抛。
-	 * docs/extensions.md 明确要求「注册一个幂等的 session_shutdown 处理器，
-	 * 关掉你启动的任何会话级资源」，这个 setInterval 就是那种资源。
-	 */
+ * The timer must stop the moment the session ends — the spinner timer would keep
+ * ticking past it, and by then lastCtx is dead: reading ctx.ui throws.
+ * docs/extensions.md explicitly asks to "register an idempotent session_shutdown
+ * handler that closes any session-scoped resource you started" — this setInterval is
+ * such a resource.
+ */
 	pi.on("session_shutdown", async () => {
 		stopTimer();
 	});
@@ -413,25 +427,25 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 		updateUi(ctx);
 	});
 
-	// 分支导航后必须重建：否则会把已丢弃分支上的状态复活
+	// after branch navigation the state must be rebuilt — a discarded branch's state would resurrect otherwise
 	pi.on("session_tree", async (_event, ctx) => {
 		reconstruct(ctx);
 		updateUi(ctx);
 	});
 
-	// 压缩时清掉已完成的列表，给下一批工作一个干净的起点
+	// on compaction, a fully-done list is cleared — the next batch of work starts clean
 	pi.on("session_before_compact", async (_event, ctx) => {
 		if (isComplete(state)) setState(emptyState(), ctx);
 	});
 
 	/**
-	 * 每轮开始前把当前清单塞进上下文（display: false，不进 TUI），
-	 * 这样模型知道哪些已完成、不必自己猜。
-	 *
-	 * Fix: Don't inject when all tasks are complete — completed state creates
-	 * a strong "everything is done" pattern that can overshadow new instructions
-	 * in the same turn, causing the model to summarize instead of acting.
-	 */
+ * Before each turn, inject the current list into the context (display: false —
+ * not shown in the TUI), so the model knows what is done and need not guess.
+ *
+ * Fix: Don't inject when all tasks are complete — completed state creates
+ * a strong "everything is done" pattern that can overshadow new instructions
+ * in the same turn, causing the model to summarize instead of acting.
+ */
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!enabled || !state.active || state.tasks.length === 0) return;
 		if (isComplete(state)) return;
