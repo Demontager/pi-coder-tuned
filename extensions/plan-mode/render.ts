@@ -1,23 +1,25 @@
 /**
- * plan-mode 的显示层文案：状态行。
+ * plan-mode's display layer: the statusline text.
  *
- * 不 import pi / pi-tui —— 颜色由主题的 `fg(slot, text)` 注入，所以 `node --test`
- * 能直接断言每条文案。
+ * Imports no pi / pi-tui — colors come through the injected `fg(slot, text)`, so `node --test`
+ * asserts each text directly.
  *
- * ## 为什么复用一个 `setStatus` key
+ * ## Why a single `setStatus` key
  *
- * 本机 statusline 扩展把其它扩展 `ctx.ui.setStatus()` 的文本拼成第二行（`formatExtensionStatuses`，
- * 最多 5 条、` | ` 分隔），所以这里的键数越少越好。两个态共用 `plan-mode` 一个键：
- * plan 给一份文案，bypass 直接 `undefined` 清掉，第二行不会留下空档。
+ * The local statusline extension splices other extensions' `ctx.ui.setStatus()` texts into a
+ * second row (`formatExtensionStatuses`, max 5, ` | ` separated) — the fewer keys the better.
+ * Both states share the `plan-mode` key: plan gets its text, bypass sends `undefined` to clear
+ * it, leaving no gap on the second row.
  *
- * 2026-09-24 删掉 execute 态之后**没有步骤 widget 了** —— 计划是一份 markdown，没有
- * 可逐条打勾的步骤；进度归模型自己（它要建任务清单就自己 `task_set`，那是 simple-task
- * 的 widget 该显示的事）。
+ * After the execute state was deleted on 2026-09-24 **there is no steps widget anymore** — a
+ * plan is a markdown document with no per-step checkboxes; progress belongs to the model (it
+ * calls `task_set` itself if it wants a task list — that is simple-task's widget's job).
  *
- * ## 配色
+ * ## Colors
  *
- * 状态行走 `warning`（与「等你拍板」的语义一致），写文档子态走 `accent`，
- * 都取自三套主题都有的语义槽，不写死色值。
+ * The status row uses `warning` (matching the "waiting for your call" semantics), the
+ * doc-writing sub-state uses `accent` — both semantic slots present in all three themes; no
+ * hard-coded color values.
  */
 
 import type { PlanPhase } from "./plan.ts";
@@ -30,21 +32,22 @@ export interface PlanTheme {
 
 export interface PlanStatusSource {
 	phase: PlanPhase;
-	/** plan 态：模型已提交、等用户审批。 */
+	/** plan state: the model has submitted, awaiting user approval. */
 	pending?: string;
-	/** plan 态：写文档子态。 */
+	/** plan state: the doc-writing sub-state. */
 	docWriting?: boolean;
 }
 
 /**
- * statusline 第二行的那段文本。**两个态都有文案** —— bypass 也要显示，
- * 让「当前处于哪个模式」永远有个固定的显示位（这一格原先归 simple-task 的
- * `✔ n/N`，它与输入框上方的 widget 重复，已让给模式指示）。
+ * The text for statusline's second row. **Both states have text** — bypass shows too, so
+ * "which mode am I in" always has a fixed display slot (this cell used to belong to
+ * simple-task's `✔ n/N`, which duplicated the widget above the editor — it was yielded to
+ * the mode indicator).
  *
- *   ⏵ bypass                  普通模式（全权限）
- *   ⏸ plan                    等待模型提交计划
- *   ⏸ plan · 待批准            已提交、等用户审批
- *   ⏸ plan · 写文档中          写文档子态（模型正在把计划落成文件）
+ *   ⏵ bypass                  normal mode (full access)
+ *   ⏸ plan                    waiting for the model to submit a plan
+ *   ⏸ plan · awaiting approval  submitted, awaiting user approval
+ *   ⏸ plan · writing doc        doc-writing sub-state (model turning the plan into a file)
  */
 export function formatPlanStatus(theme: PlanTheme, source: PlanStatusSource): string {
 	if (source.phase === "plan") {
@@ -55,9 +58,9 @@ export function formatPlanStatus(theme: PlanTheme, source: PlanStatusSource): st
 		if (source.pending) return `${label} ${theme.fg("warning", "plan")} ${theme.fg("muted", "· awaiting approval")}`;
 		return `${label} ${theme.fg("warning", "plan")}`;
 	}
-	// bypass：用 `toolDiffRemoved`（删除行前景色）而不是 `dim` —— 那个槽在三套皮肤里
-	// 都解析成红色（ayu #D95757 / catppuccin #F38BA8 / summer-night #e27878），
-	// 让「全权限」这个态一眼可见：未开启保护，而不是「什么都没开」。
-	// 注意 **plan 的配色不变**（warning），那一态才是要读仔细的。
+	// bypass: `toolDiffRemoved` (the deleted-line foreground) instead of `dim` — that slot resolves to red in all three skins
+	// (ayu #D95757 / catppuccin #F38BA8 / summer-night #e27878), making "full access" instantly visible: protection off,
+	// not "nothing enabled".
+	// note **plan's color is unchanged** (warning) — that is the state to read carefully.
 	return `${theme.fg("toolDiffRemoved", "⏵")} ${theme.fg("toolDiffRemoved", "bypass")}`;
 }

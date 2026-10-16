@@ -1,64 +1,78 @@
 /**
- * plan-mode 的纯逻辑层：三态状态机 + plan 阶段的 bash 写操作判定。
+ * plan-mode's pure logic layer: the two-state state machine + the bash write judgment during
+ * plan phase.
  *
- * 不 import pi / pi-tui，所以 `node --test clients/pi/extensions/plan-mode/plan.test.ts`
- * 能直接跑到每个分支。
+ * Imports no pi / pi-tui, so `node --test clients/pi/extensions/plan-mode/plan.test.ts` covers
+ * every branch directly.
  *
- * ## 状态机（两态，与 Claude Code 对齐）
+ * ## The state machine (two states, aligned with Claude Code)
  *
- *   bypass ──shift+tab / enter_plan_mode──▶ plan ──exit_plan_mode + 用户批准──▶ 写文档子态 ──▶ bypass
- *     ▲                                     │                                        │
- *     └──────────── 用户打回 / shift+tab ────┘◀───────────── 打回（留在 plan）─────────┘
+ *   bypass ──shift+tab / enter_plan_mode──▶ plan ──exit_plan_mode + approval──▶ doc-writing ──▶ bypass
+ *     ▲                                     │                                       │
+ *     └──────────── request changes / shift+tab ────┘◀──────────── reject (stay in plan) ─────┘
  *
- * **没有 execute 态**：批准之后写权限恢复、状态直接回 bypass，「按计划文档实施」是一次性
- * 交给模型的指令（工具结果里），不是扩展持有的一个阶段。进度也交还给模型 —— 它认为该建
- * 任务清单就自己 `task_set`，扩展不再镜像步骤、不再记 `[DONE:n]`（2026-09-24 改，理由见
- * README 的 plan mode 一节）。
+ * **There is no execute state**: after approval write access is restored and the state goes
+ * straight back to bypass — "implement per the plan document" is a one-shot instruction
+ * handed to the model (in the tool result), not a phase the extension holds. Progress goes
+ * back to the model too — it calls `task_set` itself if it wants a task list; the extension
+ * no longer mirrors steps or tracks `[DONE:n]` (changed 2026-09-24; rationale in README's
+ * plan-mode section).
  *
- * plan 态里有一个**写文档子态**（`docWriting`）：用户在审批框里选了带文档的路线时进入。
- * 它刻意**不是第三个 phase** —— phase 仍是 `plan`，所以 bash 写拦截、工具收拢、
- * `exit_plan_mode` 的入口判定全部照常生效；唯一的区别是每轮注入的上下文换成写文档指令，
- * 而 `write` 工具被单独放回来（`planModeToolSet(active, true)`），并由 `tool_call` 钩子
- * 限死只能写计划文档那一个路径。文档写出来（`tool_result` 钩子看到 write 成功）即收尾：
- * 回 bypass、还原工具表，收尾指令按 `docMode` 分流 —— `execute-with-doc` 让模型接着实施，
- * `doc-only` 让它只报告文档路径就停。
+ * Inside plan there is a **doc-writing sub-state** (`docWriting`), entered when the user
+ * picks a with-document route in the approval box. It is deliberately **not a third phase** —
+ * the phase stays `plan`, so bash write interception, tool shrinkage, and `exit_plan_mode`'s
+ * entry check all keep working; the only differences are that the per-round injected context
+ * switches to the doc-writing instruction and `write` alone returns to the tool table
+ * (`planModeToolSet(active, true)`), pinned by the `tool_call` hook to the plan document's
+ * one path. When the document is written (the `tool_result` hook sees the write succeed), it
+ * wraps up: back to bypass, tool set restored, and the wrap-up instruction splits by
+ * `docMode` — `execute-with-doc` tells the model to implement, `doc-only` to report the
+ * document path and stop.
  *
- * plan 阶段进入时对 `pi.getActiveTools()` 做一次快照，退出时**原样还原**：本机 pi 的
- * 工具表里有二十多个扩展动态注册的工具（mcp / ask_user_question / task_set / task_update …），
- * 硬编码白名单会把它们全吃掉（官方 plan-mode 示例就是那么写的，所以这里没照抄）。
+ * Entering plan snapshots `pi.getActiveTools()`; exiting **restores it verbatim**: the local
+ * pi's tool table carries twenty-plus dynamically registered extension tools (mcp /
+ * ask_user_question / task_set / task_update …), and a hardcoded whitelist would eat them all
+ * (that is exactly what the official plan-mode example does — deliberately not copied).
  *
- * ## bash 判定
+ * ## The bash judgment
  *
- * 判定「这条命令会不会改工作区」，粒度是**简单命令** —— 用 `;` `&` `|` `&&` `||` `(` `)`
- * 和换行切开，所以 `cat a.txt && rm -rf b` 会被 rm 那一段拦住，而不是被 `cat` 那一段放过。
- * 识别四类写操作：
+ * Judging "would this command change the workspace", at **simple-command** granularity —
+ * split on `;` `&` `|` `&&` `||` `(` `)` and newlines, so `cat a.txt && rm -rf b` is stopped
+ * by the rm segment, not waved through by the cat. Four classes of writes are recognized:
  *
- *   1. 写重定向：`>` / `>>`（`2> f` 的 fd 前缀不算参数、`2>&1` 这种 fd 复制不算写入）
- *   2. 写命令：rm / mv / cp / sed -i / tee / dd / git commit / npm install / sudo …
- *   3. 全局危险参数：`--fix` / `--write` / `--in-place`（eslint --fix、prettier --write …）
- *   4. heredoc 正文先剥掉再判，免得「读一个 heredoc」里顺带出现的一句写命令被误判
+ *   1. write redirects: `>` / `>>` (an fd prefix like `2> f` is not an arg; an fd dup like
+ *      `2>&1` is not a write)
+ *   2. write commands: rm / mv / cp / sed -i / tee / dd / git commit / npm install / sudo …
+ *   3. global dangerous flags: `--fix` / `--write` / `--in-place` (eslint --fix,
+ *      prettier --write …)
+ *   4. heredoc bodies are stripped before judging, so a write command inside "read a heredoc"
+ *      is not misjudged
  *
- * **这是给配合的模型用的护栏，不是沙箱。** 模型被明确告知 plan 阶段不能改动代码，这里
- * 只负责拦下它顺手打出的写操作并把原因回给它（错误结果就是模型的反馈）。要真正防住
- * 恶意写入得靠操作系统级沙箱，不在这个扩展的范围内。两个已知的漏网形状：双引号内的
- * `$(...)` 命令替换、以及 `npm run <script>` 这类由脚本内容决定副作用的命令 —— 都是
- * 刻意放行的（宁可放行也不要把正常探索全部拦死）。
+ * **This is a guardrail for a cooperating model, not a sandbox.** The model is explicitly
+ * told it cannot change code during plan; this layer only catches the writes it casually
+ * issues and hands the reason back (the error result is the model's feedback). Really
+ * stopping hostile writes needs an OS-level sandbox — out of this extension's scope. Two
+ * known leak shapes: `$(...)` substitution inside double quotes, and commands like
+ * `npm run <script>` whose side effects depend on the script — both deliberately let through
+ * (better to let through than to block all normal exploration).
  */
 
 // =============================================================================
-// 工具集
+// Tool set
 // =============================================================================
 
-/** pi 的写工具（`powershell` 是 bash 在 Windows 侧的等价物）。 */
+/** pi's write tools (`powershell` is bash's Windows-side equivalent). */
 export const WRITE_TOOLS = ["edit", "write", "powershell"] as const;
 
 /**
- * plan 阶段的活动工具：摘掉写工具，**其余原样保留**。
- * 顺序与去重都保持 pi 自己的口径，避免把动态注册的工具漏掉或重复。
+ * The active tools during plan: write tools removed, **everything else kept verbatim**.
+ * Order and dedupe follow pi's own convention so dynamically registered tools are neither
+ * lost nor duplicated.
  *
- * `allowWrite` 是写文档子态的开关：那时模型需要 `write` 把计划落成文件，但 `edit`
- * （改现有代码）与 `powershell`（另一个写口子）仍然摘着。放开的那一个 `write` 由
- * `tool_call` 钩子再限一道：只许写计划文档那个路径。
+ * `allowWrite` is the doc-writing sub-state's switch: the model then needs `write` to put
+ * the plan into a file, but `edit` (modifying existing code) and `powershell` (another
+ * write channel) stay removed. The one `write` let back is pinned once more by the
+ * `tool_call` hook: only the plan document's path is writable.
  */
 export function planModeToolSet(activeTools: readonly string[], allowWrite = false): string[] {
 	const hidden = new Set<string>(WRITE_TOOLS);
@@ -67,47 +81,55 @@ export function planModeToolSet(activeTools: readonly string[], allowWrite = fal
 }
 
 // =============================================================================
-// 状态机
+// State machine
 // =============================================================================
 
 export type PlanPhase = "bypass" | "plan";
 
 /**
- * 用户在审批对话框里选的路线（两条都写文档，区别只在写完要不要接着实施）。
- *   - execute-with-doc：写计划文档，然后按文档实施
- *   - doc-only：只写计划文档，不实施
+ * The route the user picked in the approval dialog (both write a document; the difference is
+ * whether implementation follows).
+ *   - execute-with-doc: write the plan document, then implement per it
+ *   - doc-only: write the plan document only, do not implement
  */
 export type PlanDocMode = "execute-with-doc" | "doc-only";
 
 export interface PlanState {
 	phase: PlanPhase;
-	/** plan 阶段：进入前的活动工具快照，退出时原样还原。 */
+	/** plan phase: the pre-entry active-tool snapshot, restored verbatim on exit. */
 	toolsBeforePlan?: string[];
 	/**
-	 * plan 阶段：模型通过 `exit_plan_mode` 提交上来、等用户审批的计划全文（markdown）。
-	 * 与 Claude Code 的 `ExitPlanMode(plan)` 同形 —— 不再是一串结构化步骤：步骤化是
-	 * 「扩展持有进度」时代的产物，进度交还模型之后它只剩展示与生成文件名两个用途。
-	 */
+ * plan phase: the full plan text (markdown) the model submitted via `exit_plan_mode`,
+ * awaiting user approval.
+ * Same shape as Claude Code's `ExitPlanMode(plan)` — no longer a list of structured steps:
+ * step-ification belonged to the "extension holds progress" era; with progress handed back
+ * to the model it only serves display and filename generation.
+ */
 	pending?: string;
-	/** 用户选了哪条路线（文档写完前记住它，收尾指令据此分流）。 */
+	/** Which route the user chose (remembered until the document is written — the wrap-up instruction splits on it). */
 	docMode?: PlanDocMode;
 	/**
-	 * 写文档子态：模型正在把计划落成文档。
-	 * phase 仍是 "plan"（bash 写拦截、工具收拢全部照常），这个布尔是唯一的区分信号：
-	 * 每轮注入的上下文从只读探索换成写文档指令，`write` 被单独放回来。
-	 */
+ * Doc-writing sub-state: the model is turning the plan into a document.
+ * The phase stays "plan" (bash write interception and tool shrinkage all keep working); this
+ * boolean is the only distinguishing signal — the per-round context switches from read-only
+ * exploration to the doc-writing instruction, and `write` comes back alone.
+ */
 	docWriting?: boolean;
 	/**
-	 * 写文档子态的目标路径：用户选路线的那一刻算好并落盘。
-	 * 不能每次注入时重算 —— 撞名判定问的是文件系统，`/resume` 后重算可能得到不同的
-	 * `-2` 后缀，模型就会往另一个文件写。算一次、钉死在状态里才是对的。
-	 */
+ * The doc-writing sub-state's target path: computed and persisted at the moment the user
+ * picks a route.
+ * It cannot be recomputed on every injection — the collision check asks the filesystem, and
+ * after `/resume` a recompute could yield a different `-2` suffix, then the model would
+ * write a different file. Compute once, pin it in the state.
+ */
 	pendingDocPath?: string;
 	/**
-	 * 本次提交的 `summary`（模型给的一句话总结）。
-	 * 两个用途：写文档指令里的「方案总结」一行，以及模型漏传 `slug` 时的文档名兜底。
-	 * 跟着落盘：写文档子态里 `/resume` 之后还要靠它算出同一个路径。
-	 */
+ * This submission's `summary` (the model's one-line summary).
+ * Two uses: the "plan summary" line in the doc-writing instruction, and the doc-name fallback
+ * when the model forgets `slug`.
+ * Persisted: inside the doc-writing sub-state, after `/resume`, it is still needed to
+ * recompute the same path.
+ */
 	planSummary?: string;
 }
 
@@ -116,9 +138,10 @@ export function initialPlanState(): PlanState {
 }
 
 /**
- * 进 plan 模式。已在 plan 里则原样返回（不覆盖工具快照）。
- * 文档相关的字段一并清掉：上一次计划留下的 docMode / docWriting / pendingDocPath /
- * pending 对新计划没有意义（docWriting 若残留，新一轮会直接注入写文档指令）。
+ * Enter plan mode. Already in plan → return unchanged (do not overwrite the tool snapshot).
+ * Doc-related fields are cleared too: a previous plan's docMode / docWriting / pendingDocPath
+ * / pending mean nothing to a new plan (a leftover docWriting would inject the doc-writing
+ * instruction straight into the new round).
  */
 export function enterPlan(state: PlanState, activeTools: readonly string[]): PlanState {
 	if (state.phase === "plan") return state;
@@ -133,7 +156,7 @@ export function enterPlan(state: PlanState, activeTools: readonly string[]): Pla
 	};
 }
 
-/** 退出 plan 模式回到 bypass，工具快照随之清空（还原动作由调用方执行）。 */
+/** Leave plan mode for bypass; the tool snapshot clears with it (the restore itself is the caller's job). */
 export function cancelPlan(state: PlanState): PlanState {
 	return {
 		phase: "bypass",
@@ -146,7 +169,7 @@ export function cancelPlan(state: PlanState): PlanState {
 	};
 }
 
-/** 模型通过 exit_plan_mode 提交计划全文，等用户审批。 */
+/** The model submits the full plan via exit_plan_mode; it awaits user approval. */
 export function submitPlan(state: PlanState, plan: string, summary?: string): PlanState {
 	if (state.phase !== "plan") return state;
 	const trimmedSummary = typeof summary === "string" ? summary.trim() : "";
@@ -158,9 +181,11 @@ export function submitPlan(state: PlanState, plan: string, summary?: string): Pl
 }
 
 /**
- * 用户打回：**留在 plan**（不是回 bypass），继续等模型改方案。
- * 工具快照留着 —— 下一轮 `exit_plan_mode` 覆盖 pending 即可。
- * 写文档子态的标记一并清掉：打回等于这次提交（含路线选择）作废。
+ * User rejection: **stays in plan** (not back to bypass), waiting for the model's revised
+ * plan.
+ * The tool snapshot is kept — the next `exit_plan_mode` just overwrites pending.
+ * Doc-writing sub-state flags are cleared: a rejection voids this submission (incl. the route
+ * choice).
  */
 export function rejectPlan(state: PlanState): PlanState {
 	if (state.phase !== "plan") return state;
@@ -168,9 +193,11 @@ export function rejectPlan(state: PlanState): PlanState {
 }
 
 /**
- * 进写文档子态：phase 留在 "plan"（bash 写拦截与工具收拢全靠它），只翻 docWriting
- * 开关并记住用户选的路线与目标路径。pending 与工具快照原样保留 —— 文档写完后还要按
- * 路线分流收尾。已在子态里则原样返回（幂等，不覆盖已钉死的路径）。
+ * Enter the doc-writing sub-state: the phase stays "plan" (bash write interception and tool
+ * shrinkage depend on it); only the docWriting flag flips and the chosen route + target path
+ * are remembered. pending and the tool snapshot stay untouched — routing the wrap-up still
+ * needs them. Already inside → return unchanged (idempotent; does not overwrite the pinned
+ * path).
  */
 export function enterDocWriting(state: PlanState, docMode: PlanDocMode, docPath: string): PlanState {
 	if (state.phase !== "plan") return state;
@@ -179,21 +206,23 @@ export function enterDocWriting(state: PlanState, docMode: PlanDocMode, docPath:
 }
 
 export interface DocWriteOutcome {
-	/** 收尾后的状态：phase 回到 bypass，文档字段清空。 */
+	/** The state after wrap-up: phase back to bypass, document fields cleared. */
 	state: PlanState;
-	/** 用户选的路线，收尾指令据此分流。 */
+	/** The route the user chose — the wrap-up instruction splits on it. */
 	docMode: PlanDocMode;
-	/** 计划文档的路径（收尾指令里要报给用户与模型）。 */
+	/** The plan document's path (the wrap-up instruction reports it to user and model). */
 	docPath: string;
 }
 
 /**
- * 写文档子态收尾：计划文档已经落盘（由调用方验过），状态回 bypass。
+ * Doc-writing wrap-up: the plan document has landed (verified by the caller); state returns
+ * to bypass.
  *
- * 不在子态里（docWriting 为假）返回 undefined —— 那不是收尾。
+ * Outside the sub-state (docWriting falsy) returns undefined — that is not a wrap-up.
  *
- * **工具表的还原由调用方在拿到返回值之前做**：还原要用的是旧状态里的 `toolsBeforePlan`
- * 快照，而返回的新状态已经把它清掉了（与 `cancelPlan` 同一条口径）。
+ * **The caller restores the tool set before using the return value**: the restore needs the
+ * `toolsBeforePlan` snapshot from the old state, and the new state has already cleared it
+ * (same convention as `cancelPlan`).
  */
 export function completeDocWrite(state: PlanState): DocWriteOutcome | undefined {
 	if (state.phase !== "plan" || !state.docWriting) return undefined;
@@ -207,32 +236,34 @@ export function completeDocWrite(state: PlanState): DocWriteOutcome | undefined 
 }
 
 /**
- * 退出 plan 时要还原的工具集：优先用进入时的快照，没有快照就退回当前活动工具
- * （`--tools` 在会话中途被改过时，尊重新的加载结果比还原旧快照更合理）。
+ * The tool set to restore on plan exit: the entry snapshot preferred; absent → fall back to
+ * the current active tools (when `--tools` was changed mid-session, honoring the new load
+ * result beats restoring a stale snapshot).
  */
 export function restoredToolSet(state: PlanState, activeTools: readonly string[]): string[] {
 	return state.toolsBeforePlan ? [...state.toolsBeforePlan] : [...activeTools];
 }
 
 // =============================================================================
-// bash 判定
+// The bash judgment
 // =============================================================================
 
 export interface BashVerdict {
 	ok: boolean;
-	/** 被拒的原因，会作为工具错误结果回给模型。 */
+	/** The refusal reason, returned to the model as a tool-error result. */
 	reason?: string;
 }
 
-/** 一个简单命令：命令词 + 参数，以及它写到磁盘的重定向目标。 */
+/** One simple command: command word + args, plus the redirect targets it writes to disk. */
 interface SimpleCommand {
 	words: string[];
 	writes: string[];
 }
 
 /**
- * 写完磁盘的命令词。只列**明确会改工作区**的；`npm run` / `make` 这类副作用取决于
- * 脚本内容的命令刻意不列（见文件头注释的取舍说明）。
+ * Command words that write to disk. Only **definite workspace-changers** are listed;
+ * `npm run` / `make`-style commands whose side effects depend on script content are
+ * deliberately not listed (see the file header's trade-off).
  */
 const WRITE_COMMANDS = new Set([
 	"rm",
@@ -272,7 +303,7 @@ const WRITE_COMMANDS = new Set([
 	"make",
 ]);
 
-/** `git` 的写子命令；`git status/log/diff/show/branch -a` 等读操作不在表里。 */
+/** `git`'s write subcommands; reads like `git status/log/diff/show/branch -a` are not listed. */
 const GIT_WRITE_SUBCOMMANDS = new Set([
 	"add",
 	"commit",
@@ -303,7 +334,7 @@ const GIT_WRITE_SUBCOMMANDS = new Set([
 	"submodule",
 ]);
 
-/** 包管理器的写子命令。 */
+/** Package managers' write subcommands. */
 const PACKAGE_MANAGERS = new Set(["npm", "yarn", "pnpm", "bun", "pip", "pip3", "poetry", "gem", "cargo", "go", "composer", "brew"]);
 const PACKAGE_WRITE_SUBCOMMANDS = new Set([
 	"install",
@@ -321,15 +352,16 @@ const PACKAGE_WRITE_SUBCOMMANDS = new Set([
 	"dlv",
 ]);
 
-/** 系统包管理器：几乎每个子命令都会改系统。 */
+/** System package managers: nearly every subcommand modifies the system. */
 const SYSTEM_PACKAGE_MANAGERS = new Set(["apt", "apt-get", "dnf", "yum", "apk", "pacman", "port", "macports"]);
 
-/** 任何命令带上这些参数都算写操作。 */
+/** Any command carrying one of these flags counts as a write. */
 const WRITE_FLAGS = new Set(["--fix", "--write", "--in-place", "--replace"]);
 
 /**
- * 写了也不算改工作区的目标：`cmd 2>/dev/null` 是模型的口头禅，拦它纯属噪音。
- * 只列真正的黑洞设备，任何真实路径（包括 `/tmp/x`）都不在内。
+ * Targets that do not count as changing the workspace when written: `cmd 2>/dev/null` is a
+ * model mannerism — blocking it is pure noise.
+ * Only true black-hole devices are listed; no real path (not even `/tmp/x`) is in here.
  */
 const HARMLESS_WRITE_TARGETS = new Set([
 	"/dev/null",
@@ -340,12 +372,13 @@ const HARMLESS_WRITE_TARGETS = new Set([
 	"nul",
 ]);
 
-/** 会被当作透明前缀跳过的包装命令（`sudo -u root rm -rf x` 的 `rm` 也要认出来）。 */
+/** Wrapper commands skipped as transparent prefixes (`sudo -u root rm -rf x` must still recognize the `rm`). */
 const WRAPPER_COMMANDS = new Set(["env", "command", "nohup", "time", "nice", "xargs", "builtin", "exec"]);
 
 /**
- * 判断一条 bash 命令在 plan 阶段是否允许执行。
- * 返回 `{ ok: false, reason }` 时调用方应把 reason 作为工具错误结果回给模型。
+ * Whether a bash command is allowed during plan phase.
+ * On `{ ok: false, reason }` the caller should return `reason` to the model as a tool-error
+ * result.
  */
 export function inspectBashCommand(command: string): BashVerdict {
 	const scanned = stripHeredocBodies(command);
@@ -377,7 +410,7 @@ function inspectSimpleCommand(simple: SimpleCommand): BashVerdict {
 			}
 			return blocked(`Command \`${head} ${action}\``);
 		}
-		// `make --dry-run` / `-n` 只打印要跑什么，不改任何东西
+		// `make --dry-run` / `-n` only prints what it would run — changes nothing
 		if (head === "make" && args.some((arg) => arg === "--dry-run" || arg === "--just-print" || arg === "-n")) {
 			return { ok: true };
 		}
@@ -387,7 +420,7 @@ function inspectSimpleCommand(simple: SimpleCommand): BashVerdict {
 	if (head === "git") {
 		const sub = args.find((arg) => !arg.startsWith("-"));
 		if (!sub || !GIT_WRITE_SUBCOMMANDS.has(sub)) return { ok: true };
-		// `git branch -a` / `git config --get` 是读操作，明确放行；没带这些开关的写子命令不在 git 的写表里。
+		// `git branch -a` / `git config --get` are reads and pass explicitly; a write subcommand without those switches lands on git's write list.
 		return blocked(`Command \`git ${sub}\``);
 	}
 
@@ -399,24 +432,24 @@ function inspectSimpleCommand(simple: SimpleCommand): BashVerdict {
 
 	if (SYSTEM_PACKAGE_MANAGERS.has(head)) return blocked(`Command \`${head}\``);
 
-	// `sed` / `perl` / `awk` 只在带原地编辑开关时算写
+	// `sed` / `perl` / `awk` count as writes only with an in-place-edit switch
 	if (head === "sed" || head === "perl") {
 		if (args.some((arg) => arg === "-i" || arg.startsWith("-i.") || arg === "--in-place")) {
 			return blocked(`Command \`${head} -i\``);
 		}
 	}
 
-	// `find … -delete` / `-exec rm` 这类写操作挂在参数上
+	// `find … -delete` / `-exec rm`-style writes hang on the arguments
 	if (head === "find" && args.some((arg) => arg === "-delete" || arg === "-exec" || arg === "-execdir")) {
 		return blocked("Command `find` has a write action (-delete / -exec)");
 	}
 
-	// `truncate` 之类已在上表；这里兜住 `>| file` 之外的少见形状不额外处理。
+	// `truncate` and friends are already in the list; rarer shapes beyond `>| file` get no extra handling.
 
 	return { ok: true };
 }
 
-/** 跳过 `FOO=bar` 赋值与 `env`/`sudo` 之类包装命令，拿到真正的命令词与它的参数。 */
+/** Skip `FOO=bar` assignments and `env`/`sudo`-style wrappers to reach the real command word and its args. */
 function unwrap(words: readonly string[]): { head: string; args: string[] } {
 	let index = 0;
 	while (index < words.length) {
@@ -425,7 +458,7 @@ function unwrap(words: readonly string[]): { head: string; args: string[] } {
 			index += 1;
 			continue;
 		}
-		// 包装命令自己的开关（`nice -n 10 rm`）跳过
+		// the wrapper's own switches (`nice -n 10 rm`) are skipped
 		if (word.startsWith("-")) {
 			index += 1;
 			continue;
@@ -445,11 +478,12 @@ function quote(text: string): string {
 }
 
 /**
- * 按 shell 的简单命令边界切开，并做引号 / 转义感知。
+ * Split on shell simple-command boundaries, quote/escape aware.
  *
- * 已知取舍：双引号内的 `$(...)` 命令替换被当成普通文本（不切开），因为常见的
- * `echo "…" > file` 里 `>` 在引号外、已经被写重定向那条规则拦住了，为了它把引号内
- * 也拆开只会引入更多误判。
+ * Known trade-off: `$(...)` substitution inside double quotes is treated as plain text (not
+ * split), because the common `echo "…" > file` has its `>` outside the quotes — already
+ * caught by the write-redirect rule — and splitting inside quotes would only add false
+ * positives.
  */
 export function splitSimpleCommands(command: string): SimpleCommand[] {
 	const segments: SimpleCommand[] = [];
@@ -458,16 +492,16 @@ export function splitSimpleCommands(command: string): SimpleCommand[] {
 	let token = "";
 	let hasToken = false;
 	let quote: '"' | "'" | null = null;
-	/** 刚扫到的重定向：下一个词是它的目标，不是普通参数。 */
+	/** The redirect just scanned: the next word is its target, not an ordinary arg. */
 	let redirect: "write" | "read" | "dup" | null = null;
 
-	// 只有真的推出去一个词才清掉「等重定向目标」的状态：`>  out.txt` 这种
-	// 运算符与目标之间有空格时，空格处的 pushToken() 不能把状态提前清掉。
+	// only a really-emitted word may clear the "waiting for a redirect target" state: for `>  out.txt`,
+	// where spaces sit between the operator and the target, pushToken() at the space must not clear it early.
 	const pushToken = () => {
 		if (!hasToken) return;
 		if (redirect === "write") writes.push(token);
 		else if (redirect === null) words.push(token);
-		// read / dup 的目标既不是参数也不是写入
+		// a read / dup target is neither an arg nor a write
 		token = "";
 		hasToken = false;
 		redirect = null;
@@ -529,7 +563,7 @@ export function splitSimpleCommands(command: string): SimpleCommand[] {
 			continue;
 		}
 		if (char === ">" || char === "<") {
-			// `2> f` 的数字前缀是文件描述符，不是命令词
+			// the digit prefix of `2> f` is a file descriptor, not a command word
 			if (hasToken && /^\d+$/.test(token)) {
 				token = "";
 				hasToken = false;
@@ -550,8 +584,10 @@ export function splitSimpleCommands(command: string): SimpleCommand[] {
 }
 
 /**
- * 把 heredoc 正文换成空行（保留行结构），免得「读一段脚本」里的写命令被当成真的要执行。
- * 找不到结束分隔符时**原样返回**：宁可保留正文继续扫（偏保守），也不要因为解析不全而漏判。
+ * Replace heredoc bodies with blank lines (line structure preserved), so a write command
+ * inside "read a script" is not judged as real execution.
+ * No closing delimiter → **return as-is**: better to keep the body and keep scanning
+ * (conservative) than to misjudge from an incomplete parse.
  */
 export function stripHeredocBodies(command: string): string {
 	const lines = command.split("\n");
@@ -571,7 +607,7 @@ export function stripHeredocBodies(command: string): string {
 			if (body.trimEnd() === delimiter) break;
 			kept.push("");
 		}
-		if (end >= lines.length) return command; // 没有结束符：整段原样返回
+		if (end >= lines.length) return command; // no terminator: return the whole thing verbatim
 		kept.push(lines[end]!);
 		index = end;
 	}
@@ -579,7 +615,7 @@ export function stripHeredocBodies(command: string): string {
 	return kept.join("\n");
 }
 
-/** 在一行里找 `<<DELIM` / `<<-DELIM` / `<<'DELIM'`，返回分隔符。 */
+/** Find `<<DELIM` / `<<-DELIM` / `<<'DELIM'` in a line and return the delimiter. */
 function findHeredoc(line: string): { delimiter: string; stripTabs: boolean } | undefined {
 	let quote: '"' | "'" | null = null;
 	for (let index = 0; index < line.length; index += 1) {
@@ -594,7 +630,7 @@ function findHeredoc(line: string): { delimiter: string; stripTabs: boolean } | 
 		}
 		if (char !== "<" || line[index + 1] !== "<") continue;
 		if (line[index + 2] === "<") {
-			index += 2; // here-string：没有正文
+			index += 2; // here-string: no body
 			continue;
 		}
 		let cursor = index + 2;

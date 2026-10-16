@@ -1,11 +1,12 @@
 /**
- * Tests for plan.ts — plan-mode 的两态状态机与 bash 写操作判定。
+ * Tests for plan.ts — plan-mode's two-state machine and bash write judgment.
  *
  * Run with:  node --test clients/pi/extensions/plan-mode/plan.test.ts
  *
- * plan.ts 不 import pi / pi-tui，所以这里全部是纯输入输出断言。bash 判定表按
- * 「读操作放行 / 写操作拦住」两类各钉一组真实命令；拦截用例断言的是 `ok === false`，
- * 不断言文案原文（文案会随开发调整，形状在最后一个用例里单独钉一次）。
+ * plan.ts imports no pi / pi-tui, so this file is all pure input/output assertions. The bash
+ * judgment table pins two groups of real commands — "reads pass / writes blocked"; block cases
+ * assert `ok === false`, never the message text verbatim (wording evolves; the shape is pinned
+ * once in the last case).
  */
 
 import assert from "node:assert/strict";
@@ -26,48 +27,48 @@ import {
 } from "./plan.ts";
 
 // =============================================================================
-// 状态机
+// State machine
 // =============================================================================
 
 const ALL_TOOLS = ["read", "bash", "edit", "write", "grep", "ls", "ask_user_question", "task_set", "mcp__wechat-local__status"];
 
-describe("工具集", () => {
-	it("plan 阶段摘掉写工具，其余动态注册的工具一个不动", () => {
+describe("tool set", () => {
+	it("plan removes the write tools; every other dynamically registered tool is untouched", () => {
 		const tools = planModeToolSet(ALL_TOOLS);
 		assert.ok(!tools.includes("edit"));
 		assert.ok(!tools.includes("write"));
 		assert.deepEqual(tools, ["read", "bash", "grep", "ls", "ask_user_question", "task_set", "mcp__wechat-local__status"]);
 	});
 
-	it("不碰只读工具与扩展注册的工具（powershell 也一样摘掉）", () => {
+	it("read-only tools and extension-registered tools are untouched (powershell is removed like the rest)", () => {
 		assert.deepEqual(planModeToolSet(["read", "powershell", "recap"]), ["read", "recap"]);
 	});
 
-	it("去重保持 pi 自己的顺序", () => {
+	it("dedupe keeps pi's own order", () => {
 		assert.deepEqual(planModeToolSet(["read", "read", "write"]), ["read"]);
 	});
 
-	it("写文档子态单独放回 write，edit / powershell 仍摘着", () => {
+	it("the doc-writing sub-state restores write alone — edit / powershell stay removed", () => {
 		const tools = planModeToolSet(ALL_TOOLS, true);
-		assert.ok(tools.includes("write"), "子态需要 write 把计划落成文件");
+		assert.ok(tools.includes("write"), "the sub-state needs write to put the plan into a file");
 		assert.ok(!tools.includes("edit"));
 		assert.ok(!tools.includes("powershell"));
 	});
 
-	it("退出时优先还原进入前的快照", () => {
+	it("exit restores the pre-entry snapshot first", () => {
 		const state = enterPlan(initialPlanState(), ALL_TOOLS);
 		assert.deepEqual(restoredToolSet(state, ["read", "bash"]), ALL_TOOLS);
 	});
 
-	it("没有快照时退回当前活动工具（会话中途换过 --tools）", () => {
+	it("with no snapshot it falls back to the current active tools (--tools changed mid-session)", () => {
 		assert.deepEqual(restoredToolSet(initialPlanState(), ["read", "bash"]), ["read", "bash"]);
 	});
 });
 
-describe("状态迁移", () => {
-	const PLAN = "# 方案\n\n## 总结\n改两个文件。";
+describe("state transitions", () => {
+	const PLAN = "# Plan\n\n## Summary\nChange two files.";
 
-	it("enterPlan 记下快照并清空上一次计划的痕迹", () => {
+	it("enterPlan records the snapshot and clears the previous plan's traces", () => {
 		const state = enterPlan(initialPlanState(), ALL_TOOLS);
 		assert.equal(state.phase, "plan");
 		assert.deepEqual(state.toolsBeforePlan, ALL_TOOLS);
@@ -76,39 +77,39 @@ describe("状态迁移", () => {
 		assert.equal(state.docWriting, undefined);
 	});
 
-	it("重复 enterPlan 不覆盖快照", () => {
+	it("a repeated enterPlan does not overwrite the snapshot", () => {
 		const once = enterPlan(initialPlanState(), ["read", "edit"]);
 		const twice = enterPlan(once, ["read"]);
 		assert.deepEqual(twice.toolsBeforePlan, ["read", "edit"]);
 	});
 
-	it("enterPlan 清掉上一次留下的 docWriting（否则新一轮直接注入写文档指令）", () => {
+	it("enterPlan clears a leftover docWriting (or the new round would inject the doc-writing instruction)", () => {
 		const stale = enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
 		const fresh = enterPlan({ ...stale, phase: "bypass" }, ALL_TOOLS);
 		assert.equal(fresh.docWriting, undefined);
 		assert.equal(fresh.pendingDocPath, undefined);
 	});
 
-	it("submitPlan 存下计划全文与总结，仍停在 plan 等审批", () => {
-		const submitted = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "  改两个文件  ");
+	it("submitPlan stores the full plan and summary, still in plan awaiting approval", () => {
+		const submitted = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "  change two files  ");
 		assert.equal(submitted.pending, PLAN);
-		assert.equal(submitted.planSummary, "改两个文件", "总结要 trim");
+		assert.equal(submitted.planSummary, "change two files", "the summary must be trimmed");
 		assert.equal(submitted.phase, "plan");
 	});
 
-	it("submitPlan 空总结记为 undefined（slug 会退回兜底值）", () => {
+	it("submitPlan records an empty summary as undefined (slug falls back)", () => {
 		const submitted = submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "   ");
 		assert.equal(submitted.planSummary, undefined);
 	});
 
-	it("submitPlan 只在 plan 阶段生效", () => {
+	it("submitPlan only takes effect in plan phase", () => {
 		assert.equal(submitPlan(initialPlanState(), PLAN).pending, undefined);
 	});
 
-	it("rejectPlan 留在 plan、丢掉 pending 与文档子态标记，但保住工具快照", () => {
+	it("rejectPlan stays in plan, drops pending and the doc-sub-state flags, keeps the tool snapshot", () => {
 		const writing = enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN), "doc-only", "/tmp/a.md");
 		const rejected = rejectPlan(writing);
-		assert.equal(rejected.phase, "plan", "打回不是退出，要继续改方案");
+		assert.equal(rejected.phase, "plan", "a rejection is not an exit — the revision continues");
 		assert.equal(rejected.pending, undefined);
 		assert.equal(rejected.docWriting, undefined);
 		assert.equal(rejected.pendingDocPath, undefined);
@@ -116,35 +117,35 @@ describe("状态迁移", () => {
 	});
 });
 
-describe("写文档子态", () => {
-	const PLAN = "# 方案";
-	const DOC = "/repo/.pi/plans/2026-09-24-方案.md";
+describe("doc-writing sub-state", () => {
+	const PLAN = "# Plan";
+	const DOC = "/repo/.pi/plans/2026-09-24-plan.md";
 
 	function inDocWriting(mode: "execute-with-doc" | "doc-only" = "execute-with-doc") {
-		return enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "方案"), mode, DOC);
+		return enterDocWriting(submitPlan(enterPlan(initialPlanState(), ALL_TOOLS), PLAN, "the plan"), mode, DOC);
 	}
 
-	it("enterDocWriting 翻开关、记住路线与路径，phase 仍是 plan", () => {
+	it("enterDocWriting flips the flag and remembers route + path; the phase stays plan", () => {
 		const state = inDocWriting();
-		assert.equal(state.phase, "plan", "子态不是第三个 phase：bash 拦截与工具收拢全靠 plan 态");
+		assert.equal(state.phase, "plan", "the sub-state is not a third phase: bash interception and tool shrinkage all ride on plan");
 		assert.equal(state.docWriting, true);
 		assert.equal(state.docMode, "execute-with-doc");
 		assert.equal(state.pendingDocPath, DOC);
-		assert.equal(state.pending, PLAN, "计划全文留着，写文档指令要用");
+		assert.equal(state.pending, PLAN, "the full plan is kept — the doc-writing instruction needs it");
 	});
 
-	it("重复 enterDocWriting 幂等，不覆盖已钉死的路径", () => {
+	it("a repeated enterDocWriting is idempotent — the pinned path is not overwritten", () => {
 		const once = inDocWriting();
 		const twice = enterDocWriting(once, "doc-only", "/repo/.pi/plans/other.md");
 		assert.equal(twice.pendingDocPath, DOC);
 		assert.equal(twice.docMode, "execute-with-doc");
 	});
 
-	it("不在 plan 态时 enterDocWriting 不动", () => {
+	it("enterDocWriting does nothing outside plan", () => {
 		assert.equal(enterDocWriting(initialPlanState(), "doc-only", DOC).docWriting, undefined);
 	});
 
-	it("completeDocWrite 收尾回 bypass，并把路线与路径交给调用方", () => {
+	it("completeDocWrite wraps up to bypass and hands route + path to the caller", () => {
 		const outcome = completeDocWrite(inDocWriting("doc-only"));
 		assert.ok(outcome);
 		assert.equal(outcome.state.phase, "bypass");
@@ -152,27 +153,27 @@ describe("写文档子态", () => {
 		assert.equal(outcome.docPath, DOC);
 		assert.equal(outcome.state.docWriting, undefined);
 		assert.equal(outcome.state.pending, undefined);
-		assert.equal(outcome.state.toolsBeforePlan, undefined, "快照随状态清空（还原动作由调用方先做）");
+		assert.equal(outcome.state.toolsBeforePlan, undefined, "the snapshot clears with the state (the caller performs the restore first)");
 	});
 
-	it("不在子态里调用 completeDocWrite 返回 undefined（那不是收尾）", () => {
+	it("calling completeDocWrite outside the sub-state returns undefined (that is not a wrap-up)", () => {
 		assert.equal(completeDocWrite(enterPlan(initialPlanState(), ALL_TOOLS)), undefined);
 		assert.equal(completeDocWrite(initialPlanState()), undefined);
 	});
 
-	it("路径丢了也不收尾（宁可可恢复地停在子态，不要静默放行）", () => {
+	it("a missing path does not wrap up either (better to stay recoverably in the sub-state than to wave through silently)", () => {
 		const broken = { ...inDocWriting(), pendingDocPath: undefined };
 		assert.equal(completeDocWrite(broken), undefined);
 	});
 
-	it("docMode 缺失时收尾按 execute-with-doc 走（批准过就该能实施）", () => {
+	it("a missing docMode wraps up as execute-with-doc (an approval should be implementable)", () => {
 		const outcome = completeDocWrite({ ...inDocWriting(), docMode: undefined });
 		assert.equal(outcome?.docMode, "execute-with-doc");
 	});
 });
 
 // =============================================================================
-// bash 判定：放行
+// bash judgment: passes
 // =============================================================================
 
 const SAFE_COMMANDS = [
@@ -211,7 +212,7 @@ const SAFE_COMMANDS = [
 	"name=value; ls",
 ];
 
-describe("bash 判定：只读命令放行", () => {
+describe("bash judgment: read-only commands pass", () => {
 	for (const command of SAFE_COMMANDS) {
 		it(command.replace(/\n/g, "\\n"), () => {
 			assert.deepEqual(inspectBashCommand(command), { ok: true });
@@ -220,7 +221,7 @@ describe("bash 判定：只读命令放行", () => {
 });
 
 // =============================================================================
-// bash 判定：拦截
+// bash judgment: blocked
 // =============================================================================
 
 const WRITE_COMMANDS = [
@@ -265,21 +266,21 @@ const WRITE_COMMANDS = [
 	"truncate -s 0 log.txt",
 ];
 
-describe("bash 判定：写操作拦住", () => {
+describe("bash judgment: writes blocked", () => {
 	for (const command of WRITE_COMMANDS) {
 		it(command, () => {
-			assert.equal(inspectBashCommand(command).ok, false, `应拦住：${command}`);
+			assert.equal(inspectBashCommand(command).ok, false, `should be blocked: ${command}`);
 		});
 	}
 
-	it("拒绝原因带 plan 阶段说明与具体命令（模型据此改道）", () => {
+	it("the refusal carries the plan-phase note and the specific command (the model reroutes on it)", () => {
 		const verdict = inspectBashCommand("rm -rf dist");
 		assert.equal(verdict.ok, false);
 		assert.match(verdict.reason ?? "", /^Writes are not permitted during planning/);
 		assert.match(verdict.reason ?? "", /rm/);
 	});
 
-	it("复杂命令里读的那一半不算拦截理由，写的那一半才算", () => {
+	it("the read half of a compound command does not count as a block reason; the write half does", () => {
 		const verdict = inspectBashCommand("cat a.txt && git status && rm -rf b");
 		assert.equal(verdict.ok, false);
 		assert.match(verdict.reason ?? "", /rm/);
@@ -287,62 +288,62 @@ describe("bash 判定：写操作拦住", () => {
 });
 
 // =============================================================================
-// 解析细节
+// Parsing details
 // =============================================================================
 
 describe("splitSimpleCommands", () => {
-	it("按 ; | & && || 括号与换行切段", () => {
+	it("splits on ; | & && || parens and newlines", () => {
 		const heads = splitSimpleCommands("a; b | c && d || e & f\n(g)").map((simple) => simple.words[0]);
 		assert.deepEqual(heads, ["a", "b", "c", "d", "e", "f", "g"]);
 	});
 
-	it("引号里的分隔符不切段", () => {
+	it("separators inside quotes do not split", () => {
 		const segments = splitSimpleCommands("echo 'a; b' \"c | d\"");
 		assert.equal(segments.length, 1);
 		assert.deepEqual(segments[0]!.words, ["echo", "a; b", "c | d"]);
 	});
 
-	it("重定向目标记进 writes，不混进参数", () => {
+	it("redirect targets land in writes, not mixed into args", () => {
 		const segments = splitSimpleCommands("echo hi > out.txt 2> err.txt");
 		assert.deepEqual(segments[0]!.writes, ["out.txt", "err.txt"]);
 		assert.deepEqual(segments[0]!.words, ["echo", "hi"]);
 	});
 
-	it("fd 复制（2>&1）不算写入", () => {
+	it("an fd dup (2>&1) is not a write", () => {
 		assert.deepEqual(splitSimpleCommands("cat a 2>&1").map((simple) => simple.writes), [[]]);
 	});
 
-	it("here-string 与读取重定向都不算写入", () => {
+	it("here-strings and read redirects are not writes", () => {
 		assert.deepEqual(splitSimpleCommands("wc -l <<< abc").map((simple) => simple.writes), [[]]);
 		assert.deepEqual(splitSimpleCommands("sort < in.txt").map((simple) => simple.writes), [[]]);
 	});
 
-	it("转义的分隔符不切段", () => {
+	it("escaped separators do not split", () => {
 		assert.deepEqual(splitSimpleCommands("echo a\\;b").map((simple) => simple.words), [["echo", "a;b"]]);
 	});
 });
 
 describe("stripHeredocBodies", () => {
-	it("heredoc 正文换成空行，结束行保留", () => {
+	it("heredoc bodies become blank lines; the end line is kept", () => {
 		const stripped = stripHeredocBodies("cat <<EOF\nrm -rf x\nEOF\nls");
 		assert.ok(!stripped.includes("rm -rf x"));
 		assert.match(stripped, /ls/);
 	});
 
-	it("<<- 的制表符缩进结束符也能认出", () => {
+	it("the tab-indented terminator of <<- is recognized too", () => {
 		const stripped = stripHeredocBodies("cat <<-EOF\n\trm -rf x\n\tEOF\nls");
 		assert.ok(!stripped.includes("rm -rf x"));
 		assert.match(stripped, /ls/);
 	});
 
-	it("引号分隔符（<<'EOF'）也识别", () => {
+	it("quoted delimiters (<<'EOF') are recognized", () => {
 		const stripped = stripHeredocBodies("cat <<'EOF'\nrm -rf x\nEOF");
 		assert.ok(!stripped.includes("rm -rf x"));
 	});
 
-	it("没有结束符时原样返回，不吞掉后面的命令", () => {
+	it("no terminator → returned verbatim, the later commands are not swallowed", () => {
 		const command = "cat <<EOF\nactive";
 		assert.equal(stripHeredocBodies(command), command);
-		assert.equal(inspectBashCommand(command).ok, true, "不确定时保守放行");
+		assert.equal(inspectBashCommand(command).ok, true, "unsure → conservatively allow");
 	});
 });
