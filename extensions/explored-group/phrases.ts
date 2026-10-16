@@ -1,75 +1,80 @@
 /**
- * explored-group / phrases —— 把一次工具调用压成 `Explored` 分组里的一行短语。
+ * explored-group / phrases — compresses a tool call into a one-line phrase inside the `Explored` group.
  *
- * 纯函数，零 pi 依赖。形态目标（用户 2026-10-06 定，第三轮修订后）：
+ * Pure functions, zero pi dependencies. Target shape (user's decision, 2026-10-06, third revision):
  *
  *     • Explored
  *       └ Search "bashOutput" in clients/pi
  *         Read …/extensions/background-tasks/render.ts 100-169
  *         Read …/ttt/CLAUDE.md, …/ttt/package.json
  *
- * （`└ ` 整块只出现一次，挂在第一行；其余成员行四格缩进 —— 画法在 `render.ts`。）
+ * (The `└ ` appears exactly once per block, attached to the first line; other member lines indent by
+ * four spaces — the drawing lives in `render.ts`.)
  *
- * ## 短语表
+ * ## Phrase table
  *
- * 覆盖率是在本机 19847 条真实 bash 调用上量过的（去掉不可折叠的之后统计），
- * 只保留出现最多的那几种形态 —— 罕见的留给 `Explore <verb> <args 摘要>` 兜底。
+ * Coverage was measured against 19,847 real bash calls on this machine (counted after removing the
+ * non-foldable ones); only the most frequent shapes are kept — rare ones fall through to the
+ * `Explore <verb> <args summary>` fallback.
  *
- * | 命令 | 行 |
+ * | Command | Line |
  * |---|---|
  * | `grep/rg [-rn] PATTERN [FILE/DIR]` | `Search "PATTERN" [in PATH]` |
  * | `ls/fd/tree [PATH]` | `List PATH` |
  * | `find DIR -name GLOB` | `Find GLOB in DIR` |
- * | `git status\|log\|diff\|…` | `Git status` 等 |
+ * | `git status\|log\|diff\|…` | `Git status` etc. |
  * | `sed -n 'A,Bp' FILE` | `Read FILE A-B` |
  * | `cat/head/tail/jq/wc/diff FILE` | `Read FILE` / `Tail FILE` |
  * | `stat FILE` | `Stat FILE` |
  * | `which a b` | `Which a b` |
  *
- * ## 路径缩略（用户的口径：缩到两层目录）
+ * ## Path shortening (the user's rule: shorten to two directory levels)
  *
- * `/Users/bachi/jaylli/ttt/a/b/CLAUDE.md` → `…/ttt/a/b/CLAUDE.md` 里那个 `…` 前缀
- * **不是**这里拍的 —— 规则是「最多保留两层目录 + 文件名」，更长才前缀 `…`：
+ * For `/Users/bachi/jaylli/ttt/a/b/CLAUDE.md` → `…/ttt/a/b/CLAUDE.md`, the `…` prefix is **not**
+ * decided here — the rule is "keep at most two directory levels + the file name"; only longer ones
+ * get the `…` prefix:
  *
- *     ~/.pi/agent/extensions/a/b/index.ts   →  …/a/b/index.ts      （6 层，缩）
- *     clients/pi/extensions/read.ts         →  …/pi/extensions/read.ts（3 层目录，缩）
- *     clients/pi/read.ts                    →  clients/pi/read.ts   （2 层，原样）
- *     src/index.ts                          →  src/index.ts         （1 层，原样）
- *     package.json                          →  package.json         （无目录，原样）
+ *     ~/.pi/agent/extensions/a/b/index.ts   →  …/a/b/index.ts      (6 levels, shortened)
+ *     clients/pi/extensions/read.ts         →  …/pi/extensions/read.ts (3 dir levels, shortened)
+ *     clients/pi/read.ts                    →  clients/pi/read.ts   (2 levels, kept as-is)
+ *     src/index.ts                          →  src/index.ts         (1 level, kept as-is)
+ *     package.json                          →  package.json         (no directory, kept as-is)
  *
- * 起点选择：**cwd 之下的用相对路径**（最短也最有意义），home 之下的用 `~`，
- * 其余用绝对路径再缩。顺序不能反 —— `/Users/bachi/jaylli/litellm-any/...` 同时满足
- * 「在 home 下」与「在 cwd 下」，要的是后者（相对更短）。
+ * Choice of base: **under cwd use the relative path** (shortest and most meaningful); under home use
+ * `~`; otherwise use the absolute path, then shorten. The order must not be flipped —
+ * `/Users/bachi/jaylli/litellm-any/...` is both "under home" and "under cwd"; we want the latter
+ * (relative is shorter).
  */
 
 import { classifyToolCall, segmentVerb, splitShellSegments, stripRedirects } from "./classify.ts";
 
-/** 缩略后保留的目录层数（用户 2026-10-06 定：两层）。改这一个常量即可。 */
+/** Directory levels kept after shortening (user's decision, 2026-10-06: two). Change this one constant. */
 export const PATH_TAIL_DIRS = 2;
-/** 缩略前缀（U+2026 + 斜杠），与 bash 侧折叠用的 `…` 同一字形。 */
+/** Shortening prefix (U+2026 + slash), the same glyph as the `…` used by the bash-side collapse. */
 const ELLIPSIS_PREFIX = "…/";
 
-/** 去掉一层引号（单/双），返回内容。 */
+/** Strip one layer of quotes (single/double) and return the contents. */
 function unquote(value: string): string {
 	return value.replace(/^(['"])(.*)\1$/s, "$2");
 }
 
-/** 是否像一个路径（含 `/`，或像 `foo.ts` / `.gitignore` / `Makefile` 之外的文件名）。 */
+/** Whether this looks like a path (contains `/`, or resembles a file name other than `foo.ts` / `.gitignore` / `Makefile`). */
 function looksLikePath(token: string): boolean {
 	return token.includes("/") || /\.[A-Za-z0-9]+$/.test(token);
 }
 
-/** 去掉 `VAR=value` 形式的环境前缀（`P=/path cmd` 里的 `P=` 部分）。 */
+/** Strip a `VAR=value` environment prefix (the `P=` part of `P=/path cmd`). */
 function stripEnvPrefix(token: string): string | null {
 	const match = token.match(/^[A-Za-z_][A-Za-z0-9_]*=(.*)$/s);
 	return match ? match[1]! : null;
 }
 
 /**
- * 路径缩略：**最多保留 `PATH_TAIL_DIRS` 层目录 + 最后一段**（文件或目录名），更长才前缀 `…/`。
+ * Path shortening: **keep at most `PATH_TAIL_DIRS` directory levels + the last segment** (file or
+ * directory name); only longer ones get the `…/` prefix.
  *
- * 起点优先级：cwd 相对 → home 相对（`~`）→ 绝对路径。反转顺序会让
- * `/Users/bachi/jaylli/litellm-any/x.ts` 变成 `~/jaylli/litellm-any/x.ts`（更长也更绕）。
+ * Base priority: cwd-relative → home-relative (`~`) → absolute. Reversing the order would turn
+ * `/Users/bachi/jaylli/litellm-any/x.ts` into `~/jaylli/litellm-any/x.ts` (longer and more confusing).
  */
 export function shortenPath(input: string, cwd: string | undefined): string {
 	let value = unquote(input.trim());
@@ -83,35 +88,38 @@ export function shortenPath(input: string, cwd: string | undefined): string {
 		value = value === home ? "~" : `~/${value.slice(home.length + 1)}`;
 	}
 
-	// `~` / `…` 也算一段普通名字参与层数计算（`~/a/b/c.ts` = 3 目录 + 文件名）。
+	// `~` / `…` count as ordinary names in the level calculation (`~/a/b/c.ts` = 3 directories + file name).
 	const parts = value.split("/").filter(Boolean);
 	if (parts.length <= PATH_TAIL_DIRS + 1) return value;
 	return `${ELLIPSIS_PREFIX}${parts.slice(-(PATH_TAIL_DIRS + 1)).join("/")}`;
 }
 
 /**
- * 从一段命令的位置参数里挑出「像路径的那个」，用于短语里的路径。
+ * Pick "the token that looks like a path" from a command segment's positional arguments,
+ * for use as the phrase's path.
  *
- * 三个踩过的坑，都在 19847 条语料上核过：
- *   ① `grep -rn PATTERN a.ts | grep -v node_modules` —— 第二个 grep 的位置参数是
- *      `node_modules`，不是路径。所以带 `-v`（反转）的段不给路径。
- *   ② `tail -60 _vimrc` 的 `-60` 是行数不是文件名；`2>/dev/null` 里的 `2` 也不是
- *（后者的重定向已在 `stripRedirects` 里剥掉）。按「带点 / 带斜杠」判定 + 排除纯数字。
- *   ③ 兜底很重要：`cat f` / `grep -n x f` 里的 `f` 没有点也没斜杠，**仍要当路径**，
- *      否则这些命令一条短语都生不出来。
+ * Three pitfalls, all verified against the 19,847-call corpus:
+ *   ① `grep -rn PATTERN a.ts | grep -v node_modules` — the second grep's positional argument
+ *      is `node_modules`, not a path. So segments with `-v` (inversion) yield no path.
+ *   ② In `tail -60 _vimrc`, `-60` is a line count, not a file name; the `2` in `2>/dev/null`
+ *     isn't either (that redirection is already stripped by `stripRedirects`). Judge by
+ *     "has a dot / has a slash" + exclude pure numbers.
+ *   ③ The fallback matters: the `f` in `cat f` / `grep -n x f` has neither dot nor slash and
+ *     **must still count as a path**, otherwise these commands produce no phrase at all.
  */
 function pickPathToken(args: string[]): string | undefined {
 	const positionals = args
 		.filter((token) => !token.startsWith("-"))
 		.map(unquote)
 		.filter((token) => token && token !== ";" && !/^\d+$/.test(token));
-	// 优先「带斜杠」的（最像路径），其次「像文件名」的，最后取第一个位置参数兜底
+	// Prefer "has a slash" (most path-like), then "looks like a file name",
+	// and fall back to the first positional argument
 	return positionals.find((token) => token.includes("/"))
 		?? positionals.find((token) => looksLikePath(token))
 		?? positionals[0];
 }
 
-/** 取第一个位置参数（`grep` 的 PATTERN、`find` 的 DIR…）。 */
+/** Take the first positional argument (`grep`'s PATTERN, `find`'s DIR, …). */
 function firstPositional(args: string[]): string | undefined {
 	return args
 		.filter((token) => !token.startsWith("-"))
@@ -119,28 +127,28 @@ function firstPositional(args: string[]): string | undefined {
 		.find((token) => token.length > 0);
 }
 
-/** 截断过长的单个 token（正则模式常常很长），中段省略。 */
+/** Clip an over-long single token (regex patterns are often long), eliding the middle. */
 function clip(text: string, max = 48): string {
 	if (text.length <= max) return text;
 	const head = Math.ceil((max - 1) / 2);
 	return `${text.slice(0, head)}…${text.slice(-(max - 1 - head))}`;
 }
 
-/** 递归与否：`-r` / `-R` / `--recursive` 或组合短旗标里带 r（`-rn`）。 */
+/** Recursive or not: `-r` / `-R` / `--recursive`, or an r inside combined short flags (`-rn`). */
 function isRecursive(args: string[]): boolean {
 	return args.some((token) => /^--recursive$/.test(token) || /^-[a-zA-Z]*[rR][a-zA-Z]*$/.test(token));
 }
 
-/** 生成一段命令的短语；返回 `null` 表示这一段不值得单独成行（如纯 `cd`）。 */
+/** Produce the phrase for one command segment; `null` means this segment is not worth a line (e.g. a bare `cd`). */
 function phraseForSegment(segment: string, cwd: string | undefined): string | null {
 	const { verb, args } = segmentVerb(stripRedirects(segment));
 	if (!verb) return null;
 
 	if (verb === "grep" || verb === "egrep" || verb === "fgrep" || verb === "rg" || verb === "ag" || verb === "ack") {
-		if (args.includes("-v")) return null; // 过滤段，不是检索段
+		if (args.includes("-v")) return null; // a filter segment, not a search segment
 		const pattern = firstPositional(args);
 		if (!pattern) return null;
-		// 路径 = 除 pattern 之外的第一个位置参数
+		// Path = the first positional argument other than the pattern
 		const rest = args.slice(args.indexOf(args.find((t) => unquote(t) === pattern) ?? pattern) + 1);
 		const rawPath = pickPathToken(rest);
 		const scope = rawPath
@@ -202,7 +210,7 @@ function phraseForSegment(segment: string, cwd: string | undefined): string | nu
 		const file = pickPathToken(args);
 		if (!file) return null;
 		const path = shortenPath(file, cwd);
-		// `diff a b` 两个文件都给（比较的双方都在）
+		// `diff a b` yields both files (both sides of the comparison matter)
 		if (verb === "diff") {
 			const both = args.filter((t) => !t.startsWith("-")).map(unquote).filter((t) => looksLikePath(t)).slice(0, 2);
 			if (both.length === 2) return `Diff ${shortenPath(both[0]!, cwd)} ${shortenPath(both[1]!, cwd)}`;
@@ -214,10 +222,11 @@ function phraseForSegment(segment: string, cwd: string | undefined): string | nu
 }
 
 /**
- * 一次工具调用 → 一行短语。返回 `null` 表示这一刻还产生不了短语
- * （比如 bash 命令只有 `cd`），调用方应跳过该行。
+ * One tool call → one phrase line. Returning `null` means no phrase can be produced at this
+ * moment (e.g. a bash command that is just `cd`); the caller should skip the line.
  *
- * `read` 的多个文件由**上层**（`render.ts`）合并到一行，所以这里只回单个路径。
+ * Multiple files of a `read` are merged into one line by the **upper layer** (`render.ts`),
+ * so only a single path is returned here.
  */
 export function phraseForToolCall(
 	toolName: string,
@@ -261,7 +270,7 @@ export function phraseForToolCall(
 	return null;
 }
 
-/** 供测试与调试：一次性拿到一条 bash 命令的**全部**短语（多段命令会多于一条）。 */
+/** For tests and debugging: get **all** phrases of a bash command at once (multi-segment commands yield more than one). */
 export function phrasesForBash(command: string, cwd: string | undefined): string[] {
 	const lines: string[] = [];
 	for (const segment of splitShellSegments(command)) {
@@ -272,30 +281,33 @@ export function phrasesForBash(command: string, cwd: string | undefined): string
 }
 
 /**
- * `read` 的行号后缀 —— **与 pi 内置标题同口径**（`formatReadLineRange`：
- * `startLine = offset ?? 1`，`endLine = limit !== undefined ? startLine + limit - 1 : ""`）。
+ * Line-number suffix for `read` — **same convention as pi's built-in title** (`formatReadLineRange`:
+ * `startLine = offset ?? 1`, `endLine = limit !== undefined ? startLine + limit - 1 : ""`).
  *
- * 三种给法都必须看得见，缺一不可（真实语料里都存在，全库 440 个会话统计：
- * `offset+limit` 1176 次、**只给 `offset` 40 次**、**只给 `limit` 90 次**、都不给 1287 次）：
+ * All three argument shapes must be visible; none may be dropped (all exist in the real corpus,
+ * counted across 440 sessions: `offset+limit` 1176 times, **`offset` only 40 times**,
+ * **`limit` only 90 times**, neither 1287 times):
  *
- * | 调用 | 后缀 |
+ * | Call | Suffix |
  * |---|---|
  * | `{offset: 100, limit: 70}` | ` 100-169` |
  * | `{offset: 100}` | ` 100` |
  * | `{limit: 45}` | ` 1-45` |
- * | `{}` | 空 |
+ * | `{}` | empty |
  *
- * 旧实现用 `offset && limit` 做条件，于是只给一个参数时**整段区间静默消失** ——
- * 「读的是哪一段」是这一行最要紧的事实之一，而 pi 原生会显示 `:100` / `:1-45`，
- * 折叠后反而把它丢了（用户 2026-10-06 报「行号信息似乎丢失了」）。
+ * The old implementation gated on `offset && limit`, so when only one argument was given the
+ * **entire span silently disappeared** — "which part was read" is one of the most important facts
+ * on this line, and pi natively shows `:100` / `:1-45`; folding it away lost that (the user reported
+ * "line-number information seems lost" on 2026-10-06).
  *
- * `read` 的 span 在合并行里同样保留（同一文件读不同段是不同的事实）。
+ * The `read` span is likewise preserved in merged lines (different spans of the same file are
+ * different facts).
  */
 export function readSpanSuffix(args: unknown): string {
 	const offset = (args as { offset?: number })?.offset;
 	const limit = (args as { limit?: number })?.limit;
 	if (offset === undefined && limit === undefined) return "";
 	const start = offset ?? 1;
-	// `limit` 没给时只知道起点（与 pi 一致：`endLine` 留空，不猜长度）
+	// Without `limit` only the start is known (same as pi: `endLine` stays empty; no guessing the length)
 	return limit === undefined ? ` ${start}` : ` ${start}-${start + limit - 1}`;
 }
