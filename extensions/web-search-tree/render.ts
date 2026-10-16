@@ -1,97 +1,110 @@
 /**
- * web-search-tree — 纯逻辑：把 pi-web-access 的 `pi_web_search` 渲染器产出的**行数组**重排成
- * 与 `bash-command-collapse.ts` / `codemode-tree/` 同一套的树。
+ * web-search-tree — pure logic: reflow the **line arrays** produced by pi-web-access's
+ * `pi_web_search` renderer into the same tree as `bash-command-collapse.ts` / `codemode-tree/`.
  *
- * 本模块不 import pi、不碰 pi-tui，所以 `node --test` 能直跑（与 `codemode-tree/render.ts`、
- * `fenceless-code-block/render.ts` 同一条路子）。着色只用注入进来的 `theme.fg`。
+ * This module imports neither pi nor pi-tui, so `node --test` runs it directly (the same
+ * approach as `codemode-tree/render.ts` and `fenceless-code-block/render.ts`). Coloring uses
+ * only the injected `theme.fg`.
  *
- * ## 目标形状（用户 2026-10-02 定）
+ * ## Target shape (user's decision, 2026-10-02)
  *
  * ```
  * • search 3 queries
- *   │ "wechat-local-mcp 微信 重新签名 codesign 本地数据库 密钥 原理"
+ *   │ "wechat-local-mcp wechat re-sign codesign local database key principle"
  *   │ "macOS WeChat local database decrypt re-sign app get-task-allow
  *   │  extract SQLCipher key from memory"
- *   │ "PyWxDump macOS 微信 数据库 密钥 获取 需要 重新签名 原因"
+ *   │ "PyWxDump macOS wechat database key obtain needed re-sign reason"
  *   │ 3/3 queries, 18 sources
  *   │ Providers used: Query 1: exa; Query 2: exa; Query 3: exa
  *   │
  *   └ ... (4 more lines, 6 total, ctrl+o to expand)
  * ```
  *
- * ## 与 bash / codemode 块的**一处刻意不同**：`└ ` 挂在最后一行
+ * ## One deliberate difference from the bash / codemode blocks: `└ ` hangs on the LAST line
  *
- * bash / codemode 的规则是「`└ ` 挂在第一个实质内容行上，树在那里落地」。本工具不适用这条，
- * 因为搜索块的**末行**（`... (N more lines, M total, ctrl+o to expand)`）是**唯一**通向完整结果
- * 的入口 —— 结果正文里那些 sources / 摘要全在 ctrl+o 后面。把 `└ ` 挂在第一行、让提示行跟在
- * 后面缩进，观感上像「树已经结束，下面这些是尾巴」；而用户给的样例里 `└ ` 就在提示行上。
+ * The bash / codemode rule is "`└ ` hangs on the first substantial content line; the tree
+ * lands there". That rule does not fit this tool, because a search block's **last line**
+ * (`... (N more lines, M total, ctrl+o to expand)`) is the **only** doorway to the full
+ * result — the sources / summaries live behind ctrl+o. Hanging `└ ` on the first line with
+ * the hint line trailing behind it, indented, reads as "the tree ended; the rest is a tail";
+ * in the user's sample, `└ ` sits right on the hint line.
  *
- * 所以本工具的规则是**末行挂 `└ `、上面每一行挂 `│ `** —— 树一直延伸到「还有内容可以展开」
- * 那句话，与 `background-tasks` 的正文树（除末行外 `│`、末行 `└`）同构。折叠态下末行必然是
- * ctrl+o 提示，展开态下末行是最后一条正文，两种情况都成立。
+ * So this tool's rule is **last line carries `└ `, every line above carries `│ `** — the tree
+ * stretches all the way down to the "there is more to expand" line, isomorphic to the
+ * `background-tasks` body tree (`│` on all but the last line, `└` on the last). In collapsed
+ * mode the last line is necessarily the ctrl+o hint; in expanded mode it is the last body
+ * line. Both hold.
  *
- * ## 本扩展真正改掉的东西（实测对照，2026-10-02）
+ * ## What this extension actually changes (measured comparison, 2026-10-02)
  *
  * ```
- * 包原版（有底色、上下各一空行、无树）：        接管后：
- *   空行                                          ── self 壳：无空行
- *   search 3 queries                            • search 3 queries
- *     "…第一条长查询…"                            │   "…第一条长查询…"
- *     "…第二条被折行…"                            │   "…第二条被折行…"
- * from memory                                    │ key from memory
- *                                                  │
- *  ... (12 more lines, 16 total, ctrl+o …)        └ ... (12 more lines, 16 total, ctrl+o …)
- *   空行
+ * package original (bg fill, blank lines above/below, no tree):   after takeover:
+ *   blank line                                       ── self shell: no blank lines
+ *   search 3 queries                                • search 3 queries
+ *     "…first long query…"                           │   "…first long query…"
+ *     "…second query wrapped…"                       │   "…second query wrapped…"
+ * from memory                                        │ key from memory
+ *                                                     │
+ *  ... (12 more lines, 16 total, ctrl+o …)           └ ... (12 more lines, 16 total, ctrl+o …)
+ *   blank line
  * ```
  *
- * 四件事：① 无底色、无上下空行；② 圆点结局灯（绿 / 红）；③ 树形结构符；
- * ④ **折行的续行也挂在 `│ ` 后面**（包原版在渲染层不挂前缀，续行会掉到列 0，
- * 对照输出里 `from memory` 那一行就是）。
+ * Four things: ① no background fill and no boundary blank lines; ② the dot as the outcome
+ * lamp (green / red); ③ tree structure glyphs; ④ **wrapped continuation lines also hang on
+ * `│ `** (the package original attaches no prefix at the render layer, so continuations fall
+ * to column 0 — the `from memory` line in the comparison output).
  *
- * **查询值截断不是本扩展修的东西**：包原版在 `renderCall`（三维查询名）与折叠态预览里都**不截**
- * 查询值；那两处 `slice(0, 37)` / `slice(0, 52)` 分别在**流式中的 `currentQuery` 行**与
- * **展开态的 curated 清单**里。我一开始把前者当成了「查询名被截到 40 列」，是错的 ——
- * 改完对照实验才看清。所以 README 里不要写「本扩展修了截断」。
+ * **Query-value truncation is NOT something this extension fixes**: the package original
+ * does **not** truncate query values either in `renderCall` (the three-dimensional query
+ * names) or in the collapsed preview; those two `slice(0, 37)` / `slice(0, 52)` sites live in
+ * the **streaming `currentQuery` line** and the **expanded curated list**. I first mistook the
+ * former for "query names truncated to 40 columns" — wrong, and only the side-by-side
+ * experiment made it clear. So the README must not say "this extension fixed truncation".
+ */
 
-/** 圆点那一列：`• ` = 1 个字符 + 1 个空格 = 2 列。 */
+/** The dot column: `• ` = 1 char + 1 space = 2 columns. */
 export const MARGIN_WIDTH = 2;
-/** 结构符占的列数：`│ ` / `└ ` = 1 个 box-drawing 字符 + 1 个空格 = 2 列。 */
+/** Columns taken by the structure glyph: `│ ` / `└ ` = 1 box-drawing char + 1 space = 2 columns. */
 export const GUTTER_WIDTH = 2;
-/** 子内容要扣掉的列数：左边距 + 结构符（结构符落在列 2、正文落在列 4）。 */
+/** Columns to subtract for child content: left margin + structure glyph (glyph at column 2, text at column 4). */
 export const CONTENT_OFFSET = MARGIN_WIDTH + GUTTER_WIDTH;
 
-/** 结构符前面的留白（左边距）：两格。`│` / `└` 因此落在列 2。 */
+/** Whitespace before the structure glyph (left margin): two spaces. `│` / `└` therefore land at column 2. */
 export const GUTTER_LEAD = " ".repeat(MARGIN_WIDTH);
-/** `│ ` / `└ ` 之后的正文列：4 格（与 bash / codemode 块同一列）。 */
+/** The text column after `│ ` / `└ `: 4 spaces (the same column as the bash / codemode blocks). */
 export const BODY_INDENT = " ".repeat(CONTENT_OFFSET);
-/** 「还没出结果」时命令续行的缩进：两格（与 `search` 的 `s` 同列）。 */
+/** Indent of command continuation lines while "no result yet": two spaces (aligned with the `s` of `search`). */
 export const LOOSE_INDENT = " ".repeat(MARGIN_WIDTH);
 
-/** 子组件（包自带渲染器渲染出来的那一坨）该按多宽渲染。 */
+/** How wide the child component (the blob the package renderer produces) should render. */
 export function contentWidth(totalWidth: number): number {
 	return Math.max(1, totalWidth - CONTENT_OFFSET);
 }
 
-/** 去掉 SGR 转义序列 —— 行里可能只有颜色序列。 */
+/** Strip SGR escape sequences — a line may contain nothing but color codes. */
 function stripSgr(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-/** 这一行（带样式）是不是空的。 */
+/** Whether this (styled) line is blank. */
 export function isBlankLine(line: string): boolean {
 	return stripSgr(line).trim() === "";
 }
 
 /**
- * 圆点该用哪个颜色槽 —— 三态，与 `codemode-tree` / bash 侧同一份语义：
+ * Which color slot the dot should use — three states, the same semantics as `codemode-tree`
+ * and the bash side:
  *
- *   - 执行中（`isPartial`）→ `dim`（灰）—— 与 bash / read 的一致（codemode 那边用 `text` 白，
- *     是用户 2026-10-01 单独特批的；搜索块没批那一格，走 bash 的常规口径）
- *   - 执行完且成功 → `toolDiffAdded`（diff 新增行的绿，**与 bash 成功圆点同色**）
- *   - 执行完且失败 → `toolDiffRemoved`（diff 删除行的红）
+ *   - executing (`isPartial`) → `dim` (grey) — consistent with bash / read (codemode uses
+ *     `text` white, specially approved by the user on 2026-10-01; the search block was not
+ *     granted that cell, so it follows the bash convention)
+ *   - finished successfully → `toolDiffAdded` (the diff-added green, **the same color as the
+ *     bash success dot**)
+ *   - finished with failure → `toolDiffRemoved` (the diff-removed red)
  *
- * 判定读 `context.isError`（pi 调 resultRenderer 时不带 `isError` 字段，只在 `getRenderContext`
- * 里给 —— 读 `result.isError` 会永远拿到 undefined，bash 侧踩过这个坑）。
+ * The verdict reads `context.isError` (pi does not pass an `isError` field when calling the
+ * resultRenderer; it is only present in `getRenderContext` — reading `result.isError` always
+ * yields undefined; the bash side stepped in this pit).
  */
 export function stateDotSlot(isPartial: boolean, isError: boolean): "dim" | "toolDiffAdded" | "toolDiffRemoved" {
 	if (isPartial) return "dim";
@@ -99,17 +112,20 @@ export function stateDotSlot(isPartial: boolean, isError: boolean): "dim" | "too
 }
 
 /**
- * 这一块是不是失败的 —— 三个信号取**或**，因为包自带渲染器在不同失败路径上留的痕迹不同：
+ * Whether this block failed — the **or** of three signals, because the package renderer
+ * leaves different traces on different failure paths:
  *
- *   ① `context.isError`：pi 的权威信号（工具抛异常 / 返回 `isError: true`）；
- *   ② 正文里的 `Error:` / `Error：` 行：`pi_web_search` 有若干路径是**正常返回**一个
- *      `{ content: [{ text: "Error: …" }], details: { error } }` 的对象（不是 throw），
- *      pi 不会把它标成 isError；
- *   ③ `details.error` 非空：同上的结构化痕迹，`renderResult` 的第一个分支就是它。
+ *   ① `context.isError`: pi's authoritative signal (tool threw / returned `isError: true`);
+ *   ② an `Error:` / `Error：` line in the body: `pi_web_search` has several paths that
+ *      **return normally** with `{ content: [{ text: "Error: …" }], details: { error } }`
+ *      (instead of throwing); pi does not flag those as isError;
+ *   ③ a non-empty `details.error`: the structured trace of the same shape — it is the first
+ *      branch of `renderResult`.
  *
- * 只用 ① 会让 ②③ 那些路径显示绿点（用户 2026-10-02 明确要求「不成功就是红色」），只用 ②
- * 又会漏掉抛异常的路径。三条取或之后，`Error:` 开头的正文行还会被 `colorizeErrorLines`
- * 染红，与红点互相印证。
+ * Using only ① leaves the ②③ paths showing a green dot (the user explicitly required on
+ * 2026-10-02: "not successful means red"); using only ② misses the throwing paths. With the
+ * or of all three, body lines starting with `Error:` are additionally dyed red by
+ * `colorizeErrorLines`, corroborating the red dot.
  */
 export function isFailureResult(isError: boolean, lines: string[], details: unknown): boolean {
 	if (isError) return true;
@@ -119,9 +135,11 @@ export function isFailureResult(isError: boolean, lines: string[], details: unkn
 }
 
 /**
- * 正文里的 `Error:` 行染红（`toolDiffRemoved`）。包自带渲染器已经在一些分支里上过 `error` 色，
- * 这里只补它没管的那些（`Error: …` 纯文本行），已经带色的行会被 `stripSgr` 判出来后重新上色 ——
- * 两类红色（`error` / `toolDiffRemoved`）在同一个块里并存会看着发花，统一成本扩展的失败红。
+ * Dye `Error:` lines in the body red (`toolDiffRemoved`). The package renderer already colors
+ * some branches with `error`; this only patches the ones it leaves alone (plain `Error: …`
+ * text lines) — already-colored lines are detected via `stripSgr` and re-colored, because two
+ * kinds of red (`error` / `toolDiffRemoved`) coexisting in one block looks garish; unify on
+ * this extension's failure red.
  */
 export function colorizeErrorLines(
 	lines: string[],
@@ -131,10 +149,12 @@ export function colorizeErrorLines(
 }
 
 /**
- * 命令侧：给每一行挂上树形前缀 —— 首行 `• `（圆点由调用方上好色），其余行按 `connected`
- * 选 `│ `（结果已到，树接上了）或两格缩进（还在跑，与 bash 的「执行中」形态一致）。
+ * Command side: attach tree prefixes to every line — first line `• ` (the dot is pre-colored
+ * by the caller), the rest choose `│ ` (result arrived, the tree is connected) or a two-space
+ * indent (still running, matching the bash "executing" look) per `connected`.
  *
- * 空行保持空行：给空行补空格会把「这一行是空的」这个信息擦掉，外层判空还得先剔 ANSI 再 trim。
+ * Blank lines stay blank: padding blanks with spaces erases the "this line is empty"
+ * information, and the outer blank check would have to strip ANSI and trim first.
  */
 export function withCallGutter(lines: string[], dotAnsi: string, pipe: string, connected: boolean): string[] {
 	const continuation = connected ? `${GUTTER_LEAD}${pipe}` : LOOSE_INDENT;
@@ -145,19 +165,26 @@ export function withCallGutter(lines: string[], dotAnsi: string, pipe: string, c
 }
 
 /**
- * 结果侧：末行 `└ `、其余非空行 `│ `（见文件头「`└ ` 挂在最后一行」）。
+ * Result side: last line `└ `, other non-blank lines `│ ` (see "`└ ` hangs on the last line"
+ * in the file header).
  *
- * 三个不能想当然的点：
+ * Three points you must not take for granted:
  *
- *   ① **只由本函数决定 `└ `，整块渲染一次**：调用方必须把所有 child 的行拼成一个数组再传进来
- *      （包自带渲染器把状态行、提示行分成两个 child），逐 child 各画一棵树会长出两个拐角符。
- *   ② **末行是空行时往前找**：展开态的正文可能以空行收尾（包渲染器的 `lines.push("")`），
- *      把 `└ ` 挂到一个空行上等于白挂 —— 找不到任何非空行就整个返回空数组。
- *   ③ **`└ ` 之上的空行挂 `│ `、之下的空行原样**：与 bash 的 `prefixTreeLines` 同一条规则
- *      （那边的原话是「栅栏以上的空行也带 `│ `」）。用户样例里 `Providers used: …` 与
- *      `└ ... (4 more lines…)` 之间正好有一行**只有 `│`** —— 那就是这里画出来的：它本来是
- *      个空行，补上前缀之后就成了那根竖线。空行不加前缀会看着像树断了；`└ ` 之后的空行
- *      再画竖线又像树还没完（bash 侧的同一取舍，用户 2026-09-21 在那边报过一次）。
+ *   ① **`└ ` is decided here only, rendering the whole block once**: the caller must stitch
+ *      all children's lines into one array first (the package renderer splits the status line
+ *      and the hint line into two children); drawing one tree per child would grow two corner
+ *      glyphs.
+ *   ② **when the last line is blank, search backwards**: expanded-mode bodies can end with a
+ *      blank line (the package renderer's `lines.push("")`); hanging `└ ` on a blank line is
+ *      wasted — and if no non-blank line exists at all, return an empty array.
+ *   ③ **blank lines above `└ ` get `│ `, blank lines below are returned as-is**: the same
+ *      rule as the bash side's `prefixTreeLines` (there, the original words were "blank lines
+ *      above the fence also carry `│ `"). In the user's sample there is exactly one line
+ *      holding **only `│`** between `Providers used: …` and `└ ... (4 more lines…)` — that is
+ *      drawn here: it was a blank line, and once prefixed it became that vertical bar. Without
+ *      the prefix, a blank line looks like the tree broke; drawing bars after `└ ` would look
+ *      like the tree continues (the same trade-off on the bash side, reported by the user on
+ *      2026-09-21).
  */
 export function shapeResultLines(
 	lines: string[],
@@ -165,7 +192,7 @@ export function shapeResultLines(
 ): string[] {
 	if (lines.length === 0) return [];
 
-	// 从后往前找最后一个非空行 —— 它就是 `└ ` 的落点。
+	// Search backwards for the last non-blank line — that is where `└ ` lands.
 	let last = lines.length - 1;
 	while (last >= 0 && isBlankLine(lines[last]!)) last--;
 	if (last < 0) return [];
@@ -175,7 +202,8 @@ export function shapeResultLines(
 
 	return lines.map((line, index) => {
 		if (index === last) return `${corner}${line}`;
-		// `└ ` 之上（还没有落地）→ 空行也补竖线；之下已经没有内容了，原样返回。
+		// Above `└ ` (not landed yet) → even blank lines get the bar; below, there is no
+		// content anymore, return as-is.
 		if (index > last) return line;
 		if (isBlankLine(line)) return pipe;
 		return `${pipe}${line}`;
@@ -183,21 +211,26 @@ export function shapeResultLines(
 }
 
 /**
- * 失败块里把包自带的 `success` 绿换成失败红。
+ * In a failed block, swap the package's `success` green for failure red.
  *
- * 包的状态行（`3/3 queries, 18 sources`）是**无条件**用 `theme.fg("success", …)` 画的 —— 它不知道
- * 自己这次是失败的。于是失败块里会出现「红圆点 + 绿状态行」的自相矛盾（实测：抛异常那条路径下
- * 状态行是绿色的 `undefined/undefined queries, 0 sources`，红点就在它上面一行）。用户 2026-10-02
- * 的口径是「不成功就是红色」，所以失败时把这一段的 `success` 前景换成本扩展的失败红。
+ * The package's status line (`3/3 queries, 18 sources`) is painted **unconditionally** with
+ * `theme.fg("success", …)` — it does not know this run failed. So a failed block shows the
+ * self-contradictory "red dot + green status line" (measured: on the throwing path the status
+ * line reads the green `undefined/undefined queries, 0 sources`, with the red dot right above
+ * it). The user's 2026-10-02 rule is "not successful means red", so on failure the `success`
+ * foreground in that stretch is swapped for this extension's failure red.
  *
- * 换的是**整个色段**：`theme.fg("success", x)` 出来的是 `ESC[…m x ESC[39m` —— 开头的设置色要换，
- * 收尾的复位 `ESC[39m` 与其它色段共用（换多了会把后面的 `muted` / `accent` 一起截断）。
- * 所以只在**该色段内部**替换：找到 `success` 序列后，把它到下一个 `ESC[39m` 之间的**开码**换掉。
- * 实测形状：`ESC[38;2;181;189;104m 文本 ESC[39m` —— 一段里只有一个开码，直接换即可。
+ * What gets swapped is the **whole color span**: `theme.fg("success", x)` produces
+ * `ESC[…m x ESC[39m` — the leading set-code must change, but the trailing reset `ESC[39m` is
+ * shared with other spans (over-replacing would truncate the `muted` / `accent` after it).
+ * So replace only **within that span**: after finding the `success` sequence, swap its
+ * **opening code** up to the next `ESC[39m`. Measured shape:
+ * `ESC[38;2;181;189;104m text ESC[39m` — one opening code per span; a direct swap suffices.
  *
- * `theme.getFgAnsi` 拿到的就是 pi 自己会发的序列（truecolor / 256 色两种模式都对得上）；
- * 两个色相同时（皮肤把 `success` 与 `toolDiffRemoved` 设成同一值）直接原样返回，不做无谓改写
- * —— 与 `read-path-collapse.ts` 的 `recolorToolPath` 同一套做法。
+ * `theme.getFgAnsi` yields exactly the sequence pi itself would emit (matches in both
+ * truecolor and 256-color modes); when the two hues are identical (a skin sets `success` and
+ * `toolDiffRemoved` to the same value) the line is returned untouched — the same approach as
+ * `recolorToolPath` in `read-path-collapse.ts`.
  */
 export function recolorSuccessToFailure(
 	lines: string[],
@@ -206,7 +239,8 @@ export function recolorSuccessToFailure(
 	const success = theme.getFgAnsi?.("success");
 	const failure = theme.getFgAnsi?.("toolDiffRemoved");
 	if (!success || !failure || success === failure) return lines;
-	// 结尾的复位序列与其它色段共用，不能跟着换 —— 只换色段**开头**的那个设置码。
+	// The trailing reset is shared with other spans and must not be swapped — swap only the
+	// opening set-code at the start of the span.
 	const reset = "\u001b[39m";
 	return lines.map((line) => {
 		if (!line.includes(success)) return line;
@@ -220,7 +254,7 @@ export function recolorSuccessToFailure(
 			}
 			const end = line.indexOf(reset, at);
 			if (end === -1) {
-				// 没有复位：整段到行尾都是这个色，安全地全换。
+				// no reset: the whole rest of the line is this color; swap all of it safely.
 				out += line.slice(index, at) + failure + line.slice(at + success.length);
 				break;
 			}
@@ -232,13 +266,16 @@ export function recolorSuccessToFailure(
 }
 
 /**
- * 去掉**尾部**的空行。包自带渲染器在展开态用 `lines.push("")` 收尾（摘要段、curated 段的尾部），
- * 那些空行正是用户 2026-10-02 要除掉的「下面一行空行」。折叠态不受影响 —— 那块以提示行结尾，
- * 提示行非空，尾部 trim 碰不到它。
+ * Drop **trailing** blank lines. The package renderer ends expanded mode with
+ * `lines.push("")` (at the tail of the summary and curated sections); those blank lines are
+ * precisely the "blank line below" the user wanted gone on 2026-10-02. Collapsed mode is
+ * unaffected — that block ends with the hint line, which is non-blank, so the trailing trim
+ * never touches it.
  *
- * **上面的空行不删**：包渲染器把 `"\n... more lines"` 拆成一个空行 + 提示行，用户样例里
- * `Providers used: …` 与 `└ ...` 之间那根 `│` 就是这个空行挂上前缀变来的（见 `shapeResultLines`）。
- * 删掉它就不是用户要的形状了。
+ * **Leading/inner blank lines are kept**: the package renderer splits `"\n... more lines"`
+ * into a blank line + hint line, and the `│` between `Providers used: …` and `└ ...` in the
+ * user's sample is exactly this blank line with its prefix (see `shapeResultLines`).
+ * Deleting it would no longer be the shape the user asked for.
  */
 export function trimTrailingBlanks(lines: string[]): string[] {
 	let end = lines.length;

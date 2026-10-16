@@ -1,52 +1,63 @@
 /**
- * web-search-tree — pi-web-access 工具块的树形展示（接线）
+ * web-search-tree — tree rendering for pi-web-access tool blocks (wiring)
  *
- * 把 `pi-web-access` 的三个块改造成与 `bash-command-collapse.ts` / `codemode-tree/` /
- * `read-path-collapse.ts` 同一套：`• ` 开头、`│ ` 续段、`└ ` 只出现一次的树，**没有底色、没有
- * 上下边界空行**（用户 2026-10-02 的三条诉求）。形状与列位规则全在 `render.ts`（不 import pi，
- * `node --test` 能直跑），本文件只做三件事：捕获包注册的工具定义、委托包自带渲染器、把它们的行
- * 重排成树。
+ * Reworks the three `pi-web-access` blocks into the same set as `bash-command-collapse.ts` /
+ * `codemode-tree/` / `read-path-collapse.ts`: a tree with a `• ` head, `│ ` continuations,
+ * and a single `└ `, **no background fill and no boundary blank lines** (the user's three
+ * requirements, 2026-10-02). Shape and column rules all live in `render.ts` (no pi import,
+ * `node --test` runs it directly); this file only does three things: capture the tool
+ * definitions the package registers, delegate to the package's own renderers, and reflow
+ * their lines into a tree.
  *
- * ## 接管哪些（用户 2026-10-02 定）
+ * ## Which tools we take over (user's decision, 2026-10-02)
  *
- * | 工具 | 包自带渲染器 | 处理 |
+ * | Tool | Package renderer | Handling |
  * | --- | --- | --- |
- * | `pi_web_search` | 有 | **接管**（首轮做的） |
- * | `fetch_content` | 有 | **接管** |
- * | `get_search_content` | 有 | **接管** |
- * | `source_check` | **无**（走 pi 通用 fallback） | 原样注册 |
- * | `web_enable` | **无** | 原样注册 |
+ * | `pi_web_search` | yes | **take over** (done in round one) |
+ * | `fetch_content` | yes | **take over** |
+ * | `get_search_content` | yes | **take over** |
+ * | `source_check` | **no** (falls to pi's generic fallback) | register as-is |
+ * | `web_enable` | **no** | register as-is |
  *
- * 只收自带渲染器的那三个：它们与我们一样是「委托包渲染器 + 重排行」，改动面小且风格能对齐；
- * `source_check` / `web_enable` 没有渲染器，接管等于**从零自绘**（颜色、截断、展开态都要自己定），
- * 那是另一件事，不混进来。
+ * Only the three that ship renderers: like us they are "delegate to the package renderer +
+ * reflow lines", a small surface to change with alignable style; `source_check` /
+ * `web_enable` have no renderer, so taking them over means **drawing from scratch** (colors,
+ * truncation, and expanded state would all need defining) — a separate project, kept out.
  *
- * ## 怎么拿到这几个工具的**执行逻辑**（不复制一份）
+ * ## How we obtain these tools' **execution logic** (without copying it)
  *
- * `pi-web-access` 是个 pi 包（`npm:pi-web-access`）。它没有「只给定义」的导出口径 —— 默认导出
- * 就是那个 `ExtensionFactory`，工具定义在工厂闭包里，只能靠**捕获**。做法与 `codemode-tree/`
- * 完全相同：传一个只拦截 `registerTool` 的 Proxy，其余 `pi.*` 一律转发给真 `pi`。
+ * `pi-web-access` is a pi package (`npm:pi-web-access`). It has no "definitions only" export —
+ * its default export is that `ExtensionFactory`, and the tool definitions live in the factory
+ * closure, so the only way is to **capture**. The technique is exactly the one in
+ * `codemode-tree/`: pass a Proxy that intercepts only `registerTool` and forwards every other
+ * `pi.*` to the real `pi`.
  *
- * 用 Proxy 而不是手写 stub 有两个必须的理由：
- *   ① 工厂闭包里大量用到 `pi.*`（`getSettings` / `appendEntry` / `events` / `getAllTools` /
- *      `registerCommand` / `registerShortcut` / `on(...)`），漏转发一个就在**加载期**抛异常，
- *      而扩展加载失败是静默少这几个工具的；
- *   ② pi 以后往工厂里加新的 `pi.*` 调用时不会崩（Proxy 自动转发）。
+ * Two reasons a Proxy beats a hand-written stub:
+ *   ① The factory closure uses plenty of `pi.*` (`getSettings` / `appendEntry` / `events` /
+ *      `getAllTools` / `registerCommand` / `registerShortcut` / `on(...)`); missing one
+ *      forwarding throws at **load time**, and a failed extension load silently just misses
+ *      those tools.
+ *   ② If pi adds new `pi.*` calls inside the factory later, nothing breaks (the Proxy forwards
+ *      automatically).
  *
- * 实测（SDK，2026-10-02）：捕获到 5 个工具定义，`execute` / `parameters` / `description` /
- * `promptSnippet` 全部是包自己那份的**同一个对象引用** —— 所以路由、存储、curator、模型可见的
- * 描述文本全都没动，本扩展只换渲染器。
+ * Measured (SDK, 2026-10-02): all 5 captured tool definitions share the **same object
+ * references** for `execute` / `parameters` / `description` / `promptSnippet` as the package's
+ * own — so routing, storage, curator, and the model-visible descriptions are all untouched;
+ * this extension only swaps renderers.
  *
- * ## 为什么要把包从「自动加载扩展」里摘掉（settings 里的一条过滤）
+ * ## Why the package must be dropped from "auto-loaded extensions" (the settings filter)
  *
- * 光在扩展里捕获 + 重新注册是不够的：包自己也会在 `~/.pi/agent/extensions/` **之前**加载并注册
- * 这 5 个工具，于是同名注册变成 **conflict**，pi 会在启动时把 `Tool "pi_web_search" conflicts
- * with …` 打进 `[Extension issues]`（5 个工具 = 5 条）。而 `renderShell` / `renderCall` 是
- * `ToolDefinition` 的字段，pi **没有**「事后替换某个已注册工具的渲染器」这种机制 —— 想接管就
- * 只能同名注册，只能让包先别自动加载。
+ * Capturing + re-registering inside the extension is not enough: the package itself also loads
+ * **before** `~/.pi/agent/extensions/` and registers those 5 tools, so same-name registration
+ * becomes a **conflict** — pi prints `Tool "pi_web_search" conflicts with …` into
+ * `[Extension issues]` at startup (5 tools = 5 entries). And since `renderShell` /
+ * `renderCall` are `ToolDefinition` fields, pi has **no** mechanism to "replace a registered
+ * tool's renderer after the fact" — the only way to take over is same-name registration, and
+ * that requires the package not auto-loading first.
  *
- * 开关是 `settings.json` 里 `packages` 的**对象形式 + 空数组过滤**（pi 官方文档
- * `docs/packages.md`「Select package resources」：`[]` = 该类型一个都不加载）：
+ * The switch is the **object form + empty-array filter** of `packages` in `settings.json`
+ * (pi's official `docs/packages.md`, "Select package resources": `[]` = load none of that
+ * type):
  *
  * ```json
  * "packages": [
@@ -56,37 +67,49 @@
  * ]
  * ```
  *
- * **包本身仍然登记在 `packages` 里** —— 所以 `pi update --extensions` 照常提示并升级它，
- * 与 `-builtin:codemode` 那种「禁用加载单元但不禁用包」是同一个手法（用户 2026-10-02 明确要求
- * 「升级还是正常升级」）。升级后本扩展不用改：捕获的是**当次运行**的包定义，包升级即跟着变；
- * 渲染器里没有任何一份复制的包逻辑。
+ * **The package itself stays listed in `packages`** — so `pi update --extensions` still offers
+ * and performs its upgrade, the same technique as `-builtin:codemode`'s "disable the load unit
+ * but not the package" (the user explicitly required on 2026-10-02: "upgrades still upgrade
+ * normally"). After an upgrade this extension needs no changes: it captures the package's
+ * definitions **for the running session**, so they follow the package; the renderers carry no
+ * copied package logic whatsoever.
  *
- * 实测（SDK，2026-10-02）：该过滤生效后 `pi-web-access` 不再自动加载、本扩展的 5 个工具
- * 照常注册，而启动诊断 **errors: [] / warnings: []**（对比：不过滤时是 5 条 conflict errors）。
+ * Measured (SDK, 2026-10-02): with the filter in effect, `pi-web-access` no longer
+ * auto-loads, this extension's 5 tools register as usual, and startup diagnostics show
+ * **errors: [] / warnings: []** (contrast: without the filter, 5 conflict errors).
  *
- * ## 包不在时的行为（fail-soft，不能把 pi 拖崩）
+ * ## Behavior when the package is absent (fail-soft; must not take pi down)
  *
- * 包没装（换机器、`packages` 里手动删了）时本扩展**什么都不注册**，这几个工具就整个不存在 ——
- * 与「包没装」时的原生行为一致。不抛异常：扩展加载期抛异常同样是静默少工具，还更难查。
+ * When the package is not installed (new machine, or manually removed from `packages`), this
+ * extension **registers nothing** — those tools simply do not exist, identical to the native
+ * behavior of "package not installed". No exception is thrown: a load-time exception likewise
+ * silently misses tools, and is even harder to diagnose.
  *
- * ## 包路径的解析（三条候选，按可靠性排）
+ * ## Resolving the package path (three candidates, in reliability order)
  *
- * ① `PI_WEB_ACCESS_EXTENSION` 环境变量（测试与特殊布局用）；
- * ② **裸说明符 `import("pi-web-access")`** —— 扩展是被 jiti 加载的，解析基准是**扩展文件自己
- *    的目录**（`~/.pi/agent/extensions/web-search-tree/`），向上查 `~/.pi/agent/node_modules/`。
- *    这个位置存在时是首选（跟着包的安装位置走，不猜）。本机实测**不存在**，但留着 —— 别的布局
- *    下可能命中，且命中时最准。
- * ③ `~/.pi/agent/npm/node_modules/pi-web-access/dist/index.js`（pi 的 npm 安装落点；node
- *    `--test` 环境实测**可以**直接 import 进 ESM，readpath 是 bin 时不行 —— 见 index.test.ts 的说明）。
+ * ① The `PI_WEB_ACCESS_EXTENSION` environment variable (for tests and special layouts);
+ * ② **bare specifier `import("pi-web-access")`** — extensions are loaded by jiti, whose
+ *    resolution base is **the extension file's own directory**
+ *    (`~/.pi/agent/extensions/web-search-tree/`), walking up to `~/.pi/agent/node_modules/`.
+ *    When that location exists it is the first choice (it follows the package's install
+ *    location instead of guessing). Measured absent on this machine, but kept — other layouts
+ *    may hit it, and it is the most accurate when it does.
+ * ③ `~/.pi/agent/npm/node_modules/pi-web-access/dist/index.js` (pi's npm install location;
+ *    measured in a `node --test` environment: **can** be imported directly into ESM; not so
+ *    when the readpath is a bin — see the notes in index.test.ts).
  *
- * **不做 `createRequire` 那套**：`.pnpm` 的 hoisted 布局里 `pi-web-access` 只作为 symlink 存在，
- * `require.resolve("pi-web-access")` 实测抛 `MODULE_NOT_FOUND`（它不在 `node_modules/.pnpm/node_modules`
- * 下，也不是本包的依赖）—— 三条候选里已经覆盖了它真实所在的两个位置，再加一条只会误导。
+ * **No `createRequire` approach**: in `.pnpm`'s hoisted layout `pi-web-access` exists only as
+ * a symlink, and `require.resolve("pi-web-access")` measured throws `MODULE_NOT_FOUND` (it is
+ * neither under `node_modules/.pnpm/node_modules` nor a dependency of this package) — the
+ * three candidates already cover the two places it really lives, and another candidate would
+ * only mislead.
  *
- * `PI_WEB_SEARCH_TREE=off` 关闭（注册期读一次，与 `PI_CODEMODE_TREE` / `PI_READ_COLLAPSE` 同一约定）。
- * 注意关闭后这些工具会**整个消失**（包已被 settings 过滤掉、本扩展又不注册）——
- * 要恢复原生观感得先把 settings 里那条过滤删掉。这条代价与 `codemode-tree` 的 `PI_CODEMODE_TREE`
- * 完全同形，README 里一并记着。
+ * Turned off with `PI_WEB_SEARCH_TREE=off` (read once at registration time; same convention as
+ * `PI_CODEMODE_TREE` / `PI_READ_COLLAPSE`). Note that when off, these tools **disappear
+ * entirely** (the package is already filtered out by settings and this extension registers
+ * nothing) — restoring the native look requires removing that settings filter first. This
+ * cost is exactly the same shape as `codemode-tree`'s `PI_CODEMODE_TREE`, and is recorded in
+ * the README alongside it.
  */
 
 import { homedir } from "node:os";
@@ -105,18 +128,20 @@ import {
 	withCallGutter,
 } from "./render.ts";
 
-/** 接管的工具名 —— 三个都自带渲染器，改造成本与 search 同构（见文件头表格）。 */
+/** Tool names we take over — all three ship renderers, so the rework is isomorphic to search (see the table in the file header). */
 const MANAGED_TOOLS = new Set(["pi_web_search", "fetch_content", "get_search_content"]);
 
-/** 包 npm 安装落点里的扩展入口。 */
+/** The extension entry inside the package's npm install location. */
 function npmPackageEntry(): string {
 	return join(homedir(), ".pi", "agent", "npm", "node_modules", "pi-web-access", "dist", "index.js");
 }
 
 /**
- * 解析 pi-web-access 的工厂函数（候选见文件头）。全部失败返回 undefined —— 调用方据此静默退出。
+ * Resolve pi-web-access's factory function (candidates in the file header). Returns undefined
+ * when everything fails — the caller exits silently on that.
  *
- * 裸说明符那个候选**故意放在绝对路径之前**：它命中时才是「包现在装在哪」，绝对路径只是兜底。
+ * The bare-specifier candidate is **deliberately placed before the absolute path**: only when
+ * it hits is it "where the package is installed right now"; the absolute path is the fallback.
  */
 async function resolvePackageFactory(): Promise<((pi: unknown) => unknown) | undefined> {
 	const candidates: string[] = [];
@@ -131,17 +156,18 @@ async function resolvePackageFactory(): Promise<((pi: unknown) => unknown) | und
 			const factory = (loaded as { default?: unknown }).default;
 			if (typeof factory === "function") return factory as (pi: unknown) => unknown;
 		} catch {
-			// 这个候选不可用：试下一个
+			// this candidate is unusable: try the next
 		}
 	}
 	return undefined;
 }
 
 /**
- * 用包自己的工厂**捕获**它注册的工具定义（只拦截 `registerTool`，其余 `pi.*` 转发给真 API）。
+ * **Capture** the tool definitions the package registers by running its own factory
+ * (intercepting only `registerTool`; every other `pi.*` is forwarded to the real API).
  *
- * 注意包是**异步**工厂（pi 的 `initializeExtension` 里 `await factory(...)`），所以这里也必须
- * await —— 不等的话捕获到的会是空集合。
+ * Note the package's factory is **async** (pi's `initializeExtension` does `await factory(...)`),
+ * so this must await too — without waiting, the capture would be an empty set.
  */
 async function capturePackageTools(pi: ExtensionAPI, factory: (pi: unknown) => unknown): Promise<ToolDefinition<any, any, any>[]> {
 	const captured: ToolDefinition<any, any, any>[] = [];
@@ -159,7 +185,7 @@ async function capturePackageTools(pi: ExtensionAPI, factory: (pi: unknown) => u
 	return captured;
 }
 
-/** 包自带渲染器返回的可能是 `Container`（带 children）也可能是单个组件 —— 统一成行数组。 */
+/** The package renderer may return a `Container` (with children) or a single component — unify into a line array. */
 function componentLines(component: any, width: number): string[] {
 	const children: any[] | undefined = component?.children;
 	if (!Array.isArray(children) || children.length === 0) {
@@ -172,7 +198,7 @@ function componentLines(component: any, width: number): string[] {
 	return lines;
 }
 
-/** 从工具的 result 里取出正文行（模型可见那份）—— 同步可得，不需要宽度。 */
+/** Extract the body lines (the model-visible copy) from a tool result — available synchronously, no width needed. */
 function contentLines(result: { content?: unknown }): string[] {
 	const blocks = Array.isArray(result.content) ? result.content : [];
 	return blocks
@@ -182,9 +208,11 @@ function contentLines(result: { content?: unknown }): string[] {
 }
 
 /**
- * 按**宽度 + 形状键**缓存行数组：`render(width)` 每帧都调，而两个渲染器都不便宜（包自带的
- * `renderResult` 要拼 preview / 扫 content）。键里必须带上状态 —— 圆点颜色、命令行续段前缀
- * 都随状态变，只按宽度缓存会把上一帧的形状钉死（`codemode-tree` 踩过同一个坑）。
+ * Cache the line array by **width + shape key**: `render(width)` runs every frame, and neither
+ * renderer is cheap (the package's `renderResult` assembles previews and scans content). The
+ * key must include the state — the dot color and the command-line continuation prefix change
+ * with state, and caching by width alone would pin the previous frame's shape (`codemode-tree`
+ * stepped in the same pit).
  */
 function createCachedComponent(render: (width: number) => string[], cacheKey: () => string, invalidateInner?: () => void) {
 	let cachedWidth: number | undefined;
@@ -210,38 +238,46 @@ function createCachedComponent(render: (width: number) => string[], cacheKey: ()
 }
 
 /**
- * 给**一个**被接管的工具定义接上树形外壳。
+ * Give **one** taken-over tool definition the tree shell.
  *
- * 三个工具共用同一套变换（用户 2026-10-02 定：只收自带渲染器的那三个，所以这条路径对三者都成立）——
- * 差异只在包自己的渲染器产出的行，形状与列位全在 `render.ts` 里统一。
+ * All three tools share the same transformation (user's decision, 2026-10-02: only the three
+ * with bundled renderers are covered, so this path holds for all of them) — the only
+ * differences are the lines each package renderer produces; shape and columns are unified in
+ * `render.ts`.
  */
 function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<any, any, any> {
 	return {
-		// 展开而不是逐字段抄：`execute` / `parameters` / `description` / `promptSnippet` /
-		// `promptGuidelines` / `constrainedSampling` / `exposure` / `defaultActive` / `annotations`
-		// 全部原样继承（prompt 元数据不会自动继承，必须显式带上）。
+		// Spread, not field-by-field copying: `execute` / `parameters` / `description` /
+		// `promptSnippet` / `promptGuidelines` / `constrainedSampling` / `exposure` /
+		// `defaultActive` / `annotations` are all inherited as-is (prompt metadata is not
+		// auto-inherited; it must be carried explicitly).
 		...target,
-		// `renderShell: "self"`：让 pi 不再套 `contentBox`（`Box(1, 1, bgFn)`）—— 于是
-		// ① **没有底色**（pending / 成功 / 失败三种底都不画），② **没有上下两条边界空行**。
-		// 与 bash / read / codemode 块同一手法。
+		// `renderShell: "self"`: makes pi stop wrapping in `contentBox` (`Box(1, 1, bgFn)`) — so
+		// ① **no background fill** (pending / success / failure all unpainted), and ② **no
+		// boundary blank lines above and below**. Same technique as the bash / read / codemode
+		// blocks.
 		renderShell: "self",
 		renderCall(args, theme, context) {
 			const state = context.state as { innerCall?: any; innerResult?: any; failed?: boolean };
-			// 传给包自带渲染器的 `lastComponent` 必须是**它们自己上次返回的那个内层组件**：
-			// 包自带的 `renderResult` 里有 `context.lastComponent ?? …` 的复用逻辑，把我们的
-			// wrapper（没有 `clear()` / `addChild()`）传进去会抛 `TypeError`，而 pi 的
-			// `updateDisplay()` 会**静默**退回 fallback —— 形状悄悄变回默认，没有任何报错。
+			// The `lastComponent` handed to the package renderers must be **their own previous
+			// inner component**: the package's `renderResult` has `context.lastComponent ?? …`
+			// reuse logic, and passing our wrapper (which lacks `clear()` / `addChild()`)
+			// throws a `TypeError`, while pi's `updateDisplay()` **silently** falls back to the
+			// fallback renderer — the shape quietly reverts to the default with no error at all.
 			const inner =
 				target.renderCall?.(args, theme, { ...context, lastComponent: state.innerCall }) ??
 				({ render: () => [], invalidate: () => {} } as any);
 			state.innerCall = inner;
 			return createCachedComponent(
 				(width) => {
-					// 圆点色彩读 `state.failed` 而不是 `context.isError`：包有若干失败路径是**正常返回**
-					// 一个带 `details.error` 的对象（不是 throw），pi 不会把它标成 isError，只看
-					// `context.isError` 会让那些路径永远显示绿点。`state.failed` 由 renderResult 写入
-					// —— `updateDisplay()` 先 call 后 result，但两个组件的 `render()` 都在这之后才
-					// 跑，所以同一帧里读得到（与下面 `state.innerResult` 判「树接上没有」同一套时点）。
+					// The dot color reads `state.failed`, not `context.isError`: the package has
+					// several failure paths that **return normally** with `details.error` set
+					// (rather than throwing); pi does not flag those as isError, so keying on
+					// `context.isError` alone would keep those paths showing a green dot forever.
+					// `state.failed` is written by renderResult — `updateDisplay()` runs call
+					// before result, but both components' `render()` only run after both, so it
+					// is readable within the same frame (same timing as the `state.innerResult`
+					// "is the tree connected" check below).
 					const dot = theme.fg(stateDotSlot(context.isPartial === true, state.failed === true), "\u2022");
 					const pipe = theme.fg("muted", "\u2502 ");
 					const connected = state.innerResult !== undefined;
@@ -254,14 +290,17 @@ function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<an
 		},
 		renderResult(result, options, theme, context) {
 			const state = context.state as { innerResult?: any; failed?: boolean };
-			// 失败判定必须**在这里同步算完**（不能推进下面的懒渲染闭包）：`updateDisplay()` 先跑
-			// renderCall、再跑本函数，而容器渲染时两个组件的 `render()` 是**先 call 后 result** ——
-			// 把判定放在下面的闭包里，renderCall 那颗圆点就会看到上一帧的（未置位的）`state.failed`，
-			// 于是失败块显示绿点（实测踩到）。判定读原始 `result`（正文文本 / details / isError）
-			// 而不是渲染后的行，所以同步算得出来，也不需要宽度。
+			// The failure verdict must be **computed synchronously here** (not pushed into the
+			// lazy render closure below): `updateDisplay()` runs renderCall first, then this
+			// function, while the container renders both components' `render()` **call first,
+			// then result** — putting the verdict in the closure below means renderCall's dot
+			// sees the previous frame's (unset) `state.failed`, so a failed block shows a green
+			// dot (hit in practice). The verdict reads the raw `result` (body text / details /
+			// isError), not the rendered lines, so it can be computed synchronously and needs
+			// no width.
 			const failed = isFailureResult(context.isError === true, contentLines(result), result.details);
 			state.failed = failed;
-			// 同一个 `lastComponent` 契约（见 renderCall 里的说明）。
+			// The same `lastComponent` contract (see renderCall).
 			const inner =
 				target.renderResult?.(result, options, theme, { ...context, lastComponent: state.innerResult }) ??
 				({ render: () => [], invalidate: () => {} } as any);
@@ -270,8 +309,10 @@ function withTreeShell(target: ToolDefinition<any, any, any>): ToolDefinition<an
 				(width) => {
 					const lines = trimTrailingBlanks(componentLines(inner, contentWidth(width)));
 					if (!failed) return shapeResultLines(lines, theme);
-					// 失败：① 包的状态行是无条件 `success` 绿的（它不知道这次失败了），换成失败红，
-					// 否则会出现「红圆点 + 绿状态行」的自相矛盾；② `Error:` 行也染红。
+					// On failure: ① the package's status line is unconditionally `success`
+					// green (it does not know about this failure), so swap it to failure red —
+					// otherwise you get the self-contradictory "red dot + green status line";
+					// ② the `Error:` line is also dyed red.
 					return shapeResultLines(recolorSuccessToFailure(colorizeErrorLines(lines, theme), theme), theme);
 				},
 				() => `result:${failed ? "err" : "ok"}:${options.expanded ? "expanded" : "collapsed"}`,
@@ -286,16 +327,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	const factory = await resolvePackageFactory();
 	if (!factory) {
-		// 包不在：什么都不注册（见文件头「包不在时的行为」）。不抛异常 —— 加载期抛异常同样是
-		// 静默少工具，只是更难查。
+		// Package absent: register nothing (see "Behavior when the package is absent" in the
+		// file header). No exception — a load-time exception likewise silently misses tools,
+		// only harder to diagnose.
 		return;
 	}
 	const captured = await capturePackageTools(pi, factory);
 	if (captured.length === 0) return;
 
 	for (const definition of captured) {
-		// 自带渲染器的三个套上树形外壳；其余（source_check / web_enable，无渲染器）原样注册 ——
-		// 观感不变是用户明确划定的范围（见文件头表格）。
+		// The three with bundled renderers get the tree shell; the rest (source_check /
+		// web_enable, no renderer) register as-is — "looks unchanged" is the scope the user
+		// drew explicitly (see the table in the file header).
 		pi.registerTool(MANAGED_TOOLS.has(definition.name) && definition.renderCall ? withTreeShell(definition) : definition);
 	}
 }
