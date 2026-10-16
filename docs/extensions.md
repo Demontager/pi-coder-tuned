@@ -184,21 +184,6 @@ The same extension draws the `●` on a running bash row.
 - `PI_WORKING_SUMMARY_MODEL` — `provider/modelId` for that request; defaults to the session model so a typo can only cost the summary, never the request.
 - `PI_WORKING_SUMMARY_GAP` (default `1`).
 
-### `stop-hook.ts` — completed-run counter
-
-Shows `✦ Crafted in 2m 14s. Used 12 tool calls.` immediately at `agent_settled`,
-above the editor and before the delayed recap. Each completed run randomly picks
-Done, Cooked, Brewed, Built, Baked, or Crafted once; redraws keep the same label.
-Aborted/error model responses use Interrupted/Failed instead.
-
-Measures monotonic elapsed time from interactive prompt submission (agent start
-as fallback), including tool execution, confirmation waits, retries, compaction,
-steering, and queued continuations until final settlement. Counts each
-`tool_execution_start`, including failed attempts, but not commands inside Bash
-or tool calls internal to background subagents. Clears on the next input or
-session change. UI-only, with no timers, inference requests, session storage,
-or model-context changes. Disable through the individual resource in `pi config`.
-
 ## Workflow
 
 ### `simple-task/` — task list
