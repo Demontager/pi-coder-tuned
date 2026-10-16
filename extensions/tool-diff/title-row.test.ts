@@ -1,11 +1,14 @@
 /**
- * Tests for title-row.ts — `Edit` / `Write` 标题行的纯排版（预算分配、按宽度截断、闪烁占位、行数缩略）。
+ * Tests for title-row.ts — the `Edit` / `Write` title row's pure layout (budget split,
+ * width truncation, blink placeholder, count shrinking).
  *
  * Run with:  node --test clients/pi/extensions/tool-diff/title-row.test.ts
  *
- * 被测模块不 import pi / pi-tui（宽度与截断函数都是注入的），所以这里喂假实现：
- * ASCII = 1 列、CJK = 2 列；`●`（U+25CF）与 `…` 都是 1 列 —— 与 pi-tui 的 `visibleWidth`
- * 已核对一致（`visibleWidth("●") === 1`）。主题的 `fg` 换成恒等函数，断言里直接看纯文本。
+ * The module under test imports no pi / pi-tui (width and truncate functions are
+ * injected), so fake implementations are fed: ASCII = 1 column, CJK = 2 columns; `●`
+ * (U+25CF) and `…` are both 1 column — verified identical to pi-tui's `visibleWidth`
+ * (`visibleWidth("●") === 1`). The theme's `fg` is the identity, so assertions read
+ * plain text directly.
  */
 
 import assert from "node:assert/strict";
@@ -24,10 +27,10 @@ import {
 	type TitleTheme,
 } from "./title-row.ts";
 
-/** 恒等主题：不着色，断言直接比对纯文本。 */
+/** The identity theme: no coloring — assertions compare plain text. */
 const plainTheme: TitleTheme = { fg: (_color, text) => text };
 
-/** 假宽度函数：CJK 常见全角区间按 2 列，其余按 1 列。 */
+/** The fake width function: common CJK fullwidth ranges count 2 columns, the rest 1. */
 function widthOf(text: string): number {
 	let width = 0;
 	for (const ch of text) {
@@ -45,7 +48,7 @@ function widthOf(text: string): number {
 	return width;
 }
 
-/** 假截断函数（生产环境传 pi-tui 的 truncateToWidth）：从尾部硬切，够用。 */
+/** The fake truncator (production gets pi-tui's truncateToWidth): a hard tail clip is enough. */
 function truncateToWidth(text: string, width: number, ellipsis = ELLIPSIS): string {
 	if (widthOf(text) <= width) return text;
 	let out = "";
@@ -63,7 +66,7 @@ function deps(home = "/Users/me"): TitleRowDeps {
 	return { widthOf, truncateToWidth, home, indent: " " };
 }
 
-/** 一条必须从头部截断才能放进 90 列的深层路径。 */
+/** A deep path that must head-truncate to fit 90 columns. */
 const LONG_PATH =
 	"/Users/me/work/project/packages/renderer/src/components/inner/deep/deeper/deepest/final/renderer-impl.ts";
 
@@ -71,7 +74,7 @@ function titleLine(path: string, suffix: string, width: number, rowDeps: TitleRo
 	return new TitleRow(rowDeps, plainTheme, "Write", path, suffix).render(width)[0] ?? "";
 }
 
-describe("blinkSuffix: 灭态等宽占位", () => {
+describe("blinkSuffix: the off state is a same-width placeholder", () => {
 	it("keeps the same visible width in both phases so the path budget cannot move", () => {
 		assert.equal(widthOf(blinkSuffix(plainTheme, true)), 1);
 		assert.equal(widthOf(blinkSuffix(plainTheme, false)), 1);
@@ -84,12 +87,12 @@ describe("blinkSuffix: 灭态等宽占位", () => {
 	});
 });
 
-describe("TitleRow: 闪烁期间超长路径不摆动（回归）", () => {
+describe("TitleRow: an overlong path does not wobble during the blink (regression)", () => {
 	it("renders the same line in both blink phases, modulo the marker itself", () => {
 		const on = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), 90);
 		const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), 90);
-		// 两态的唯一差别是标记字符 —— 修复前灭态是空串，预算每帧跳 2 列，
-		// 截断窗口跟着左右挪（`…ccccc` vs `…ccccccc`），观感就是"文件名也在闪"
+		// the only difference between the states is the marker char — before the fix the off state was an empty string, the budget jumped 2 columns per frame,
+		// and the truncation window slid left and right (`…ccccc` vs `…ccccccc`) — the filename visibly "blinked"
 		assert.equal(on.replace(BLINK_MARKER, " "), off);
 		assert.equal(widthOf(on), widthOf(off));
 	});
@@ -100,7 +103,7 @@ describe("TitleRow: 闪烁期间超长路径不摆动（回归）", () => {
 			const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), width);
 			assert.ok(widthOf(on) <= width, `line wider than ${width}: ${JSON.stringify(on)}`);
 			assert.equal(on.replace(BLINK_MARKER, " "), off, `path moved at width ${width}`);
-			// 路径永远保留尾部：无论宽度多窄，文件名都能完整看到
+			// the path always keeps its tail: no matter how narrow, the filename stays whole
 			assert.ok(on.replace(BLINK_MARKER, " ").trimEnd().endsWith("renderer-impl.ts"), `no file name at width ${width}`);
 		}
 	});
@@ -114,7 +117,7 @@ describe("TitleRow: 闪烁期间超长路径不摆动（回归）", () => {
 	});
 });
 
-describe("TitleRow: 工具名与尾部永远完整", () => {
+describe("TitleRow: the tool name and tail are always whole", () => {
 	it("keeps a wide stats suffix intact and truncates the path instead", () => {
 		const line = titleLine(LONG_PATH, statsSuffix(plainTheme, { added: 123456, removed: 9999 }), 90);
 		assert.ok(line.endsWith("(+123k -9999)"), line);
@@ -126,7 +129,7 @@ describe("TitleRow: 工具名与尾部永远完整", () => {
 		const line = titleLine(LONG_PATH, blinkSuffix(plainTheme, true), 8);
 		assert.equal(widthOf(line) <= 8, true, line);
 		assert.ok(line.includes("Write"), line);
-		// 退回整行截断时两态同样只差标记：尾部是等宽空格，预算不会跳
+		// on whole-row truncation the two states again differ only in the marker: the tail is a same-width space — the budget never jumps
 		const off = titleLine(LONG_PATH, blinkSuffix(plainTheme, false), 8);
 		assert.equal(line.replace(BLINK_MARKER, " "), off);
 	});
@@ -136,7 +139,7 @@ describe("TitleRow: 工具名与尾部永远完整", () => {
 	});
 });
 
-describe("TitleRow: 路径与缩进", () => {
+describe("TitleRow: path and indent", () => {
 	it("shortens the home prefix and honours a custom indent", () => {
 		const line = titleLine("/Users/me/work/project/src/index.ts", "", 60, {
 			...deps(),
@@ -179,7 +182,7 @@ describe("formatCount", () => {
 });
 
 describe("statsSuffix", () => {
-	/** 记录 fg 调用的主题，用来断言着色 token。 */
+	/** A theme recording fg calls, to assert the color tokens used. */
 	function recorder(): { theme: TitleTheme; calls: Array<[string, string]> } {
 		const calls: Array<[string, string]> = [];
 		return {
@@ -223,7 +226,7 @@ describe("shortenPath", () => {
 	it("shortens the home prefix at a path boundary only", () => {
 		assert.equal(shortenPath("/Users/me/work/index.ts", "/Users/me"), "~/work/index.ts");
 		assert.equal(shortenPath("/Users/me", "/Users/me"), "~");
-		// `/Users/melo` 不该被缩成 `~lo`
+		// `/Users/melo` must not shorten to `~lo`
 		assert.equal(shortenPath("/Users/melo/index.ts", "/Users/me"), "/Users/melo/index.ts");
 	});
 
