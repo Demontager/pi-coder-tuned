@@ -1,34 +1,38 @@
 /**
- * lookup-redirect —— 「这条 bash 命令本该用原生工具」的**硬判定**。
+ * lookup-redirect — the **hard decision** for "this bash command should have used a native tool".
  *
- * ## 为什么需要它
+ * ## Why it exists
  *
- * 提示词（`promptSnippet` / `AGENTS.md`）都是**建议**：模型读了也可以不听。用户的要求
- * 是「该用原生 find/ls/grep 的时候就用」，这是确定性要求，只能落在 loop 层 —— 本模块
- * 给出判定，`bash-command-collapse.ts` 的 `tool_call` handler 据此拦下这次调用，并把
- * 正确的调用形态作为结果交给模型（用户 2026-10-06 定）。
+ * Prompts (`promptSnippet` / `AGENTS.md`) are **suggestions**: the model may read them and still not comply.
+ * The user's requirement — "use native find/ls/grep when that's what the command is doing" — is a
+ * deterministic requirement that can only be enforced in the loop layer: this module makes the call, and the
+ * `tool_call` handler in `bash-command-collapse.ts` blocks the invocation accordingly, handing the correct
+ * call form back to the model (policy set by the user on 2026-10-06).
  *
- * ## 取向：宁可不拦，不可拦错
+ * ## Orientation: better to miss a block than to block wrong
  *
- * 只有**整条命令都是纯粹的单一探查**才拦 —— 每个有效段的动词都必须是「取回内容」类
- * （`grep` / `find` / `ls` / `cat` / `head` / `sed -n`）。一旦出现：
+ * Only a command that is **purely a single lookup end to end** is blocked — every effective stage's verb must
+ * be a "fetch content" kind (`grep` / `find` / `ls` / `cat` / `head` / `sed -n`). The moment any of these
+ * appears:
  *
- *   - 变换器（`awk` / `jq` / `sort` / `wc` / `cut` / `tr` / `uniq` …）—— 原生工具给不了
- *   - 执行（`node` / `python3` / `npm` / `git` / `make` …）—— 这是真在跑东西
- *   - 写重定向、`sed -i`、heredoc 命令体
+ *   - transformers (`awk` / `jq` / `sort` / `wc` / `cut` / `tr` / `uniq` …) — native tools cannot do that
+ *   - execution (`node` / `python3` / `npm` / `git` / `make` …) — that is genuinely running something
+ *   - write redirections, `sed -i`, heredoc bodies
  *
- * 就**不拦**。那些是 bash 该干的活，拦了只会逼模型多跑一轮，比省下的 token 更贵。
+ * it is **not** blocked. Those are legitimately bash work; blocking would only force the model to spend an
+ * extra round, which costs more than the tokens saved.
  *
- * 同理，`find` 带 `-maxdepth` / `-mtime` / `-size` / `-exec`、`grep` 带 `-v` / `-c` / `-A`、
- * `sed` 不带 `-n`、多路径 `grep pat f1 f2` —— 一律不拦：原生工具的 schema 表达不了，
- * 拦下来模型也只能改用别的 bash，净损失一轮。
+ * Likewise, `find` with `-maxdepth` / `-mtime` / `-size` / `-exec`, `grep` with `-v` / `-c` / `-A`,
+ * `sed` without `-n`, multi-path `grep pat f1 f2` — none are blocked: the native tool schemas cannot express
+ * them, and after blocking, the model could only reach for a different bash command anyway — a net loss of
+ * a round.
  *
- * ## `.gitignore` 是必须交代的差异
+ * ## `.gitignore` is a difference that must be disclosed
  *
- * 原生 `grep` / `find` 尊重 `.gitignore`（跳过 `node_modules/`、`dist/`），bash 的
- * `grep -r` 不跳 —— 实测：同一仓库里 `rg` 只找到 `visible.txt`，`grep -rn` 另外找到
- * `ignored/hidden.txt`。所以拦截语里**必须**写明这条，并给出补偿手法（把被忽略的目录
- * 显式作为 `path` 传入即可穿透，实测有效），否则「换原生」会变成静默漏搜。
+ * Native `grep` / `find` respect `.gitignore` (skipping `node_modules/`, `dist/`); bash's `grep -r` does not —
+ * verified: in the same repo `rg` found only `visible.txt`, while `grep -rn` additionally found
+ * `ignored/hidden.txt`. So the block message **must** spell this out and give the workaround (passing the
+ * ignored directory explicitly as `path` pierces it — verified); otherwise "use native" becomes a silent miss.
  */
 
 import { segmentVerb, splitShellSegments } from "../explored-group/classify.ts";
@@ -36,85 +40,88 @@ import { segmentVerb, splitShellSegments } from "../explored-group/classify.ts";
 export type NativeLookupTool = "grep" | "find" | "ls" | "read";
 
 export interface LookupRedirect {
-	/** 建议改用的原生工具（多族混杂时取优先级最高的那个）。 */
+	/** The native tool to suggest (the highest-priority family when several are mixed). */
 	tool: NativeLookupTool;
-	/** 从命令里抽出的调用提示（尽力而为，抽不到就是 undefined）。 */
+	/** Invocation hint extracted from the command (best-effort; undefined when nothing could be extracted). */
 	hint?: { pattern?: string; path?: string; args?: Record<string, unknown> };
-	/** 命令里出现的全部原生工具族，用于措辞。 */
+	/** All native-tool families appearing in the command, used for wording. */
 	tools: NativeLookupTool[];
 }
 
-/** `grep` 一族：检索文本。 */
+/** The `grep` family: searching text. */
 const GREP_VERBS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
-/** `find` 一族：按名字找文件。 */
+/** The `find` family: finding files by name. */
 const FIND_VERBS = new Set(["find", "fd"]);
-/** `ls` 一族：列目录。 */
+/** The `ls` family: listing directories. */
 const LS_VERBS = new Set(["ls", "tree", "eza"]);
-/** `read` 一族：取文件内容（`sed` 需另判 `-n`）。 */
+/** The `read` family: fetching file contents (`sed` requires an extra `-n` check). */
 const READ_VERBS = new Set(["cat", "bat", "head", "sed", "nl"]);
 
-/** 纯导航/输出动词：不承载探查意图，跳过。 */
+/** Pure navigation/output verbs: they carry no lookup intent, skip them. */
 const SKIP_VERBS = new Set(["cd", "pushd", "popd", "pwd", "echo", "printf", "true", "false", ":", "export", "set"]);
 
 /**
- * 管道末尾的截断习语（`… | head -30` / `… | tail -5`）—— 原生工具有 `limit`，
- * 这截断等于它的内建行为，不该因此把整条命令放行。
+ * Truncation idiom at the end of a pipeline (`… | head -30` / `… | tail -5`) — native tools have `limit`,
+ * so this truncation equals their built-in behavior and must not let the whole command slip through.
  *
- * 判定要严：只认**纯数量**形态（`-30` / `-n 30`），且**末尾无文件名** ——
- * `head -20 README.md` 是真的读文件（那是 `read`），不是截断管道。
+ * The check is strict: only **pure count** forms (`-30` / `-n 30`) are accepted, with **no file name at the
+ * end** — `head -20 README.md` genuinely reads a file (that is `read`), not pipeline truncation.
  */
 function isTruncationStage(verb: string, args: string[], isLast: boolean): boolean {
 	if (!isLast) return false;
 	if (verb !== "head" && verb !== "tail") return false;
 	const positionals = args.filter((t) => !t.startsWith("-"));
-	if (positionals.length > 0) return false; // 有文件名 = 读文件
-	// `-30` / `-n 30` / `--lines=30` / 裸 `-n` / 无参 head
+	if (positionals.length > 0) return false; // a file name means reading a file
+	// `-30` / `-n 30` / `--lines=30` / bare `-n` / head with no args
 	if (args.length === 0) return true;
 	return args.every((t) => /^-\d+$/.test(t) || t === "-n" || /^--lines(=|$)/.test(t));
 }
 
-/** 组合短旗标里允许出现的字母（`-rn` / `-i` …）。`v` / `c` / `l` / `A` / `B` / `C` 都**不**在列。 */
+/** Letters allowed inside combined short flags (`-rn` / `-i` …). `v` / `c` / `l` / `A` / `B` / `C` are **not** included. */
 const GREP_OK_SHORT_FLAGS = /^-[nriIsShHEFGwxR]+$/;
 
 /**
- * shell 展开的痕迹：通配符与命令替换。
+ * Traces of shell expansion: globbing and command substitution.
  *
- * **原生工具不做展开** —— `ls({ path: "*.md" })` 直接 `Path not found: …/*.md`（实测）。
- * 所以带展开的调用拦下来是**拦错**：模型照抄建议必然失败，还得自己摸出「用 bash 让 shell 展开」
- * 这条出路，净亏一轮。展开交给 shell 的用法本来就该留在 bash。
+ * **Native tools do no expansion** — `ls({ path: "*.md" })` returns `Path not found: …/*.md` (verified).
+ * So blocking a call that carries expansion is a **wrong block**: the model copies the suggestion verbatim,
+ * fails, and has to discover "use bash so the shell expands" on its own — a net loss of a round. Usage that
+ * depends on expansion belongs in bash anyway.
  *
- * 只认 `*` `?` `` ` `` `$(`，**不认** `[` `{`：`grep -n '[a-z]\+' f` 的方括号是正则不是 glob，
- * 把它当展开会漏掉一堆本该拦的检索。
+ * Only `*` `?` `` ` `` `$(` are recognized; `[` `{` are **not**: in `grep -n '[a-z]\+' f` the brackets are a
+ * regex, not a glob — treating them as expansion would miss a pile of lookups that should be blocked.
  */
 const SHELL_EXPANSION = /[*?`]|\$\(/;
 
 /**
- * 未展开的 shell 变量（`$D` / `${D}` / `$f`）。
+ * Unexpanded shell variables (`$D` / `${D}` / `$f`).
  *
- * 与通配符同理：原生工具不做参数展开，`read({path: "$D/settings.md"})` 只会去找一个字面名为
- * `$D` 的目录。拿不准变量绑的是什么值（赋值可能写在同一行的任何位置）时就**不拦** —— 实测
- * 全库 562 条（13.8%）建议里带未展开变量，这是「照抄建议必失败」的第三个大类。
+ * Same logic as globbing: native tools do no parameter expansion — `read({path: "$D/settings.md"})` would
+ * look for a directory literally named `$D`. When we cannot tell what a variable is bound to (the assignment
+ * could sit anywhere on the same line) we **do not block** — measured: 562 suggestions (13.8%) in the full
+ * corpus carried unexpanded variables, the third big category of "copying the suggestion would fail".
  */
 const SHELL_VARIABLE = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
 
-/** 参数里有没有需要 shell 先展开的 token。 */
+/** Whether any argument token needs shell expansion first. */
 function hasShellExpansion(tokens: string[]): boolean {
 	return tokens.some((t) => SHELL_EXPANSION.test(t) || SHELL_VARIABLE.test(t));
 }
 
-/** 去掉一层引号。 */
+/** Strip one layer of quotes. */
 function unquote(value: string): string {
 	return value.replace(/^(['"])(.*)\1$/s, "$2");
 }
 
 /**
- * 取一段的第一个位置参数，**引号内不切词**。
+ * Take a segment's first positional argument, **without splitting inside quotes**.
  *
- * `segmentVerb` 是按空白切词的，于是 `cd "/a b/proj"` 的落点变成 `"/a` —— 带引号的空格路径
- * 会被切碎。拿这个碎值去拼 `cd` 落点 / 当 `path`，给模型的就是一条**根本跑不通**的建议
- * （实测：`cd "/Users/…/Application Support/logs" && ls` 曾给出 `path: "\"/Users/bachi/Library/Application"`）。
+ * `segmentVerb` splits on whitespace, so `cd "/a b/proj"` lands on `"/a` — quoted paths with spaces get
+ * shredded. Using such a shred to compose the `cd` target / as `path` hands the model a suggestion **that
+ * cannot run at all** (observed: `cd "/Users/…/Application Support/logs" && ls` once produced
+ * `path: "\"/Users/bachi/Library/Application"`).
  *
- * 返回已去引号的完整参数；没有位置参数时返回 undefined。
+ * Returns the full argument with quotes stripped; undefined when there is no positional.
  */
 function firstPositionalQuoted(segment: string): string | undefined {
 	const tokens: string[] = [];
@@ -135,39 +142,41 @@ function firstPositionalQuoted(segment: string): string | undefined {
 		current += ch;
 	}
 	if (current) tokens.push(current);
-	// 跳过动词与旗标，取第一个位置参数。
+	// Skip the verb and flags, take the first positional.
 	const rest = tokens.slice(1).filter((t) => !t.startsWith("-"));
 	return rest[0];
 }
 
 /**
- * 把 `cd` 落点与一个相对路径拼起来（`cd /p && cat f` 的真实目标是 `/p/f`）。
+ * Join a `cd` target with a relative path (the real target of `cd /p && cat f` is `/p/f`).
  *
- * **这是「建议跑得通」的核心**：`hint.path` 是喂给原生工具的，而原生工具在**当前 cwd**
- * 下解析它 —— 不是命令里那个 `cd` 之后的目录。不拼的话模型会去读**另一个文件**（或直接
- * `Path not found`），而实测 74% 的拦截都带 `cd` 前缀 + 相对路径，代价极大。
+ * **This is the core of "the suggestion actually runs"**: `hint.path` is fed to the native tool, which
+ * resolves it under the **current cwd** — not the directory after the command's `cd`. Without the join the
+ * model reads **a different file** (or gets `Path not found`); and measured 74% of blocks carry a `cd`
+ * prefix + relative path, so the cost is huge.
  *
- * 绝对路径 / `~` / `.` / 带通配符的目标原样返回：前者已完整，后两者的相对语义就是当前目录，
- * 通配符则本来就不该走到这里（带展开的命令已在 `stageFamily` 放行）。
+ * Absolute paths / `~` / `.` / glob-bearing targets are returned as-is: the first is already complete, the
+ * middle two are relative to the current directory anyway, and globs should never reach here (commands with
+ * expansion were already passed through at `stageFamily`).
  */
 function joinWithCd(p: string | undefined, cdTarget: string | undefined, cdUnresolved: boolean): string | undefined {
 	if (typeof p !== "string" || p === "") return p;
 	if (p.startsWith("/") || p.startsWith("~")) return p;
-	// 通配符 / 命令替换 / 未展开变量 / 残留引号不由我们拼：前两类带这些的命令已在判定层
-	// 放行，后两类是转义引号把分词切碎后的残片（如 `grep -nE "^import|from \\\""` 会把 pattern
-	// 尾巴当成 path）—— 拼出来只会是一条跑不通的建议。
+	// Globs / command substitution / unexpanded variables / leftover quotes are not ours to join: commands
+	// carrying the former two already passed at the decision layer; the latter two are shreds left after escaped
+	// quotes shredded tokenization (e.g. `grep -nE "^import|from \\\""` takes the pattern tail as path) — the join would only produce an unrunnable suggestion.
 	if (/[*?`]|\$\(/.test(p) || SHELL_VARIABLE.test(p)) return p;
-	// 残留引号 = 转义引号把分词切碎后的**残片**（`grep -nE "^import|from \\\""` 会把 pattern 尾巴
-	// 当成 path）。拼也无意义、直接当建议更是错的，索性不给 path。
+	// Leftover quotes = **shreds** left when escaped quotes shredded tokenization (`grep -nE "^import|from \\\""`
+	// takes the pattern tail as path). Joining is meaningless and handing it over as a suggestion is wrong — give no path.
 	if (/["']/.test(p)) return undefined;
 	if (p === ".") return p;
-	// `cd` 落点已知：拼成绝对路径（`cd /p && cat f` 的真实目标是 `/p/f`）。
+	// `cd` target known: join into an absolute path (the real target of `cd /p && cat f` is `/p/f`).
 	if (cdTarget !== undefined) {
 		if (/[*?`]|\$\(/.test(cdTarget) || SHELL_VARIABLE.test(cdTarget)) return undefined;
 		return `${cdTarget.replace(/\/+$/, "")}/${p}`;
 	}
-	// `cd` 落点**要靠 shell 展开才能知道**（`cd "$DIR" && cat f`）：相对路径在当前 cwd 下
-	// 指的是**另一个文件**，静默指向错目标比报错更坏 —— 宁可不给 path，让模型自己对应。
+	// When the `cd` target can only be known through shell expansion (`cd "$DIR" && cat f`): a relative path
+	// under the current cwd points to **a different file** — a silently wrong target is worse than an error; better give no path and let the model map it.
 	if (cdUnresolved) return undefined;
 	return p;
 }
@@ -177,7 +186,7 @@ interface Stage {
 	args: string[];
 }
 
-/** 把一段拆成「管道里的各 stage」——按 `|` 切，引号内的不切。 */
+/** Split a segment into "stages in the pipeline" — split on `|`, not inside quotes. */
 function splitPipeline(segment: string): string[] {
 	const out: string[] = [];
 	let current = "";
@@ -206,41 +215,41 @@ function splitPipeline(segment: string): string[] {
 }
 
 /**
- * 判定一条命令里某个 stage 属于哪一族；`"skip"` = 导航/无意义，`null` = **不可拦截**
- * （出现它整条命令就放行）。
+ * Decide which family a stage of a command belongs to; `"skip"` = navigation/meaningless, `null` = **not
+ * blockable** (its presence lets the whole command through).
  */function stageFamily(stage: string): NativeLookupTool | "skip" | null {
 	const { verb, args } = segmentVerb(stage);
 	if (!verb) return "skip";
 	if (SKIP_VERBS.has(verb)) return "skip";
 
 	if (GREP_VERBS.has(verb)) {
-		// 旗标必须都是能映射到原生 schema 的（`-n` 忽略、`-r` 忽略、`-i` → ignoreCase、`--include` → glob）。
+		// All flags must map onto the native schema (`-n` ignored, `-r` ignored, `-i` → ignoreCase, `--include` → glob).
 		for (const token of args) {
 			if (!token.startsWith("-")) continue;
 			if (GREP_OK_SHORT_FLAGS.test(token)) continue;
 			if (/^--include(=|$)/.test(token)) continue;
-			return null; // `-v` / `-c` / `-A` / `--exclude` … 原生表达不了
+			return null; // `-v` / `-c` / `-A` / `--exclude` … native cannot express these
 		}
-		// 位置参数最多两个（pattern + 单个 path）；多个 path 不拦。
+		// At most two positionals (pattern + a single path); multiple paths are not blocked.
 		const positionals = args.filter((t) => !t.startsWith("-"));
 		if (positionals.length > 2) return null;
-		// 没有 path 又不递归 = 内容来自 **stdin**（`env | grep`、`cmd | grep`、`cat f | grep pat`）。
-		// 原生 grep 只能搜文件，给不出「换个调用就好」的建议 → 不拦。
-		// `grep -rn pat`（递归无 path）是例外：GNU grep 会搜当前目录，原生能表达。
+		// No path and non-recursive = content comes from **stdin** (`env | grep`, `cmd | grep`, `cat f | grep pat`).
+		// Native grep only searches files and cannot offer a "call this instead" suggestion → do not block.
+		// `grep -rn pat` (recursive, no path) is the exception: GNU grep searches the current directory — expressible natively.
 		//
-		// 注意：`cat a.txt | grep pat` 理论上能推出 `path: a.txt`，但 `splitShellSegments`
-		// **把 `|` 和 `;` 当同一种分隔符**（两者都拆成独立 segment），所以无法区分
-		// `cat a.txt | grep pat`（grep 读管道）与 `cat a.txt; grep pat`（grep 读 stdin）——
-		// 拿不准就不拦（实测这类合计只占可拦总量的 0.4%，不值得冒险）。
+		// Note: `cat a.txt | grep pat` could in theory derive `path: a.txt`, but `splitShellSegments`
+		// **treats `|` and `;` as the same separator** (both split into independent segments), so it cannot distinguish
+		// `cat a.txt | grep pat` (grep reads the pipe) from `cat a.txt; grep pat` (grep reads stdin) —
+		// when unsure, do not block (measured: these add up to only 0.4% of blockable volume, not worth the risk).
 		const recursive = args.some((t) => /^-[^-]*[rR]/.test(t));
 		if (positionals.length < 2 && !recursive) return null;
-		// path 带通配符/命令替换 → 要 shell 先展开，原生照抄必失败。
+		// A path carrying glob/command substitution needs shell expansion first — copying it natively would fail.
 		if (hasShellExpansion(positionals.slice(1).map(unquote))) return null;
 		return "grep";
 	}
 
 	if (FIND_VERBS.has(verb)) {
-		// 只认 `-name` / `-iname` / `-type`；出现别的谓词（`-maxdepth` / `-mtime` / `-exec`…）就不拦。
+		// Only `-name` / `-iname` / `-type` are recognized; any other predicate (`-maxdepth` / `-mtime` / `-exec`…) passes.
 		let i = 0;
 		while (i < args.length) {
 			const token = args[i]!;
@@ -252,48 +261,48 @@ function splitPipeline(segment: string): string[] {
 			if (token.startsWith("-")) return null;
 			i += 1;
 		}
-		// 搜索起点是 shell 展开出来的（`find * -name x`）→ 原生照抄必失败。
+		// Search roots produced by shell expansion (`find * -name x`) → copying natively would fail.
 		const dirs = args.filter((t) => !t.startsWith("-")).map(unquote);
 		if (hasShellExpansion(dirs.slice(0, 1))) return null;
 		return "find";
 	}
 
 	if (LS_VERBS.has(verb)) {
-		// `-R` 递归原生做不了；其余旗标放行（原生只给名字，拦截语里会说明）。
+		// `-R` recursion is beyond native; other flags pass (native gives names only — the block message says so).
 		if (args.some((t) => /^-[^-]*R/.test(t))) return null;
-		// 元信息旗标（`-l` / `-t` / `-S` / `-h`）**照旧拦** —— 这是刻意保留的策略，不是遗漏：
-		// 屏上多数 `ls -la` 只是想看目录里有什么，原生 `ls` 给了名字就够；真需要大小/时间时
-		// 拦截语会明说改走 bash 的 `stat` / `du`（那两条不拦）。代价是极少数**确实为元信息**而发的
-		// `ls -la` 会多花一轮，实测其量级很小（全库 3 次真实拦截里 2 次下一轮又用了 `ls`，
-		// 即模型确实被送到了另一条 bash 而不是原生 —— 保留）。（若日后想放掉，判定改成
-		// `/^-[^-]*[lthS]/` 即可，同时要同步 `explored-group` 的折叠口径与本节单测。）
+		// Metadata flags (`-l` / `-t` / `-S` / `-h`) are **still blocked** — a deliberate policy, not an oversight:
+		// most `ls -la` on screen just wants to see what is in the directory and native `ls` names suffice; when
+		// size/time is truly needed the block message points to bash `stat` / `du` (those two are not blocked). The
+		// cost: the rare `ls -la` genuinely launched for metadata burns one extra round — measured tiny (of 3 real
+		// blocks in the corpus, 2 used `ls` again next round, i.e. the model did get sent to another bash instead of
+		// native — kept). (To let it pass later, change the check to `/^-[^-]*[lthS]/` and sync `explored-group`'s collapse policy and these unit tests.)
 		const positionals = args.filter((t) => !t.startsWith("-")).map(unquote);
-		// 通配符（`ls *.md` / `ls -d */`）要 shell 展开，原生照抄必失败。
+		// Globs (`ls *.md` / `ls -d */`) need shell expansion — copying natively would fail.
 		if (hasShellExpansion(positionals)) return null;
-		// 一次列多个路径 —— 原生 `ls` 只收一个 path，照抄会静默漏掉其余（同 `cat a b` 的口径）。
+		// Listing several paths at once — native `ls` takes a single path; copying would silently drop the rest (same rule as `cat a b`).
 		if (positionals.length > 1) return null;
 		return "ls";
 	}
 
 	if (READ_VERBS.has(verb)) {
 		if (verb === "sed") {
-			// 只有 `sed -n '1,60p' file` 这种「打印区间」才等价于 read(offset/limit)。
+			// Only the "print range" form `sed -n '1,60p' file` is equivalent to read(offset/limit).
 			if (!args.includes("-n")) return null;
 			const script = args.find((t) => !t.startsWith("-"));
 			if (!script || !/^\d+(,\d+)?p$/.test(unquote(script))) return null;
 		}
 		const positionals = args.filter((t) => !t.startsWith("-")).map(unquote);
-		// `cat a b c` 原生 read 一次只读一个文件 → 不拦（免得逼出好几轮）。
+		// `cat a b c` — native read reads one file per call → do not block (avoid forcing extra rounds).
 		let files = verb === "sed" ? positionals.slice(1) : positionals;
-		// `head -n 20 f` 的 `20` 是 `-n` 的**值**、不是文件名 —— 不剔掉它就会数成「两个文件」
-		// 而整条放行（实测：`head -n 20 f` 漏拦，而同义的 `head -20 f` 拦得住）。
+		// In `head -n 20 f`, `20` is the **value** of `-n`, not a file name — failing to drop it counts it as "two files"
+		// and passes the whole command (observed: `head -n 20 f` slipped through while the synonymous `head -20 f` blocked).
 		if (verb === "head" || verb === "tail") {
 			const nIdx = args.indexOf("-n");
 			const count = nIdx >= 0 ? args[nIdx + 1] : undefined;
 			if (count !== undefined && /^\d+$/.test(count)) files = files.filter((f) => f !== count);
 		}
 		if (files.length !== 1) return null;
-		// `cat *.log` 要 shell 展开，原生照抄必失败。
+		// `cat *.log` needs shell expansion — copying natively would fail.
 		if (hasShellExpansion(files)) return null;
 		return "read";
 	}
@@ -301,7 +310,7 @@ function splitPipeline(segment: string): string[] {
 	return null;
 }
 
-/** 抽出「照这个调用」的提示。抽不到就返回 undefined —— 措辞会退回泛指。 */
+/** Extract the "call it like this" hint. Returns undefined when nothing can be extracted — wording falls back to generic. */
 function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | undefined, cdUnresolved: boolean): LookupRedirect["hint"] {
 	const positionals = (args: string[]) => args.filter((t) => !t.startsWith("-")).map(unquote);
 	const join = (p: string | undefined) => joinWithCd(p, cdTarget, cdUnresolved);
@@ -309,12 +318,12 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 		if (tool === "grep" && GREP_VERBS.has(stage.verb)) {
 			const pos = positionals(stage.args);
 			const hint: Record<string, unknown> = { pattern: pos[0] };
-			// 未给 path 时：先拿 `cd` 落点，再拿 `.`；`cd` 落点不可解时不猜（见 `joinWithCd`）。
+			// No path given: prefer the `cd` target, then `.`; when the `cd` target is unresolvable, do not guess (see `joinWithCd`).
 			const path = join(pos[1] ?? (cdUnresolved && cdTarget === undefined ? undefined : cdTarget ?? "."));
 			hint.path = path;
-			// `^-[^-]*i`：只认**短旗标**里的 `i`。原来的 `/^-.*i/` 会把 `--include=*.ts` 里的
-			// `i` 当成 `-i`（实测 `grep -rn foo --include=*.ts .` 给出 ignoreCase:true），
-			// 模型照抄后检索结果被静默放大 —— 这类「照抄建议就错」比不拦更贵。
+			// `^-[^-]*i`: only `i` inside **short flags** counts. The old `/^-.*i/` would take the `i` in `--include=*.ts`
+			// for `-i` (observed: `grep -rn foo --include=*.ts .` produced ignoreCase:true), and the model copying it
+			// gets a silently widened search — this kind of "copy the suggestion and it is wrong" costs more than not blocking.
 			if (stage.args.some((t) => /^-[^-]*i/.test(t))) hint.ignoreCase = true;
 			const include = stage.args.find((t) => t.startsWith("--include="));
 			if (include) hint.glob = unquote(include.slice("--include=".length));
@@ -335,7 +344,7 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 		}
 		if (tool === "read" && READ_VERBS.has(stage.verb)) {
 			const pos = positionals(stage.args);
-			// `head -n 20 f` 的 `20` 是 `-n` 的值，不是文件名 —— 不当心就会把 hint 写成 `path: "20"`。
+			// In `head -n 20 f`, `20` is `-n`'s value, not a file name — careless handling writes `path: "20"` into the hint.
 			const names = stage.verb === "head" || stage.verb === "tail"
 				? pos.filter((p) => !/^\d+$/.test(p) || !stage.args.includes("-n"))
 				: pos;
@@ -343,7 +352,7 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 			const resolved = join(file);
 			const args: Record<string, unknown> = { path: resolved };
 			if (stage.verb === "head") {
-				// `head -20 f` 与 `head -n 20 f` 两种写法都要认（后者原先漏给 limit，光秃秃一条 read）。
+				// Both `head -20 f` and `head -n 20 f` must be recognized (the latter originally missed the limit — a bare read).
 				const afterN = stage.args.includes("-n") ? stage.args[stage.args.indexOf("-n") + 1] : undefined;
 				const n = afterN !== undefined && /^\d+$/.test(afterN)
 					? afterN
@@ -352,7 +361,7 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 			}
 			if (stage.verb === "sed") {
 				// `sed -n '92,121p' f` → read({path, offset: 92, limit: 121 - 92 + 1})
-				// 单行形式 `sed -n '42p' f` → offset 42, limit 1
+				// single-line form `sed -n '42p' f` → offset 42, limit 1
 				const range = unquote(pos[0] ?? "").match(/^(\d+)(?:,(\d+))?p$/);
 				if (range) {
 					const start = Number(range[1]);
@@ -370,9 +379,9 @@ function buildHint(tool: NativeLookupTool, stages: Stage[], cdTarget: string | u
 }
 
 /**
- * 判定这条 bash 命令是不是「本该用原生工具的单一探查」。
+ * Decide whether this bash command is "a single lookup that should have used a native tool".
  *
- * 返回非 null = 拦下来，并把建议的原生调用交给模型；返回 null = 放行给 bash。
+ * Non-null return = block it and hand the suggested native call to the model; null = pass to bash.
  */
 export function detectBashLookup(command: string): LookupRedirect | null {
 	const trimmed = command.trim();
@@ -381,13 +390,13 @@ export function detectBashLookup(command: string): LookupRedirect | null {
 	const segments = splitShellSegments(trimmed);
 	if (segments.length === 0) return null;
 
-	// 先过一遍只读白名单：写重定向 / `sed -i` / 未知动词（node、python、git、npm…）
-	// 在这里就被挡掉，语义与 explored-group 的折叠判定共用同一套 shell 解析。
+	// First pass through the read-only allowlist: write redirections / `sed -i` / unknown verbs (node, python, git, npm…)
+	// are rejected here; the semantics share the same shell parsing as explored-group's collapse decision.
 	const stages: Stage[] = [];
 	const families: NativeLookupTool[] = [];
 
 	let cdTarget: string | undefined;
-	// `cd` 的落点要靠 shell 展开才能知道（`cd "$DIR"` / `cd /x/*/pkg`）—— 此时相对路径不能当 path。
+	// When the `cd` target needs shell expansion (`cd "$DIR"` / `cd /x/*/pkg`), relative paths cannot be used as path.
 	let cdUnresolved = false;
 
 	for (const segment of segments) {
@@ -395,20 +404,20 @@ export function detectBashLookup(command: string): LookupRedirect | null {
 		for (let si = 0; si < pipeline.length; si++) {
 			const stage = pipeline[si]!;
 			const { verb, args } = segmentVerb(stage);
-			// 末尾的 `| head -N` 只是截断习语 —— 原生工具有 limit，跳过而不是放行。
+			// A trailing `| head -N` is just the truncation idiom — native tools have `limit`, so skip rather than pass.
 			if (isTruncationStage(verb, args, si === pipeline.length - 1)) continue;
 			const family = stageFamily(stage);
 			if (family === null) return null;
 			if (family === "skip") {
-				// 顺手记下 `cd X &&` 的落点：后面 grep 没写 path 时它就是有效作用域。
-				// 用引号感知的取词 —— `segmentVerb` 按空白切词会把 `"/a b"` 切成 `"/a`。
+				// Record the target of `cd X &&` along the way: when a later grep gives no path, that is the effective scope.
+				// Use quote-aware tokenization — `segmentVerb` splits on whitespace and would shred `"/a b"` into `"/a`.
 				if (verb === "cd") {
 					const target = firstPositionalQuoted(stage);
-					// `cd` 落点要靠 shell 展开才能知道时（`cd "$DIR"`、`cd /x/*/pkg`）**清空**它：
-					// 不清的话，后面的相对路径会原样当成 `path`（如 `path: "f.ts"`），
-					// 而它在当前 cwd 下指的是**另一个文件** —— 静默指向错目标比报错更坏。
-					// 清空后 `buildHint` 会退回 `cdTarget` 为空的路径（通常是 `undefined` →
-					// 渲染成「自行对应到 schema」），模型自己知道该去哪里找。
+					// When the `cd` target needs shell expansion (`cd "$DIR"`, `cd /x/*/pkg`), **clear** it:
+					// otherwise a later relative path would be taken verbatim as `path` (e.g. `path: "f.ts"`),
+					// which under the current cwd points to **a different file** — a silently wrong target is worse than an error.
+					// After clearing, `buildHint` falls back to the empty-`cdTarget` path (usually `undefined` →
+					// rendered as "map it to the schema yourself"), and the model knows where to look.
 					cdTarget = target && target !== "-" && !SHELL_VARIABLE.test(target) && !SHELL_EXPANSION.test(target)
 						? target
 						: undefined;
@@ -423,15 +432,15 @@ export function detectBashLookup(command: string): LookupRedirect | null {
 
 	if (families.length === 0 || stages.length === 0) return null;
 
-	// 优先级：grep > find > ls > read。`cat f | grep pat` 的意图是 grep（path=f），
-	// 取最左会误判成 read。
+	// Priority: grep > find > ls > read. The intent of `cat f | grep pat` is grep (path=f);
+	// taking the leftmost would misclassify it as read.
 	const priority: NativeLookupTool[] = ["grep", "find", "ls", "read"];
 	const tool = priority.find((t) => families.includes(t)) ?? families[0]!;
 	const hint = buildHint(tool, stages, cdTarget, cdUnresolved);
 	return { tool, hint, tools: families };
 }
 
-/** 原生调用建议的「照抄这一行」文本。 */
+/** The "copy this line" text of a native-call suggestion. */
 function callSnippet(redirect: LookupRedirect): string {
 	const args = redirect.hint?.args;
 	if (!args || Object.values(args).some((v) => v === undefined)) return `\`${redirect.tool}\` tool`;
@@ -442,10 +451,10 @@ function callSnippet(redirect: LookupRedirect): string {
 }
 
 /**
- * 拦截语：给模型看的正文。
+ * Block message: the body shown to the model.
  *
- * 三段：**该调什么** / **为什么** / **`.gitignore` 例外**。必须短（每次拦截都是 token），
- * 但 `.gitignore` 那条例外不能省 —— 省了就会静默漏搜。
+ * Three parts: **what to call** / **why** / **the `.gitignore` exception**. It must be short (every block costs
+ * tokens), but the `.gitignore` exception cannot be dropped — dropping it means silent misses.
  */
 export function renderLookupRedirect(redirect: LookupRedirect): string {
 	const lines = [

@@ -1,9 +1,9 @@
 /**
- * types.ts — simple-task 的状态模型与纯函数工具。
+ * types.ts — state model and pure-function helpers for simple-task.
  *
- * 刻意只做最小集：三种状态、无区块、无依赖图、无 note、无 agent 指标。
- * 参照 @thunstack/pi-task-list 的"会话级、agent 自己管理"的功能定位，
- * 但砍掉它那些为 plan-mode / 子 agent 协作服务的复杂度。
+ * Deliberately minimal: three states, no blocks, no dependency graph, no note, no agent metrics.
+ * Follows @thunstack/pi-task-list's "session-level, managed by the agent itself" scope,
+ * but drops the complexity it carries for plan-mode / sub-agent collaboration.
  */
 
 export type TaskStatus = "pending" | "in_progress" | "done";
@@ -15,10 +15,10 @@ export interface Task {
 }
 
 export interface State {
-	/** 列表是否存在。空列表不算存在 —— widget 与状态栏都不显示。 */
+	/** Whether the list exists. An empty list does not count — neither the widget nor the status bar is shown. */
 	active: boolean;
 	tasks: Task[];
-	/** 下一个分配的 id。单调递增且永不复用，避免历史引用错乱。 */
+	/** The next id to assign. Monotonically increasing and never reused, so history references stay correct. */
 	nextId: number;
 }
 
@@ -26,7 +26,7 @@ export function emptyState(): State {
 	return { active: false, tasks: [], nextId: 1 };
 }
 
-/** 深拷贝一层 tasks。状态会被写进会话日志并在多处快照引用，不能共享可变对象。 */
+/** Shallow-copies tasks. The state is written to the session log and referenced by multiple snapshots, so mutable objects must not be shared. */
 export function cloneState(state: State): State {
 	return { ...state, tasks: state.tasks.map((task) => ({ ...task })) };
 }
@@ -47,7 +47,7 @@ export function countByStatus(state: State): { done: number; inProgress: number;
 	return { done, inProgress, pending };
 }
 
-/** 渲染用的纯文本列表（不含 ANSI），给命令与调试用。 */
+/** Plain-text list for rendering (no ANSI), used by the command and debugging. */
 export function describeTasks(state: State): string[] {
 	return state.tasks.map((task) => `${task.status === "done" ? "[x]" : task.status === "in_progress" ? "[~]" : "[ ]"} #${task.id} ${task.text}`);
 }
