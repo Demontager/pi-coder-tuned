@@ -434,7 +434,7 @@ export function detectBashLookup(command: string): LookupRedirect | null {
 /** 原生调用建议的「照抄这一行」文本。 */
 function callSnippet(redirect: LookupRedirect): string {
 	const args = redirect.hint?.args;
-	if (!args || Object.values(args).some((v) => v === undefined)) return `\`${redirect.tool}\` 工具`;
+	if (!args || Object.values(args).some((v) => v === undefined)) return `\`${redirect.tool}\` tool`;
 	const body = Object.entries(args)
 		.map(([k, v]) => `${k}: ${typeof v === "number" ? v : JSON.stringify(v)}`)
 		.join(", ");
@@ -449,29 +449,29 @@ function callSnippet(redirect: LookupRedirect): string {
  */
 export function renderLookupRedirect(redirect: LookupRedirect): string {
 	const lines = [
-		`[lookup gate] 这条 bash 命令是一次纯粹的「${redirect.tool}」探查，已被拦下 —— 请改用 pi 的原生工具。`,
+		`[lookup gate] This bash command is a pure ${redirect.tool} lookup — it was intercepted; use pi's native tools instead.`,
 		``,
-		`改调用：${callSnippet(redirect)}`,
+		`Call instead: ${callSnippet(redirect)}`,
 	];
 	if (!redirect.hint?.args) {
-		lines.push(`（参数请自行对应到 \`${redirect.tool}\` 工具的 schema）`);
+		lines.push(`(map the arguments yourself to the \`${redirect.tool}\` tool's schema)`);
 	}
 	lines.push(
 		``,
-		`为什么：原生工具更快、输出自带截断（不会刷屏），也省 token。`,
+		`Why: native tools are faster, truncate their own output (no transcript flooding), and save tokens.`,
 	);
 	if (redirect.tool === "grep" || redirect.tool === "find") {
 		lines.push(
-			`注意：原生 \`${redirect.tool}\` 尊重 \`.gitignore\`（会跳过 \`node_modules/\`、\`dist/\` 等）；` +
-				`确实要搜被忽略的树时，把那个目录**显式**作为 path 传入即可穿透（显式 path 不过滤）。`,
+			`Note: the native \`${redirect.tool}\` respects \`.gitignore\` (it skips \`node_modules/\`, \`dist/\`, etc.); ` +
+				`to search an ignored tree, pass that directory **explicitly** as \`path\` (explicit paths are not filtered).`,
 		);
 	}
 	if (redirect.tool === "ls") {
-		lines.push(`注意：原生 \`ls\` 只给条目名；需要大小/时间等元信息请用 bash 的 \`stat\` / \`du\`（不会被拦）。`);
+		lines.push(`Note: the native \`ls\` returns entry names only; for size/mtime metadata use bash \`stat\` / \`du\` (never intercepted).`);
 	}
 	lines.push(
 		``,
-		`（这条闸门可用 \`PI_BASH_LOOKUP_GATE=off\` 关闭；复合探查、变换器、写操作、测试命令都不会被拦。）`,
+		`(This gate can be disabled with \`PI_BASH_LOOKUP_GATE=off\`; compound lookups, transformers, writes, and test commands are never intercepted.)`,
 	);
 	return lines.join("\n");
 }

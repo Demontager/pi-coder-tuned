@@ -1,15 +1,17 @@
 /**
- * `lookup-redirect` 的单元测试 —— 单一探查闸的判定。
+ * Unit tests for `lookup-redirect` — detection rules of the single-lookup gate.
  *
- * 这套闸门是**硬拦**（`tool_call` handler 返回 `block`），拦错一次就白白浪费模型一轮，
- * 所以两个方向都要钉死：
+ * This gate is a **hard block** (the `tool_call` handler returns `block`), so one
+ * wrong interception wastes a whole model turn. Both directions must be pinned:
  *
- *   - **该拦的**：纯单一探查（含 `cd X &&` 前缀、`| head -N` 截断习语）
- *   - **绝不能拦的**：变换器（`awk`/`wc`/`sort`/`jq`）、执行（`node`/`npm`/`git`）、写操作
- *     （重定向、`sed -i`）、以及原生 schema 表达不了的形态（`grep -v`、`find -mtime`、
- *     `ls -R`、多路径 `grep`）
+ *   - **Must gate**: pure single lookups (including `cd X &&` prefixes and the
+ *     `| head -N` truncation idiom)
+ *   - **Must never gate**: transformers (`awk`/`wc`/`sort`/`jq`), execution (`node`/`npm`/`git`),
+ *     writes (redirection, `sed -i`), and shapes the native schema cannot express
+ *     (`grep -v`, `find -mtime`, `ls -R`, multi-path `grep`)
  *
- * 判定用真命令（取自历史会话的典型形态），不是构造出来的玩具串。
+ * Detection is exercised with real commands (typical shapes taken from historical
+ * sessions), not constructed toy strings.
  */
 
 import assert from "node:assert/strict";
@@ -17,12 +19,12 @@ import { test } from "node:test";
 
 import { detectBashLookup, renderLookupRedirect } from "./lookup-redirect.ts";
 
-/** 该拦：返回建议的工具名。 */
+/** Should be gated: returns the suggested tool name. */
 function gated(command: string): string | null {
 	return detectBashLookup(command)?.tool ?? null;
 }
 
-test("拦：纯粹的单次 grep", () => {
+test("gates: a pure single grep", () => {
 	assert.equal(gated('grep -n "foo" file.ts'), "grep");
 	assert.equal(gated('grep -rn "foo" src/'), "grep");
 	assert.equal(gated("grep -rn foo ."), "grep");
@@ -31,34 +33,34 @@ test("拦：纯粹的单次 grep", () => {
 	assert.equal(gated('rg "foo" src/'), "grep");
 });
 
-test("拦：带 `cd X &&` 导航前缀的单一探查（实测最常见的形态）", () => {
+test("gates: single lookup with a `cd X &&` navigation prefix (the most common real-world shape)", () => {
 	assert.equal(gated('cd /Users/x/proj && grep -rn "foo" .'), "grep");
 	assert.equal(gated('cd "/path with space/proj" && grep -n "bar" index.html'), "grep");
 	assert.equal(gated("cd /x && ls -la src/"), "ls");
 });
 
-test("拦：`| head -N` 只是截断习语，不算复合（原生工具有 limit）", () => {
+test("gates: `| head -N` is just a truncation idiom, not a compound (the native tool has a limit)", () => {
 	assert.equal(gated("grep -rn foo . | head -30"), "grep");
 	assert.equal(gated("ls -la src/ | head -5"), "ls");
 	assert.equal(gated('find . -name "*.ts" | head'), "find");
 	assert.equal(gated("grep -rn foo . | tail -3"), "grep");
 });
 
-test("拦：列目录与按名找文件", () => {
+test("gates: listing directories and finding files by name", () => {
 	assert.equal(gated("ls -la src/"), "ls");
 	assert.equal(gated("ls -t sessions/"), "ls");
 	assert.equal(gated('find . -name "*.jsonl"'), "find");
 	assert.equal(gated("find /x -type f"), "find");
 });
 
-test("拦：取文件内容（read 一族）", () => {
+test("gates: fetching file contents (the read family)", () => {
 	assert.equal(gated("cat package.json"), "read");
 	assert.equal(gated("head -20 README.md"), "read");
 	assert.equal(gated('sed -n "1,60p" CHANGELOG.md'), "read");
 	assert.equal(gated("sed -n '92,121p' CLAUDE.md"), "read");
 });
 
-test("不拦：变换器 —— 原生工具给不了，拦了只能逼模型换别的 bash", () => {
+test("does not gate: transformers — the native tools cannot provide them, and gating only forces the model into other bash", () => {
 	assert.equal(gated('grep -rn foo . | awk -F: "{print $1}"'), null);
 	assert.equal(gated("grep -rn foo . | wc -l"), null);
 	assert.equal(gated("grep -rn foo . | sort -u"), null);
@@ -67,7 +69,7 @@ test("不拦：变换器 —— 原生工具给不了，拦了只能逼模型换
 	assert.equal(gated("grep -rn foo . | head -30 | wc -l"), null);
 });
 
-test("不拦：执行类命令 —— 那是真在跑东西", () => {
+test("does not gate: execution commands — those actually run things", () => {
 	assert.equal(gated("node --test x.test.ts 2>&1 | grep -E \"pass\""), null);
 	assert.equal(gated("cd /x && npm test"), null);
 	assert.equal(gated("git status"), null);
@@ -76,28 +78,28 @@ test("不拦：执行类命令 —— 那是真在跑东西", () => {
 	assert.equal(gated("cd /x && grep -n a f && echo done && node x.js"), null);
 });
 
-test("不拦：写操作与就地改写", () => {
+test("does not gate: writes and in-place edits", () => {
 	assert.equal(gated("sed -i \"\" \"s/a/b/\" f.txt"), null);
 	assert.equal(gated('cat > /tmp/x.txt <<EOF\nhi\nEOF'), null);
 	assert.equal(gated("echo hi > f.txt"), null);
 	assert.equal(gated("grep -rn foo . > out.txt"), null);
-	// 非 `-n` 的 sed 是替换，不是读
+	// sed without `-n` is substitution, not reading
 	assert.equal(gated('sed "s/a/b/" f.txt'), null);
 });
 
-test("不拦：原生 schema 表达不了的旗标", () => {
-	assert.equal(gated("grep -c foo a.txt"), null); // 只要计数
-	assert.equal(gated("grep -v foo a.txt"), null); // 反向匹配
-	assert.equal(gated("grep -A 3 foo a.txt"), null); // 上下文行
-	assert.equal(gated("grep -rn foo src/ dist/"), null); // 多路径
-	assert.equal(gated("find . -maxdepth 2 -name x"), null); // 深度限制
-	assert.equal(gated('find . -name "*.log" -mtime +7'), null); // 时间谓词
-	assert.equal(gated('find . -name "*.log" -exec rm {} \\;'), null); // 副作用
-	assert.equal(gated("ls -R src/"), null); // 递归
-	assert.equal(gated("cat a.txt b.txt c.txt"), null); // 多文件
+test("does not gate: flags the native schema cannot express", () => {
+	assert.equal(gated("grep -c foo a.txt"), null); // count only
+	assert.equal(gated("grep -v foo a.txt"), null); // inverted match
+	assert.equal(gated("grep -A 3 foo a.txt"), null); // context lines
+	assert.equal(gated("grep -rn foo src/ dist/"), null); // multiple paths
+	assert.equal(gated("find . -maxdepth 2 -name x"), null); // depth limit
+	assert.equal(gated('find . -name "*.log" -mtime +7'), null); // time predicate
+	assert.equal(gated('find . -name "*.log" -exec rm {} \\;'), null); // side effects
+	assert.equal(gated("ls -R src/"), null); // recursion
+	assert.equal(gated("cat a.txt b.txt c.txt"), null); // multiple files
 });
 
-test("不拦：无关命令与空命令", () => {
+test("does not gate: unrelated and empty commands", () => {
 	assert.equal(gated("echo hi"), null);
 	assert.equal(gated("cd /x"), null);
 	assert.equal(gated("which timeout"), null);
@@ -106,33 +108,36 @@ test("不拦：无关命令与空命令", () => {
 	assert.equal(gated("   "), null);
 });
 
-test("建议的调用形态：参数能对上原生 schema", () => {
-	// `cd` 落点会拼进相对路径 —— 原生工具在**当前 cwd** 下解析 `path`，不是命令里 `cd` 之后那个目录。
-	// 不拼的话模型会去读另一个文件（或 `Path not found`），而实测 74% 的拦截都带 `cd` 前缀 + 相对路径。
+test("suggested call shape: arguments must match the native schema", () => {
+	// The `cd` target is joined into relative paths — the native tool resolves `path` against the
+	// **current cwd**, not the directory the command `cd`s into. Without the join the model would
+	// read a different file (or get `Path not found`); in practice 74% of gated commands carry a
+	// `cd` prefix plus a relative path.
 	const g = detectBashLookup('cd /Users/x/proj && grep -rn "NEVER_DELETE" src/')!;
 	assert.equal(g.tool, "grep");
 	assert.deepEqual(g.hint?.args, { pattern: "NEVER_DELETE", path: "/Users/x/proj/src/" });
 
-	// `cd` 落点在没有显式 path 时充当作用域
+	// The `cd` target acts as the scope when there is no explicit path
 	const g2 = detectBashLookup('cd /tmp/scope && grep -n foo .')!;
 	assert.equal(g2.hint?.args?.path, ".");
-	// 不带 `.` 时它就是那个目录本身
+	// Without a `.`, it is that directory itself
 	assert.equal(detectBashLookup('cd /tmp/scope && grep -rn foo')?.hint?.args?.path, "/tmp/scope");
 	assert.equal(detectBashLookup("cd /tmp/scope && cat f.ts")?.hint?.args?.path, "/tmp/scope/f.ts");
 	assert.equal(detectBashLookup("cd /tmp/scope && ls sub")?.hint?.args?.path, "/tmp/scope/sub");
-	// 绝对路径与 `~` 不拼（已经完整）
+	// Absolute paths and `~` are not joined (already complete)
 	assert.equal(detectBashLookup("cd /tmp/scope && cat /abs/f.ts")?.hint?.args?.path, "/abs/f.ts");
 
-	// 带引号的空格路径不能被切碎（`segmentVerb` 按空白切词，会把 `"/a b"` 切成 `"/a`）
+	// Quoted paths containing spaces must not be split apart (`segmentVerb` tokenizes on
+	// whitespace and would cut `"/a b"` into `"/a`)
 	assert.equal(detectBashLookup('cd "/a b/proj" && cat f.ts')?.hint?.args?.path, "/a b/proj/f.ts");
 	assert.equal(detectBashLookup('cd "/a b/proj" && ls')?.hint?.args?.path, "/a b/proj");
 
-	// `--include` → glob，`-i` → ignoreCase
+	// `--include` → glob, `-i` → ignoreCase
 	const g3 = detectBashLookup('grep -i "x" --include="*.ts" src/')!;
 	assert.equal(g3.hint?.args?.ignoreCase, true);
 	assert.equal(g3.hint?.args?.glob, "*.ts");
 
-	// `sed -n '92,121p'` → offset/limit（30 行）
+	// `sed -n '92,121p'` → offset/limit (30 lines)
 	const g4 = detectBashLookup("sed -n '92,121p' CLAUDE.md")!;
 	assert.equal(g4.hint?.args?.offset, 92);
 	assert.equal(g4.hint?.args?.limit, 30);
@@ -147,9 +152,10 @@ test("建议的调用形态：参数能对上原生 schema", () => {
 	assert.equal(g6.hint?.args?.path, "/x/sessions/");
 });
 
-test("不拦：需要 shell 先展开的形态 —— 原生工具**不做展开**，照抄建议必然失败", () => {
-	// 实测：`ls({path: "*.md"})` 直接 `Path not found: …/*.md`。拦下来等于把模型推进死胡同：
-	// 它只能自己摸出「用 bash 让 shell 展开」这条出路，净亏一轮。
+test("does not gate: shapes that need the shell to expand first — the native tools **do not expand**, so a copy-paste suggestion would always fail", () => {
+	// Measured: `ls({path: "*.md"})` fails outright with `Path not found: …/*.md`. Gating such a
+	// command pushes the model into a dead end: its only way out is to discover on its own that
+	// "use bash and let the shell expand" works — a net loss of one turn.
 	assert.equal(gated("ls *.md"), null);
 	assert.equal(gated("ls -d */"), null);
 	assert.equal(gated("ls ~/Downloads/*.png"), null);
@@ -158,85 +164,91 @@ test("不拦：需要 shell 先展开的形态 —— 原生工具**不做展开
 	assert.equal(gated("grep -n foo *.ts"), null);
 	assert.equal(gated("grep -rn foo `pwd`"), null);
 	assert.equal(gated("cat $(ls | head -1)"), null);
-	// 方括号是正则、不是 glob —— 不能把它当展开而漏拦
+	// Square brackets are regex, not a glob — must not be treated as expansion and slip through
 	assert.equal(gated("grep -n '[a-z]\\+' f.ts"), "grep");
 });
 
-test("不拦：从 **stdin** 读的 grep —— 原生 grep 只能搜文件，给不出替代调用", () => {
-	// 上游是命令（不是文件）时，`grep pat` 没有 path，原生 schema 表达不了。
+test("does not gate: grep reading from **stdin** — the native grep can only search files, so no replacement call can be offered", () => {
+	// When the upstream side is a command (not a file), `grep pat` has no path; the native
+	// schema cannot express it.
 	assert.equal(gated("env | grep -i '^PI_'"), null);
 	assert.equal(gated("env | grep -i '^PI_' | head -20"), null);
 	assert.equal(gated("ls /x | grep -i qoder"), null);
 	assert.equal(gated("history | grep npm"), null);
-	// `cat f | grep pat` 理论上可推路径，但 `splitShellSegments` 把 `|` 与 `;` 当同一种分隔符，
-	// 分不出「grep 读管道」还是「grep 读 stdin」—— 拿不准就不拦（实测占比 0.4%）。
+	// `cat f | grep pat` could theoretically derive the path, but `splitShellSegments` treats `|`
+	// and `;` as the same kind of separator, so it cannot tell "grep reading a pipe" from "grep
+	// reading stdin" — when in doubt, do not gate (0.4% of real cases).
 	assert.equal(gated("cat a.txt | grep foo"), null);
-	// `grep -rn pat`（递归而无 path）走当前目录，原生能表达
+	// `grep -rn pat` (recursive without a path) uses the current directory; the native tool can express that
 	assert.equal(gated("grep -rn foo"), "grep");
 	assert.equal(gated("grep -rn foo ."), "grep");
 });
 
-test("不拦：一次列多个路径 —— 原生 ls 只收一个 path，照抄会静默漏掉其余", () => {
+test("does not gate: listing multiple paths at once — the native ls takes a single path, and copying the suggestion would silently drop the rest", () => {
 	assert.equal(gated("ls /a /b"), null);
 	assert.equal(gated("cd /x && ls src test docs"), null);
 });
 
-test("拦：`head -n N f` 也要给出 limit（与 `head -N f` 同口径）", () => {
-	// 原先只认 `-20` 那种写法，`-n 20` 拦下来却只给 `read({path})`，行数信息静默丢失。
+test("gates: `head -n N f` must also yield a limit (same treatment as `head -N f`)", () => {
+	// Previously only the `-20` form was recognized; `-n 20` was gated but only suggested
+	// `read({path})`, silently losing the line count.
 	assert.equal(detectBashLookup("head -n 20 app.ts")?.hint?.args?.limit, 20);
 	assert.equal(detectBashLookup("head -20 app.ts")?.hint?.args?.limit, 20);
 	assert.equal(detectBashLookup("head -n 5 x.log")?.hint?.args?.path, "x.log");
 });
 
-test("建议的调用形态：`--include` 不得被误当成 `-i`", () => {
-	// 原来的 `/^-.*i/` 会命中 `--include=*.ts` 里的字母 i，给出 ignoreCase: true ——
-	// 模型照抄后检索结果被静默放大。
+test("suggested call shape: `--include` must not be mistaken for `-i`", () => {
+	// The old `/^-.*i/` matched the letter i inside `--include=*.ts` and produced
+	// ignoreCase: true — the model would copy it and silently widen its search results.
 	const g = detectBashLookup("grep -rn foo --include=*.ts .")!;
 	assert.equal(g.hint?.args?.glob, "*.ts");
 	assert.equal(g.hint?.args?.ignoreCase, undefined);
-	// 真的 `-i` 仍要认出来（含组合短旗标 `-rni`）
+	// A real `-i` must still be recognized (including combined short flags like `-rni`)
 	assert.equal(detectBashLookup("grep -i foo x.ts")?.hint?.args?.ignoreCase, true);
 	assert.equal(detectBashLookup("grep -rni foo x.ts")?.hint?.args?.ignoreCase, true);
 });
 
-test("建议的 path 必须能解析到命令真正的目标（`cd` 落点 + 相对路径）", () => {
-	// 原生工具在**当前 cwd** 下解析 `path`，不是命令里 `cd` 之后那个目录 —— 不拼的话模型
-	// 会去读另一个文件或 `Path not found`，而实测 74% 的拦截都带 `cd` 前缀 + 相对路径。
+test("the suggested path must resolve to the command's actual target (`cd` target + relative path)", () => {
+	// The native tool resolves `path` against the **current cwd**, not the directory the command
+	// `cd`s into — without the join the model reads a different file or gets `Path not found`;
+	// in practice 74% of gated commands carry a `cd` prefix plus a relative path.
 	assert.equal(detectBashLookup("cd /tmp/scope && cat f.ts")?.hint?.args?.path, "/tmp/scope/f.ts");
 	assert.equal(detectBashLookup("cd /tmp/scope && grep -n foo f.ts")?.hint?.args?.path, "/tmp/scope/f.ts");
 	assert.equal(detectBashLookup("cd /tmp/scope && head -20 f.ts")?.hint?.args?.path, "/tmp/scope/f.ts");
 	assert.equal(detectBashLookup("cd /tmp/scope && ls sub")?.hint?.args?.path, "/tmp/scope/sub");
-	// 绝对 / `~` / `.` 不拼（已完整或语义就是当前目录）
+	// Absolute / `~` / `.` are not joined (already complete, or semantically the current directory)
 	assert.equal(detectBashLookup("cd /tmp/scope && cat /abs/f.ts")?.hint?.args?.path, "/abs/f.ts");
 	assert.equal(detectBashLookup("cd /tmp/scope && grep -n foo .")?.hint?.args?.path, ".");
 });
 
-test("建议的 path 不能带引号 / 通配符 / 未展开变量 —— 原生工具既不展开也不去引号", () => {
-	// 实测：`ls({path: "*.md"})` 直接 `Path not found`；`read({path: "$D/x.md"})` 会去找名为 `$D` 的目录。
-	// 这三类都是「照抄建议必失败」，拦下来反而比不拦更贵。
+test("the suggested path must not carry quotes / wildcards / unexpanded variables — native tools neither expand nor strip quotes", () => {
+	// Measured: `ls({path: "*.md"})` fails outright with `Path not found`; `read({path: "$D/x.md"})`
+	// looks for a directory literally named `$D`. All three shapes mean "the copy-paste suggestion
+	// will fail", so gating costs more than letting it through.
 	assert.equal(gated("ls *.md"), null);
 	assert.equal(gated("cd /tmp && cat $D/f.ts"), null);
 	assert.equal(gated("cd /tmp && cat ${D}/f.ts"), null);
-	// `cd` 落点本身不可解时照旧拦（命令确实是一次单探查），但**不得给出相对 path** ——
-	// 那个相对名在当前 cwd 下指向另一个文件，静默指错比报错更坏。
+	// When the `cd` target itself is unresolvable the command is still gated (it really is a
+	// single lookup), but **no relative path may be suggested** — that relative name points to a
+	// different file under the current cwd, and silently pointing at the wrong file is worse than an error.
 	const unresolved = detectBashLookup("cd $DIR && cat f.ts")!;
 	assert.equal(unresolved.tool, "read");
-	assert.equal(unresolved.hint?.args?.path, undefined, "未解出的 cd 落点不能当成 path");
+	assert.equal(unresolved.hint?.args?.path, undefined, "an unresolved cd target must not be used as path");
 	assert.equal(detectBashLookup("cd /x/*/pkg && cat f.ts")?.hint?.args?.path, undefined);
 });
 
-test("拦截语必须交代 .gitignore 例外（否则「换原生」会变成静默漏搜）", () => {
+test("the gate message must spell out the .gitignore exception (otherwise switching to native tools becomes a silent miss)", () => {
 	const g = detectBashLookup('grep -rn "x" .')!;
 	const text = renderLookupRedirect(g);
-	assert.ok(text.includes(".gitignore"), "grep 的拦截语必须提 .gitignore");
-	assert.ok(text.includes("显式"), "必须给出穿透手法");
-	// 必须包含可直接照抄的原生调用
-	assert.ok(text.includes('grep({ pattern: "x", path: "." })'), `拦截语应给出照抄行，实际：${text}`);
+	assert.ok(text.includes(".gitignore"), "the grep gate message must mention .gitignore");
+	assert.ok(text.includes("explicitly"), "must show the piercing method");
+	// Must contain a native call that can be copied verbatim
+	assert.ok(text.includes('grep({ pattern: "x", path: "." })'), `the gate message should offer a copy-paste line, actual: ${text}`);
 
-	// read 一族没有 .gitignore 问题，不该提
+	// The read family has no .gitignore concern and should not mention it
 	const r = detectBashLookup("cat package.json")!;
 	assert.ok(!renderLookupRedirect(r).includes(".gitignore"));
 
-	// 关闭方式要写在拦截语里（用户能自救）
+	// The off switch must be written in the gate message (so users can free themselves)
 	assert.ok(renderLookupRedirect(g).includes("PI_BASH_LOOKUP_GATE=off"));
 });

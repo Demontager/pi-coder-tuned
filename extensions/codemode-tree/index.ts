@@ -83,7 +83,7 @@ function captureCodemodeDefinition(pi: ExtensionAPI): ToolDefinition<any, any, a
 	// 与 pi 内置加载它时一样的调用方式（不传 options = `models: true`、mode / inlineBudget 走设置）
 	createCodemodeExtension()(capture);
 	if (!captured) {
-		throw new Error("codemode-tree: 没能从 createCodemodeExtension() 捕获到 codemode 工具定义");
+		throw new Error("codemode-tree: could not capture the codemode tool definition from createCodemodeExtension()");
 	}
 	return captured;
 }

@@ -463,5 +463,18 @@
   "/goal 已设定完成条件，请朝它工作，直到条件达成：\n\n": "/goal completion condition set; work until it is satisfied:\n\n",
   "每轮结束后会有一个独立评估器只读对话内容判定条件是否达成 —— 它自己不能跑命令，": "After each turn, a separate evaluator reads the conversation to determine whether the condition is met. It cannot run commands, ",
   "所以**证据必须出现在你的输出里**（跑命令并贴出输出、展示文件内容）。": "so **evidence must appear in your output** (run commands and show their output or file contents).",
-  "条件达成前不要停下来等我确认。": "Do not stop to await my confirmation before the condition is satisfied."
+  "条件达成前不要停下来等我确认。": "Do not stop to await my confirmation before the condition is satisfied.",
+  "` 工具": "` tool",
+  "[lookup gate] 这条 bash 命令是一次纯粹的「": "[lookup gate] This bash command is a pure ",
+  "」探查，已被拦下 —— 请改用 pi 的原生工具。": " lookup — it was intercepted; use pi's native tools instead.",
+  "改调用：": "Call instead: ",
+  "（参数请自行对应到 `": "(map the arguments yourself to the `",
+  "` 工具的 schema）": "` tool's schema)",
+  "为什么：原生工具更快、输出自带截断（不会刷屏），也省 token。": "Why: native tools are faster, truncate their own output (no transcript flooding), and save tokens.",
+  "注意：原生 `": "Note: the native `",
+  "` 尊重 `.gitignore`（会跳过 `node_modules/`、`dist/` 等）；": "` respects `.gitignore` (it skips `node_modules/`, `dist/`, etc.); ",
+  "确实要搜被忽略的树时，把那个目录**显式**作为 path 传入即可穿透（显式 path 不过滤）。": "to search an ignored tree, pass that directory **explicitly** as `path` (explicit paths are not filtered).",
+  "注意：原生 `ls` 只给条目名；需要大小/时间等元信息请用 bash 的 `stat` / `du`（不会被拦）。": "Note: the native `ls` returns entry names only; for size/mtime metadata use bash `stat` / `du` (never intercepted).",
+  "（这条闸门可用 `PI_BASH_LOOKUP_GATE=off` 关闭；复合探查、变换器、写操作、测试命令都不会被拦。）": "(This gate can be disabled with `PI_BASH_LOOKUP_GATE=off`; compound lookups, transformers, writes, and test commands are never intercepted.)",
+  "codemode-tree: 没能从 createCodemodeExtension() 捕获到 codemode 工具定义": "codemode-tree: could not capture the codemode tool definition from createCodemodeExtension()"
 }
