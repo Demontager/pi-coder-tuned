@@ -443,5 +443,5 @@ export default function simpleTaskExtension(pi: ExtensionAPI): void {
 				display: false,
 			},
 		};
-	});}
+	});
 }
