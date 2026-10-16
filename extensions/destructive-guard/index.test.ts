@@ -1,13 +1,15 @@
 /**
- * Tests for index.ts — destructive-guard 的接线（用 pi 自己的加载器真实加载）。
+ * Tests for index.ts — destructive-guard's wiring (loaded for real by pi's own loader).
  *
  * Run with:  node --test clients/pi/extensions/destructive-guard/index.test.ts
  *
- * 覆盖的是**接线**而不是判定逻辑（判定在 targets.test.ts / writes.test.ts 里）。所以断言
- * 集中在：pi 的加载器真的能装好这个扩展、危险调用真的被 block、无害调用真的放行、非交互
- * 环境 fail closed、`PI_DESTRUCTIVE_GUARD` 的四个模式各自生效。
+ * What is covered is **the wiring**, not the judgment logic (targets.test.ts /
+ * writes.test.ts cover that). So assertions concentrate on: pi's loader really loads this
+ * extension, dangerous calls really get blocked, harmless calls really pass, non-interactive
+ * environments fail closed, and each of `PI_DESTRUCTIVE_GUARD`'s four modes takes effect.
  *
- * 找不到本机 pi 的库入口就整体 skip（不假装通过）—— 同 plan-mode/index.test.ts。
+ * No local pi library entry → skip wholesale (never fake a pass) — same as
+ * plan-mode/index.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -21,9 +23,9 @@ import { renderFindingsForHuman, truncateMiddle, writeTargetLabel } from "./inde
 import { extractGitHistoryLoss, inspectBash } from "./targets.ts";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 
-/** pi 的库入口（非 CLI）。判定方式是能不能真 import，不是路径存不存在。 */
+/** pi's library entry (not the CLI). The check is whether it really imports, not whether the path exists. */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
 	if (process.env.PI_TEST_PI_ENTRY) candidates.push(process.env.PI_TEST_PI_ENTRY);
@@ -35,13 +37,13 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -54,7 +56,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -63,7 +65,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 const piEntry = await findPiLibraryEntry();
 const skip = piEntry === undefined ? SKIP : false;
 
-/** 钩子返回值。 */
+/** The hook's return value. */
 interface Verdict {
 	block?: boolean;
 	reason?: string;
@@ -73,16 +75,17 @@ interface Harness {
 	call: (toolName: string, input: Record<string, unknown>) => Promise<Verdict>;
 	notifies: string[];
 	selects: string[];
-	/** 钩子看到的 cwd（临时 projectDir）。“工作目录内”的断言必须用它，不能用 process.cwd()。 */
+	/** The cwd the hook saw (the temp projectDir). "Inside the workdir" assertions must use it, not process.cwd(). */
 	cwd: string;
 	cleanup: () => void;
 }
 
 /**
- * 用 pi 的加载器真实加载扩展，返回一个把 tool_call 喂进去的 runner。
+ * Really load the extension via pi's loader and return a runner that feeds tool_call in.
  *
- * 注意 `session_start` 会在 `call` 之前被触发一次 —— 扩展在工厂期读一次模式、在
- * `session_start` 再读一次，所以要测模式开关必须走这条路（改环境变量后重开一个 harness）。
+ * Note `session_start` is fired once before `call` — the extension reads the mode once at
+ * factory time and again at `session_start`, so mode-switch tests must go through this path
+ * (change the env, open a new harness).
  */
 async function loadHarness(options: { hasUI?: boolean; selectAnswer?: string } = {}): Promise<Harness> {
 	const { hasUI = true, selectAnswer = "Cancel" } = options;
@@ -103,9 +106,9 @@ async function loadHarness(options: { hasUI?: boolean; selectAnswer?: string } =
 
 	const bus = { on: () => () => undefined, emit: () => undefined };
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, bus);
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	const extension = loaded.extensions[0];
-	assert.ok(extension, "应该加载到一个扩展");
+	assert.ok(extension, "exactly one extension should load");
 
 	const notifies: string[] = [];
 	const selects: string[] = [];
@@ -123,7 +126,7 @@ async function loadHarness(options: { hasUI?: boolean; selectAnswer?: string } =
 		},
 	};
 
-	// session_start 也要跑：扩展在那里重读模式。
+	// session_start must run too: the extension re-reads the mode there.
 	for (const handler of extension.handlers.get("session_start") ?? []) {
 		await handler({ reason: "startup" }, ctx);
 	}
@@ -147,7 +150,7 @@ interface LoadedExtension {
 	handlers: Map<string, Array<(event: unknown, ctx: unknown) => Promise<unknown>>>;
 }
 
-/** 每次测试前后清掉模式变量，避免互相污染。 */
+/** Clear the mode variable before/after each test to avoid cross-contamination. */
 function withMode<T>(mode: string | undefined, run: () => Promise<T>): Promise<T> {
 	const prior = process.env.PI_DESTRUCTIVE_GUARD;
 	if (mode === undefined) delete process.env.PI_DESTRUCTIVE_GUARD;
@@ -158,18 +161,18 @@ function withMode<T>(mode: string | undefined, run: () => Promise<T>): Promise<T
 	});
 }
 
-test("危险删除命令被拦下", { skip }, async () => {
+test("dangerous delete commands are blocked", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf /" });
-		assert.equal(verdict.block, true, "rm -rf / 必须被拦");
+		assert.equal(verdict.block, true, "rm -rf / must be blocked");
 		assert.match(verdict.reason ?? "", /destructive-guard/);
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("受保护目录的上级被拦下", { skip }, async () => {
+test("an ancestor of a protected dir is blocked", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		assert.equal((await guard.call("bash", { command: "rm -rf /Users" })).block, true);
@@ -180,21 +183,21 @@ test("受保护目录的上级被拦下", { skip }, async () => {
 	}
 });
 
-test("事故形态（dirname + 兜底值）被拦下", { skip }, async () => {
+test("the incident shape (dirname + fallback value) is blocked", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $(dirname /tmp)" });
-		assert.equal(verdict.block, true, "算出来的目标必须被拦");
+		assert.equal(verdict.block, true, "a computed target must be blocked");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("工作目录内的正常删除放行", { skip }, async () => {
+test("a normal delete inside the workdir passes", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
-		// 用钩子看到的 cwd（临时 projectDir），而不是 process.cwd()（仓库）——
-		// 后者在工作目录之外，会（正确地）命中 outside-workdir。
+		// use the cwd the hook saw (the temp projectDir), not process.cwd() (the repo) —
+		// the latter is outside the workdir and would (correctly) hit outside-workdir.
 		assert.deepEqual(await guard.call("bash", { command: `rm -rf ${guard.cwd}/dist` }), {});
 		assert.deepEqual(await guard.call("bash", { command: "rm -f /tmp/scratch.log" }), {});
 		assert.deepEqual(await guard.call("bash", { command: "ls -la /usr" }), {});
@@ -204,20 +207,20 @@ test("工作目录内的正常删除放行", { skip }, async () => {
 	}
 });
 
-test("写入危险删除代码被拦下", { skip }, async () => {
+test("writing dangerous delete code is blocked", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		const verdict = await guard.call("write", {
 			path: "verify.mjs",
 			content: 'fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true });',
 		});
-		assert.equal(verdict.block, true, "事故那行代码必须被拦");
+		assert.equal(verdict.block, true, "the incident's own line must be blocked");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("写入正常删除代码放行", { skip }, async () => {
+test("writing normal delete code passes", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		assert.deepEqual(await guard.call("write", { path: "clean.mjs", content: 'fs.rmSync("/tmp/va-1", { recursive: true });' }), {});
@@ -227,7 +230,7 @@ test("写入正常删除代码放行", { skip }, async () => {
 	}
 });
 
-test("edit 的新文本也检查", { skip }, async () => {
+test("edit's new text is checked too", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		const verdict = await guard.call("edit", { path: "a.mjs", oldText: "x", newText: "shutil.rmtree(os.path.dirname(p))" });
@@ -237,56 +240,56 @@ test("edit 的新文本也检查", { skip }, async () => {
 	}
 });
 
-test("非交互环境 fail closed（confirm 也拒）", { skip }, async () => {
+test("non-interactive fails closed (even confirm refuses)", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: false });
 	try {
-		// 这条属于 confirm 档；没有 UI 可用时不能默认放行。
+		// this one sits in the confirm tier; with no UI available it must not default to allow.
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
-		assert.equal(verdict.block, true, "非交互时必须拒");
+		assert.equal(verdict.block, true, "must refuse when non-interactive");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("有 UI 时 confirm 档会问一次，回答“取消”则拦", { skip }, async () => {
+test("with UI, the confirm tier asks once; answering \"cancel\" blocks", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
-		assert.equal(guard.selects.length, 1, "应该弹了一次确认");
-		assert.equal(verdict.block, true, "选取消必须拦");
+		assert.equal(guard.selects.length, 1, "one confirmation should have been shown");
+		assert.equal(verdict.block, true, "choosing cancel must block");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("有 UI 时回答“确认删除”则放行", { skip }, async () => {
+test("with UI, answering \"confirm delete\" lets it through", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Confirm deletion" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(guard.selects.length, 1);
-		assert.equal(verdict.block, undefined, "用户确认后应放行");
+		assert.equal(verdict.block, undefined, "should pass after the user confirms");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("有 UI 时回答“先预览要删什么”则拦下并要求模型先列清单", { skip }, async () => {
+test("with UI, answering \"preview what would be deleted first\" blocks and asks the model to list targets", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Preview deletion targets" });
 	try {
 		const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
-		assert.equal(verdict.block, true, "预览也是拦下（不直接执行）");
-		assert.match(verdict.reason ?? "", /Use read-only commands/, "理由里要告诉模型先列清单");
+		assert.equal(verdict.block, true, "a preview is also a block (not direct execution)");
+		assert.match(verdict.reason ?? "", /Use read-only commands/, "the reason must tell the model to list targets first");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("弹框选项里“取消”是默认项（第一个）", { skip }, async () => {
+test("\"cancel\" is the default (first) option in the dialog", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		await guard.call("bash", { command: "rm -rf $UNSET/*" });
 		assert.equal(guard.selects.length, 1);
-		// 弹框正文必须包含“要删”与“为什么拦”，不能只有原始命令。
+		// the dialog body must contain "what gets deleted" and "why it was blocked", not only the raw command.
 		assert.match(guard.selects[0]!, /Delete target: /);
 		assert.match(guard.selects[0]!, /Why blocked: /);
 		assert.match(guard.selects[0]!, /deletes nothing/);
@@ -295,33 +298,33 @@ test("弹框选项里“取消”是默认项（第一个）", { skip }, async (
 	}
 });
 
-test("block 档不弹窗，直接拒", { skip }, async () => {
+test("the block tier shows no dialog and refuses outright", { skip }, async () => {
 	await withMode("block", async () => {
 		const guard = await loadHarness({ hasUI: true });
 		try {
 			const verdict = await guard.call("bash", { command: "rm -rf $UNSET/*" });
 			assert.equal(verdict.block, true);
-			assert.equal(guard.selects.length, 0, "block 档不该弹窗");
+			assert.equal(guard.selects.length, 0, "the block tier must not show a dialog");
 		} finally {
 			guard.cleanup();
 		}
 	});
 });
 
-test("notify 档只通知不拦", { skip }, async () => {
+test("the notify tier only notifies, never blocks", { skip }, async () => {
 	await withMode("notify", async () => {
 		const guard = await loadHarness({ hasUI: true });
 		try {
 			const verdict = await guard.call("bash", { command: "rm -rf /" });
-			assert.equal(verdict.block, undefined, "notify 档不该拦");
-			assert.equal(guard.notifies.length, 1, "应该通知一次");
+			assert.equal(verdict.block, undefined, "the notify tier must not block");
+			assert.equal(guard.notifies.length, 1, "one notification should fire");
 		} finally {
 			guard.cleanup();
 		}
 	});
 });
 
-test("off 档完全不管", { skip }, async () => {
+test("the off tier does nothing at all", { skip }, async () => {
 	await withMode("off", async () => {
 		const guard = await loadHarness({ hasUI: true });
 		try {
@@ -334,7 +337,7 @@ test("off 档完全不管", { skip }, async () => {
 	});
 });
 
-test("非删除类工具不检查", { skip }, async () => {
+test("non-delete tools are not checked", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		assert.deepEqual(await guard.call("read", { path: "/etc/hosts" }), {});
@@ -344,29 +347,29 @@ test("非删除类工具不检查", { skip }, async () => {
 	}
 });
 
-// ---- 弹框文案（不依赖 pi 加载器，直接测纯函数）----
+// ---- dialog text (does not need the pi loader — pure functions tested directly) ----
 
 const CWD = "/Users/bachi/jaylli/litellm-any";
 const HOME = "/Users/bachi";
 
-test("弹框正文：命令替换目标不再显示成碎片", () => {
+test("dialog body: a command-substitution target no longer renders as fragments", () => {
 	const findings = inspectBash('rm -rf $(dirname "$LOG")', CWD, HOME);
-	assert.equal(findings.length, 1, "应该只命中一个目标，不是三个碎片");
+	assert.equal(findings.length, 1, "exactly one target should be hit, not three fragments");
 	const text = renderFindingsForHuman(findings, 'rm -rf $(dirname "$LOG")');
-	assert.ok(text.includes('Delete target: $(dirname "$LOG")'), "目标应该完整显示");
-	// 修复前这两个碎片会各自成为一行目标。
-	assert.ok(!text.includes("Delete target: $(dirname\n"), "不该把 $(dirname 单独当目标");
-	assert.ok(!text.includes('Delete target: "$LOG")'), "不该把 \"$LOG\") 单独当目标");
+	assert.ok(text.includes('Delete target: $(dirname "$LOG")'), "the target should display whole");
+	// before the fix these two fragments each became a target line of their own.
+	assert.ok(!text.includes("Delete target: $(dirname\n"), "$(dirname must not be treated as a separate target");
+	assert.ok(!text.includes('Delete target: "$LOG")'), "\"$LOG\") must not be treated as a separate target");
 });
 
-test("弹框正文：能解析的目标显示实际路径", () => {
+test("dialog body: a resolvable target shows the actual path", () => {
 	const findings = inspectBash("rm -rf /usr/local/lib/foo", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf /usr/local/lib/foo");
 	assert.ok(text.includes("Delete target: /usr/local/lib/foo"));
 	assert.ok(text.includes("Why blocked"));
 });
 
-test("弹框正文：单段命令不重复显示“所在命令”，链式命令才显示", () => {
+test("dialog body: a single-segment command does not repeat \"containing command\"; only chained commands do", () => {
 	const single = inspectBash("rm -rf /usr/local/lib/foo", CWD, HOME);
 	assert.ok(!renderFindingsForHuman(single, "rm -rf /usr/local/lib/foo").includes("Command:"));
 
@@ -374,20 +377,20 @@ test("弹框正文：单段命令不重复显示“所在命令”，链式命�
 	assert.ok(renderFindingsForHuman(chained, 'cd /tmp && rm -rf $(dirname "$X")').includes("Command:"));
 });
 
-test("弹框正文：重复命中去重、超限时折叠", () => {
+test("dialog body: duplicate hits dedupe, over-limit items fold", () => {
 	const findings = inspectBash("rm -rf $A $B $C $D $E", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf $A $B $C $D $E", 3);
 	assert.ok(text.includes("… plus 2 similar matches"));
-	assert.ok(!text.includes("Delete target: $D"), "超过上限的条目不该展开");
+	assert.ok(!text.includes("Delete target: $D"), "items over the limit must not be expanded");
 });
 
-test("弹框正文：同一目标重复命中只说一次", () => {
+test("dialog body: repeated hits on the same target are said once", () => {
 	const findings = inspectBash("rm -rf $A; rm -rf $A", CWD, HOME);
 	const text = renderFindingsForHuman(findings, "rm -rf $A; rm -rf $A");
 	assert.equal(text.match(/Delete target: /g)?.length, 1);
 });
 
-test("truncateMiddle 中间省略保留头尾", () => {
+test("truncateMiddle clips the middle, keeping head and tail", () => {
 	assert.equal(truncateMiddle("short", 100), "short");
 	const long = "a".repeat(200);
 	const cut = truncateMiddle(long, 40);
@@ -395,16 +398,16 @@ test("truncateMiddle 中间省略保留头尾", () => {
 	assert.ok(cut.startsWith("aaaa") && cut.endsWith("aaaa") && cut.includes("…"));
 });
 
-test("writeTargetLabel 从写入参数里取文件名", () => {
+test("writeTargetLabel pulls the filename out of the write params", () => {
 	assert.equal(writeTargetLabel({ path: "verify.mjs" }), " verify.mjs");
 	assert.equal(writeTargetLabel({ file_path: "/tmp/a.mjs" }), " /tmp/a.mjs");
 	assert.equal(writeTargetLabel({ content: "x" }), "the file");
 	assert.equal(writeTargetLabel(null), "the file");
 });
 
-// ---- 闸三：运行脚本前把文件读进来判（2026-09-23 事故形态的唯一拦截点）----
+// ---- gate three: read the file in and judge it before the script runs (the only interception point for the 2026-09-23 incident's shape) ----
 
-test("闸三：即将运行的脚本里有事故形态 → 拦", { skip }, async () => {
+test("gate three: the incident shape inside an about-to-run script → block", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const script = path.join(guard.cwd, "verify-a.mjs");
@@ -413,14 +416,14 @@ test("闸三：即将运行的脚本里有事故形态 → 拦", { skip }, async
 			'import fs from "node:fs";\nimport path from "node:path";\nconst s = { log: [] };\nfs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true });\n',
 		);
 		const verdict = await guard.call("bash", { command: "node verify-a.mjs" });
-		assert.equal(verdict.block, true, "命令词无害、危险在文件里，必须靠闸三拦");
+		assert.equal(verdict.block, true, "a harmless command word with danger inside the file must be caught by gate three");
 		assert.match(verdict.reason ?? "", /script|cancelled/);
 	} finally {
 		guard.cleanup();
 	}
 });
 
-test("闸三：干净脚本放行", { skip }, async () => {
+test("gate three: a clean script passes", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		const script = path.join(guard.cwd, "clean.mjs");
@@ -431,7 +434,7 @@ test("闸三：干净脚本放行", { skip }, async () => {
 	}
 });
 
-test("闸三：读不到的脚本不拦（护栏不是沙箱）", { skip }, async () => {
+test("gate three: an unreadable script is not blocked (guardrail, not sandbox)", { skip }, async () => {
 	const guard = await loadHarness();
 	try {
 		assert.deepEqual(await guard.call("bash", { command: "node nope.mjs" }), {});
@@ -440,21 +443,21 @@ test("闸三：读不到的脚本不拦（护栏不是沙箱）", { skip }, asyn
 	}
 });
 
-test("闸三：内联代码里的脚本调用也被抽出", { skip }, async () => {
+test("gate three: script calls inside inline code are extracted too", { skip }, async () => {
 	const guard = await loadHarness({ hasUI: true, selectAnswer: "Cancel" });
 	try {
 		const script = path.join(guard.cwd, "a.mjs");
 		fs.writeFileSync(script, 'fs.rmSync(path.dirname(x ?? "/tmp"), { recursive: true });');
 		const verdict = await guard.call("bash", { command: "sh -c 'node a.mjs'" });
-		assert.equal(verdict.block, true, "sh -c 里嵌套的脚本也要读进来判");
+		assert.equal(verdict.block, true, "a script nested inside sh -c must be read in and judged");
 	} finally {
 		guard.cleanup();
 	}
 });
 
-// ---- 补丁④：git 破坏性命令（毁掉只此一份的未提交工作）----
+// ---- patch ④: destructive git commands (destroying one-of-a-kind uncommitted work) ----
 
-test("git 破坏性命令 → confirm", () => {
+test("destructive git commands → confirm", () => {
 	for (const command of [
 		"git reset --hard HEAD",
 		"git reset --hard",
@@ -466,13 +469,13 @@ test("git 破坏性命令 → confirm", () => {
 		"git branch -D feature-x",
 	]) {
 		const findings = extractGitHistoryLoss(command);
-		assert.ok(findings.length > 0, `${command} 应该命中`);
-		assert.equal(findings[0]!.verdict, "confirm", `${command} 应该是 confirm`);
+		assert.ok(findings.length > 0, `${command} should hit`);
+		assert.equal(findings[0]!.verdict, "confirm", `${command} should be confirm`);
 		assert.equal(findings[0]!.rule, "vcs-history-loss");
 	}
 });
 
-test("git 安全命令不误伤", () => {
+test("safe git commands are not hurt", () => {
 	for (const command of [
 		"git status",
 		"git checkout feature-x",
@@ -484,18 +487,18 @@ test("git 安全命令不误伤", () => {
 		"git branch -d feature-x",
 		"git clean -n",
 	]) {
-		assert.equal(extractGitHistoryLoss(command).length, 0, `${command} 不该命中`);
+		assert.equal(extractGitHistoryLoss(command).length, 0, `${command} should not hit`);
 	}
 });
 
-test("git reset --hard 经 inspectBash 端到端命中", () => {
+test("git reset --hard hits end-to-end via inspectBash", () => {
 	const findings = inspectBash("git reset --hard HEAD", CWD, HOME);
 	assert.ok(findings.some((finding) => finding.rule === "vcs-history-loss"));
 });
 
-// ---- 补丁②：工作目录之外要确认（经 inspectBash 端到端）----
+// ---- patch ②: outside the working directory needs confirmation (end-to-end via inspectBash) ----
 
-test("本次事故的全部损失面经 inspectBash 命中（outside-workdir 或更严的 self-protection）", () => {
+test("the incident's entire loss surface hits via inspectBash (outside-workdir or the stricter self-protection)", () => {
 	for (const command of [
 		"rm -rf ~/.pi/agent/sessions",
 		"rm -f ~/.zshrc",
@@ -504,16 +507,16 @@ test("本次事故的全部损失面经 inspectBash 命中（outside-workdir 或
 		"rm -rf ~/.claude/sessions ~/.claude/shell-snapshots",
 	]) {
 		const findings = inspectBash(command, CWD, HOME);
-		assert.ok(findings.length > 0, `${command} 应该命中`);
-		// ~/.pi/agent/sessions 会先命中更严的 self-protection（block），其余命中 outside-workdir。
+		assert.ok(findings.length > 0, `${command} should hit`);
+		// ~/.pi/agent/sessions hits the stricter self-protection (block) first; the rest hit outside-workdir.
 		assert.ok(
 			findings.some((finding) => finding.rule === "outside-workdir" || finding.rule === "self-protection"),
-			`${command} 应该命中 outside-workdir/self-protection，实际：${findings.map((finding) => finding.rule).join(",")}`,
+			`${command} should hit outside-workdir/self-protection; got: ${findings.map((finding) => finding.rule).join(",")}`,
 		);
 	}
 });
 
-test("守卫自己经 inspectBash 命中 self-protection（block）", () => {
+test("the guard itself hits self-protection (block) via inspectBash", () => {
 	for (const command of [
 		"rm -rf ~/.pi/agent/extensions/destructive-guard",
 		"rm -f ~/.pi/agent/AGENTS.md",

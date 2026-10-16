@@ -1,30 +1,39 @@
 /**
- * Tests for sandbox-boundary/index.ts — 用 pi 自己的加载器真实加载扩展，
- * 把真实的 `tool_call` 事件喂进去，断言放行 / 确认 / 拦截三种结果。
+ * Tests for sandbox-boundary/index.ts — really load the extension via pi's own loader,
+ * feed real `tool_call` events in, and assert the pass / confirm / block outcomes.
  *
  * Run with:  node --test clients/pi/extensions/sandbox-boundary/index.test.ts
  *
- * 断言口径（用户 2026-09-24 定，同日收窄到「只管删除」，后又加了两层授权、再加「永不删除」档）：
- *   - **写入一律不拦**：write / edit / multiedit 无论目标在边界内外都直接放行、不弹窗；
- *   - apply_patch 只看 `*** Delete File:` 行：
- *     - 删除目标在边界内（项目目录、/tmp、可再生缓存 ~/.cache 等）→ 直接放行；
- *     - **永不删除**（`~/.zshrc`、`~/.ssh/…`、`~/.gnupg/…`、嵌套条目 `~/.config/gh/…`
- *       `~/.config/gcloud/…` 等身份/凭据/手写配置；`~/.config` `~/.pi` `~/.claude` `~/.codex`
- *       自身自 2026-09-25 起是普通档）→ **不弹框、无任何放行选项**，直接 block；整份 patch 一起拒；
- *     - **危险路径**（系统根、`~/Library/…`、含 `.git` 的路径…）→ 每次必问，
- *       选项是 Deny / Allow once / Allow for this session（没有「记住」）；
- *     - **普通边界外路径**（`~/Downloads/x` 这类）→ 问一次，选项是
- *       Deny / Allow for this session（并记住该目录）/ Allow once；记住后落盘，下次不弹；
- *     - `Update File` / `Add File` 是写入，边界外也放行；
- *   - 只读工具（read/grep）与认不出删除目标的工具一律放行；
- *   - 非交互环境：持久白名单生效（命中则放行），永不删除与危险/普通未授权都 fail-closed 直接 block；
- *   - PI_SANDBOX=off 时整个钩子不生效。
+ * The assertion rule (decided by the user 2026-09-24, narrowed to "deletion only" the same
+ * day, then two authorization tiers and later a "never delete" tier were added):
+ *   - **Writes are never blocked**: write / edit / multiedit pass outright inside or outside
+ *     the boundary, no dialog;
+ *   - apply_patch only looks at `*** Delete File:` lines:
+ *     - a delete target inside the boundary (project dir, /tmp, regenerable caches like
+ *       ~/.cache) → pass outright;
+ *     - **never delete** (`~/.zshrc`, `~/.ssh/…`, `~/.gnupg/…`, nested entries like
+ *       `~/.config/gh/…` `~/.config/gcloud/…` — identity/credential/handwritten config;
+ *       `~/.config` `~/.pi` `~/.claude` `~/.codex` themselves moved to the ordinary tier on
+ *       2026-09-25) → **no dialog, no allow option**, outright block; the whole patch is
+ *       rejected together;
+ *     - **dangerous paths** (system roots, `~/Library/…`, paths containing `.git`…) → asked
+ *       every time, options are Deny / Allow once / Allow for this session (no "remember");
+ *     - **ordinary out-of-boundary paths** (like `~/Downloads/x`) → asked once, options are
+ *       Deny / Allow for this session (and remember the directory) / Allow once; remembered
+ *       means persisted — no prompt next time;
+ *     - `Update File` / `Add File` are writes and pass even outside the boundary;
+ *   - read-only tools (read/grep) and tools with no recognizable delete target pass;
+ *   - non-interactive: the persistent allowlist applies (hits pass), never-delete and
+ *     unauthorized dangerous/ordinary all fail-closed into a block;
+ *   - PI_SANDBOX=off disables the whole hook.
  *
- * 注意 harness 的 projectDir 在 /tmp 下（mkdtempSync），本身就在可删边界内 ——
- * 所以"边界内"用例用 projectDir 下的路径，"边界外"用例用 $HOME 下的路径。
- * 白名单指向 harness 自己的临时文件（`PI_SANDBOX_ALLOWLIST`），不碰用户真实的那份；
- * 会话豁免是 globalThis 单例，每个用例前后都要清，否则跨用例残留会污染判定。
- * 找不到本机 pi 的库入口就整体 skip（不假装通过）。
+ * Note the harness's projectDir sits under /tmp (mkdtempSync) — already inside the
+ * deletable boundary, so "inside" cases use paths under projectDir and "outside" cases use
+ * paths under $HOME.
+ * The allowlist points at the harness's own temp file (`PI_SANDBOX_ALLOWLIST`) — the user's
+ * real one is never touched; session exemptions are a globalThis singleton and must be
+ * cleared around every case or residue pollutes the next judgment.
+ * No local pi library entry → skip wholesale (never fake a pass).
  */
 
 import assert from "node:assert/strict";
@@ -35,14 +44,15 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 const HOME = os.homedir();
 
 /**
- * 找 pi 的库入口：先从 `pi` 可执行文件反查真正的安装位置（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 判定方式是能不能真 import。全都不行就返回 undefined，整体 skip。
- * （与 bash-command-collapse/render.test.ts 同一套逻辑。）
+ * Find pi's library entry: first back-trace the `pi` executable to the real install (pnpm/
+ * npm shim scripts carry a `# cmd-shim-target=<abs path>` line; on Unix npm uses a symlink —
+ * both are tried), then fall back to the `~/.pi/agent/npm` copy — the check is whether it
+ * really imports. All failing → undefined → skip wholesale.
+ * (Same logic as bash-command-collapse/render.test.ts.)
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -55,13 +65,13 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -74,7 +84,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -90,22 +100,23 @@ interface Verdict {
 
 interface Harness {
 	cwd: string;
-	/** 弹过的 select（两层授权的主弹框）。 */
+	/** The selects shown (the main dialog of the two authorization tiers). */
 	selects: Array<{ title: string; options: string[] }>;
 	confirms: Array<{ title: string; message: string }>;
 	notifies: string[];
-	/** 本 harness 的白名单文件路径。 */
+	/** This harness's allowlist file path. */
 	allowlistFile: string;
 	cleanup: () => void;
-	/** 喂一个 tool_call 事件，返回拦截结果（{} = 放行）。 */
+	/** Feed a tool_call event; returns the interception result ({} = pass). */
 	call(toolName: string, input: Record<string, unknown>): Promise<Verdict>;
-	/** 跑 /sandbox-boundary 命令（可带子命令参数）。 */
+	/** Run the /sandbox-boundary command (with optional subcommand args). */
 	runCommand(args?: string): Promise<void>;
 }
 
 /**
- * 用 pi 的加载器真实加载扩展。`selections` 按顺序回放用户在 select 里的选择，
- * `confirmAnswer` 给旧的 confirm 分支用（现已不走，留着防回归）。
+ * Really load the extension via pi's loader. `selections` replays the user's select choices
+ * in order; `confirmAnswer` served the old confirm branch (no longer used — kept as a
+ * regression guard).
  */
 async function loadHarness(
 	options: { hasUI?: boolean; selections?: string[]; confirmAnswer?: boolean; seedAllowlist?: string[] } = {},
@@ -137,7 +148,7 @@ async function loadHarness(
 		);
 	}
 
-	// 白名单指向自己的临时文件；会话豁免（globalThis 单例）清空。
+	// the allowlist points at its own temp file; session exemptions (a globalThis singleton) are cleared.
 	const prevAllowlist = process.env.PI_SANDBOX_ALLOWLIST;
 	process.env.PI_SANDBOX_ALLOWLIST = allowlistFile;
 	const { getSessionScopes, resetAllowlistStoreCache } = await import("../bash-command-collapse/allowlist.ts");
@@ -148,9 +159,9 @@ async function loadHarness(
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, bus);
 	if (prevAllowlist === undefined) delete process.env.PI_SANDBOX_ALLOWLIST;
 	else process.env.PI_SANDBOX_ALLOWLIST = prevAllowlist;
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	const extension = loaded.extensions[0];
-	assert.ok(extension, "应该加载到一个扩展");
+	assert.ok(extension, "exactly one extension should load");
 
 	const selects: Array<{ title: string; options: string[] }> = [];
 	const confirms: Array<{ title: string; message: string }> = [];
@@ -193,7 +204,7 @@ async function loadHarness(
 		},
 		async runCommand(args = ""): Promise<void> {
 			const command = extension.commands.get("sandbox-boundary");
-			assert.ok(command, "应当注册 /sandbox-boundary 命令");
+			assert.ok(command, "the /sandbox-boundary command should be registered");
 			await command.handler(args, ctx);
 		},
 	};
@@ -204,18 +215,18 @@ interface LoadedExtension {
 	commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>;
 }
 
-test("写入一律放行：write 到边界外也不弹窗", { skip }, async () => {
+test("writes always pass: a write outside the boundary shows no dialog", { skip }, async () => {
 	const h = await loadHarness();
 	try {
 		const verdict = await h.call("write", { path: `${HOME}/.zshrc`, content: "x" });
-		assert.deepEqual(verdict, {}, "写入不拦，哪怕在边界外");
-		assert.equal(h.confirms.length, 0, "写入一次都不该弹窗");
+		assert.deepEqual(verdict, {}, "writes are not blocked, even outside the boundary");
+		assert.equal(h.confirms.length, 0, "writes must never prompt");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("写入一律放行：edit / multiedit 到边界外也不弹窗", { skip }, async () => {
+test("writes always pass: edit / multiedit outside the boundary show no dialog", { skip }, async () => {
 	const h = await loadHarness();
 	try {
 		assert.deepEqual(await h.call("edit", { path: `${HOME}/.gitconfig`, oldText: "a", newText: "b" }), {});
@@ -226,127 +237,127 @@ test("写入一律放行：edit / multiedit 到边界外也不弹窗", { skip },
 	}
 });
 
-test("apply_patch：边界内删除直接放行，不弹窗", { skip }, async () => {
+test("apply_patch: in-boundary deletes pass outright, no dialog", { skip }, async () => {
 	const h = await loadHarness();
 	try {
 		const patch = `*** Delete File: ${path.join(h.cwd, "old.ts")}\n`;
 		const verdict = await h.call("apply_patch", { patch });
-		assert.deepEqual(verdict, {}, "边界内删除不该拦");
-		assert.equal(h.selects.length, 0, "边界内一次都不该弹窗");
+		assert.deepEqual(verdict, {}, "in-boundary deletes must not be blocked");
+		assert.equal(h.selects.length, 0, "in-boundary must never prompt");
 		assert.equal(h.confirms.length, 0);
-		assert.equal(h.notifies.length, 0, "边界内也不该 notify（那是绝大多数操作）");
+		assert.equal(h.notifies.length, 0, "in-boundary must not notify either (that is most operations)");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：危险路径（~/Library）弹危险框，没有「记住」选项，同意则放行", { skip }, async () => {
+test("apply_patch: a dangerous path (~/Library) shows the dangerous dialog with no \"remember\" option; approving lets it through", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once"] });
 	try {
 		const patch = `*** Delete File: ${HOME}/Library/Preferences/sbx-probe.plist\n`;
 		const verdict = await h.call("apply_patch", { patch });
-		assert.deepEqual(verdict, {}, "同意后应放行");
-		assert.equal(h.selects.length, 1, "应当弹一次框");
-		assert.match(h.selects[0].title, /high-risk directories/, "~/Library 是危险档（必问可豁免）");
-		assert.deepEqual(h.selects[0].options, ["Deny", "Allow once", "Allow for this session"], "危险目录没有「记住」选项");
+		assert.deepEqual(verdict, {}, "should pass after approval");
+		assert.equal(h.selects.length, 1, "one dialog should be shown");
+		assert.match(h.selects[0].title, /high-risk directories/, "~/Library is the dangerous tier (always asked, session-exemptible)");
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow once", "Allow for this session"], "dangerous dirs have no \"remember\" option");
 		assert.ok(h.selects[0].title.includes("outside the boundary"));
-		assert.equal(fs.existsSync(h.allowlistFile), false, "危险路径永远不落盘");
+		assert.equal(fs.existsSync(h.allowlistFile), false, "dangerous paths are never persisted");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：永不删除路径（~/.zshrc）不弹框、无任何放行选项，直接 block", { skip }, async () => {
+test("apply_patch: a never-delete path (~/.zshrc) shows no dialog and no allow option — outright block", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once", "Allow for this session"] });
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
-		assert.equal(verdict.block, true, "永不删除：不给删");
-		assert.match(verdict.reason ?? "", /protected/, "理由要点名档位");
-		assert.equal(h.selects.length, 0, "不弹框 —— 没有放行选项可给");
+		assert.equal(verdict.block, true, "never delete: no deleting");
+		assert.match(verdict.reason ?? "", /protected/, "the reason must name the tier");
+		assert.equal(h.selects.length, 0, "no dialog — there is no allow option to give");
 		assert.equal(h.confirms.length, 0);
-		assert.equal(fs.existsSync(h.allowlistFile), false, "什么都不落盘");
+		assert.equal(fs.existsSync(h.allowlistFile), false, "nothing is persisted");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：永不删除子树（~/.ssh、~/.gnupg）同样 block；项目内同名文件不受影响", { skip }, async () => {
+test("apply_patch: never-delete subtrees (~/.ssh, ~/.gnupg) block the same way; same-named project files are unaffected", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once"] });
 	try {
 		const v1 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.ssh/id_rsa\n` });
-		assert.equal(v1.block, true, "凭据子树拦");
+		assert.equal(v1.block, true, "the credential subtree is blocked");
 		const v2 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.gnupg/x\n` });
-		assert.equal(v2.block, true, "凭据子树拦");
-		assert.equal(h.selects.length, 0, "两次都不弹框");
-		// 2026-09-25 补充的嵌套条目：~/.config 整棵是普通档，但 .config/gh 捞回永不删除档
+		assert.equal(v2.block, true, "the credential subtree is blocked");
+		assert.equal(h.selects.length, 0, "neither time shows a dialog");
+		// the nested entries added 2026-09-25: all of ~/.config is ordinary tier, but .config/gh is pulled back to never-delete
 		const v3 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.config/gh/hosts.yml\n` });
-		assert.equal(v3.block, true, "嵌套的永不删除子树拦");
-		assert.equal(h.selects.length, 0, "嵌套条目也不弹框");
+		assert.equal(v3.block, true, "a nested never-delete subtree is blocked");
+		assert.equal(h.selects.length, 0, "nested entries show no dialog either");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：永不删除与普通路径混排 —— 整份 patch 一起拒", { skip }, async () => {
+test("apply_patch: a never-delete path mixed with ordinary paths — the whole patch is rejected together", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow for this session (and remember the directory)"] });
 	try {
 		const patch = `*** Delete File: ${HOME}/Downloads/ok.txt\n*** Delete File: ${HOME}/.zshrc\n`;
 		const verdict = await h.call("apply_patch", { patch });
-		assert.equal(verdict.block, true, "混一个永不删除路径，整份 patch 拒");
+		assert.equal(verdict.block, true, "one never-delete path mixed in rejects the whole patch");
 		assert.match(verdict.reason ?? "", /protected/);
-		assert.equal(h.selects.length, 0, "不给「批准其余部分」的机会");
-		assert.equal(fs.existsSync(h.allowlistFile), false, "也不落盘");
+		assert.equal(h.selects.length, 0, "no chance to \"approve the rest\"");
+		assert.equal(fs.existsSync(h.allowlistFile), false, "nothing persisted either");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：危险路径每次都问，「Allow for this session」后本会话不弹，重启（重新加载）后又弹", { skip }, async () => {
+test("apply_patch: a dangerous path asks every time; \"Allow for this session\" silences it for the session, a restart (reload) asks again", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow for this session", "Deny"] });
 	try {
 		const patch = `*** Delete File: ${HOME}/Library/sbx-probe/foo\n`;
-		assert.deepEqual(await h.call("apply_patch", { patch }), {}, "第一次批准后放行");
-		assert.deepEqual(await h.call("apply_patch", { patch }), {}, "会话豁免后不弹直接放行");
-		assert.equal(h.selects.length, 1, "第二次不该再弹");
-		assert.equal(fs.existsSync(h.allowlistFile), false, "会话豁免不落盘");
-		// 会话豁免是 notify 过的（covered 命中），这里不细断内容，只断重启语义：
-		// cleanup 会清会话集合，模拟重启；重新加载一份扩展后危险路径又弹框。
+		assert.deepEqual(await h.call("apply_patch", { patch }), {}, "passes after the first approval");
+		assert.deepEqual(await h.call("apply_patch", { patch }), {}, "passes without a dialog after the session exemption");
+		assert.equal(h.selects.length, 1, "must not prompt a second time");
+		assert.equal(fs.existsSync(h.allowlistFile), false, "session exemptions are not persisted");
+		// a session exemption was already notified (a covered hit) — no deep assert on content, only on restart semantics:
+		// cleanup clears the session set, simulating a restart; reloading the extension prompts on dangerous paths again.
 	} finally {
 		h.cleanup();
 	}
 	const h2 = await loadHarness({ selections: ["Deny"] });
 	try {
 		const verdict = await h2.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/sbx-probe/foo\n` });
-		assert.equal(verdict.block, true, "重启后危险路径恢复必问，Deny 则拦");
-		assert.equal(h2.selects.length, 1, "又弹框了");
+		assert.equal(verdict.block, true, "dangerous paths ask again after a restart; Deny blocks");
+		assert.equal(h2.selects.length, 1, "a dialog again");
 	} finally {
 		h2.cleanup();
 	}
 });
 
-test("apply_patch：普通边界外路径（~/Downloads）弹普通框，`Allow for this session（并记住该目录）`后落盘且不再问", { skip }, async () => {
+test("apply_patch: an ordinary out-of-boundary path (~/Downloads) shows the ordinary dialog; `Allow for this session (and remember the directory)` then", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow for this session (and remember the directory)"] });
 	const target = `${HOME}/Downloads/sbx-probe-file.txt`;
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${target}\n` });
-		assert.deepEqual(verdict, {}, "同意后应放行");
+		assert.deepEqual(verdict, {}, "should pass after approval");
 		assert.equal(h.selects.length, 1);
-		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (and remember the directory)", "Allow once"], "普通目录的三选项");
-		assert.ok(h.selects[0].title.includes("outside the boundary") && !h.selects[0].title.includes("high-risk"), "普通框不是危险框");
-		// 落盘：记住的是父目录 ~/Downloads，不是那个文件
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (and remember the directory)", "Allow once"], "the ordinary dir's three options");
+		assert.ok(h.selects[0].title.includes("outside the boundary") && !h.selects[0].title.includes("high-risk"), "the ordinary dialog is not the dangerous one");
+		// persisted: what is remembered is the parent dir ~/Downloads, not the file
 		const onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
 		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/Downloads`]);
-		// 第二次：同目录另一个文件 —— 命中白名单，不弹框，补一行 notify
+		// second time: another file in the same dir — allowlist hit, no dialog, one notify line
 		const verdict2 = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/sbx-probe-2.txt\n` });
 		assert.deepEqual(verdict2, {});
-		assert.equal(h.selects.length, 1, "已记住的目录不再弹框");
-		assert.ok(h.notifies.some((n) => n.includes("allowlist")), "命中白名单放行要 notify（不能静默）");
+		assert.equal(h.selects.length, 1, "a remembered directory prompts no more");
+		assert.ok(h.notifies.some((n) => n.includes("allowlist")), "an allowlist-hit pass must notify (not go silently)");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：工具状态目录（~/.pi、~/.config、~/.claude、~/.codex）是普通档 —— 弹框可记住（用户 2026-09-25）", { skip }, async () => {
+test("apply_patch: tool-state dirs (~/.pi, ~/.config, ~/.claude, ~/.codex) are the ordinary tier — dialog can remember (user", { skip }, async () => {
 	const h = await loadHarness({
 		selections: [
 			"Allow for this session (and remember the directory)",
@@ -356,46 +367,46 @@ test("apply_patch：工具状态目录（~/.pi、~/.config、~/.claude、~/.code
 		],
 	});
 	try {
-		// 探针名用不存在的文件（apply_patch 钩子不看存在性）—— 否则 memoryScopeFor 会把
-		// 真实存在的目录（如本机的 ~/.pi/agent/trust.json.lock）当成目标自身记住。
+		// probe names use nonexistent files (the apply_patch hook ignores existence) — otherwise memoryScopeFor would
+		// treat a really-existing dir (like this machine's ~/.pi/agent/trust.json.lock) as the target itself.
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.pi/agent/sbx-probe-lock.txt\n` });
-		assert.deepEqual(verdict, {}, "同意后应放行（不再是永不删除的直接拒）");
-		assert.equal(h.selects.length, 1, "应当弹一次框");
-		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (and remember the directory)", "Allow once"], "普通目录的三选项");
-		assert.ok(!h.selects[0].title.includes("high-risk"), "不是危险框");
+		assert.deepEqual(verdict, {}, "should pass after approval (no longer never-delete's outright refusal)");
+		assert.equal(h.selects.length, 1, "one dialog should be shown");
+		assert.deepEqual(h.selects[0].options, ["Deny", "Allow for this session (and remember the directory)", "Allow once"], "the ordinary dir's three options");
+		assert.ok(!h.selects[0].title.includes("high-risk"), "not the dangerous dialog");
 		const onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
-		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/.pi/agent`], "记住父目录");
+		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/.pi/agent`], "remembers the parent dir");
 
-		// 另外三个同样走普通档（未授权 → 弹框）
+		// the other three take the ordinary tier too (unauthorized → dialog)
 		for (const p of [`${HOME}/.config/sbx-probe.txt`, `${HOME}/.claude/sbx-probe.txt`, `${HOME}/.codex/sbx-probe.txt`]) {
 			const v = await h.call("apply_patch", { patch: `*** Delete File: ${p}\n` });
-			assert.deepEqual(v, {}, `${p} 同意后放行`);
+			assert.deepEqual(v, {}, `${p} passes after approval`);
 		}
-		assert.equal(h.selects.length, 4, "三个未记住的目录各弹一次");
+		assert.equal(h.selects.length, 4, "each of the three unremembered dirs prompts once");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：普通路径选`Allow once`不落盘，同目录第二个文件仍弹框", { skip }, async () => {
+test("apply_patch: `Allow once` on an ordinary path persists nothing; a second file in the same dir still prompts", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once", "Deny"] });
 	try {
 		assert.deepEqual(await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/a.txt\n` }), {});
-		assert.equal(fs.existsSync(h.allowlistFile), false, "`Allow once`不落盘");
+		assert.equal(fs.existsSync(h.allowlistFile), false, "`Allow once` persists nothing");
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/b.txt\n` });
-		assert.equal(verdict.block, true, "没记住 → 第二个文件仍问，Deny 则拦");
+		assert.equal(verdict.block, true, "not remembered → the second file asks again, and Deny blocks");
 		assert.equal(h.selects.length, 2);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：拒绝（Deny）则拦截，什么都没落盘", { skip }, async () => {
+test("apply_patch: denying (Deny) blocks, and nothing is persisted", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Deny"] });
 	try {
 		const patch = `*** Delete File: ${HOME}/Library/Preferences/sbx-deny.plist\n`;
 		const verdict = await h.call("apply_patch", { patch });
-		assert.equal(verdict.block, true, "拒绝后应拦截");
+		assert.equal(verdict.block, true, "should block after the denial");
 		assert.match(verdict.reason ?? "", /denied deletion/);
 		assert.equal(fs.existsSync(h.allowlistFile), false);
 	} finally {
@@ -403,71 +414,71 @@ test("apply_patch：拒绝（Deny）则拦截，什么都没落盘", { skip }, a
 	}
 });
 
-test("apply_patch：Update / Add File 是写入，边界外也放行", { skip }, async () => {
+test("apply_patch: Update / Add File are writes and pass even outside the boundary", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Deny"] });
 	try {
 		const patch = `*** Update File: ${HOME}/.pi/agent/settings.json\n*** Add File: ${HOME}/new-file.txt\n`;
 		const verdict = await h.call("apply_patch", { patch });
-		assert.deepEqual(verdict, {}, "没有 Delete File 就不该拦");
-		assert.equal(h.selects.length, 0, "写入不该弹窗");
+		assert.deepEqual(verdict, {}, "no Delete File → must not block");
+		assert.equal(h.selects.length, 0, "writes must not prompt");
 		assert.equal(h.confirms.length, 0);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：同一危险路径`Allow once`后仍会再问（不进任何记忆）", { skip }, async () => {
+test("apply_patch: `Allow once` on the same dangerous path still asks again (goes into no memory)", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow once", "Allow once"] });
 	try {
 		await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Foo/bar\n` });
 		await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Foo/bar\n` });
-		assert.equal(h.selects.length, 2, "危险路径每次必问，`Allow once`不豁免");
+		assert.equal(h.selects.length, 2, "dangerous paths ask every time; `Allow once` does not exempt");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：非交互环境 fail-closed，未授权的边界外删除直接 block，不弹窗", { skip }, async () => {
+test("apply_patch: non-interactive fails closed — an unauthorized out-of-boundary delete blocks outright, no dialog", { skip }, async () => {
 	const h = await loadHarness({ hasUI: false });
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Preferences/sbx-headless.plist\n` });
-		assert.equal(verdict.block, true, "非交互应直接拦");
+		assert.equal(verdict.block, true, "non-interactive should block outright");
 		assert.match(verdict.reason ?? "", /non-interactive/);
-		assert.equal(h.selects.length, 0, "非交互不该有弹窗");
+		assert.equal(h.selects.length, 0, "non-interactive must not show a dialog");
 		assert.equal(h.confirms.length, 0);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：非交互环境 + 预置白名单 → 放行（授权本来就是交互时给的）", { skip }, async () => {
+test("apply_patch: non-interactive + a preset allowlist → pass (the authorization was given interactively)", { skip }, async () => {
 	const h = await loadHarness({ hasUI: false, seedAllowlist: [`${HOME}/Downloads`] });
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/old.zip\n` });
-		assert.deepEqual(verdict, {}, "headless 下白名单应当生效");
-		assert.equal(h.selects.length, 0, "非交互本来也没有弹窗可言");
+		assert.deepEqual(verdict, {}, "the allowlist must apply under headless");
+		assert.equal(h.selects.length, 0, "there is no dialog to show non-interactively anyway");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：非交互环境 + 预置白名单也拦危险路径", { skip }, async () => {
+test("apply_patch: non-interactive + a preset allowlist still blocks dangerous paths", { skip }, async () => {
 	const h = await loadHarness({ hasUI: false, seedAllowlist: [`${HOME}/Downloads`] });
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Library/Preferences/sbx-headless2.plist\n` });
-		assert.equal(verdict.block, true, "白名单里没有它 → 仍 fail-closed");
+		assert.equal(verdict.block, true, "not in the allowlist → still fail-closed");
 		assert.match(verdict.reason ?? "", /non-interactive/);
-		assert.match(verdict.reason ?? "", /Persistent allowlist: 1 entries/, "理由要告诉模型现在有几条白名单");
+		assert.match(verdict.reason ?? "", /Persistent allowlist: 1 entries/, "the reason must tell the model the current allowlist size");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("apply_patch：非交互环境也拦永不删除路径（理由点名档位）", { skip }, async () => {
+test("apply_patch: non-interactive blocks never-delete paths too (the reason names the tier)", { skip }, async () => {
 	const h = await loadHarness({ hasUI: false });
 	try {
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
-		assert.equal(verdict.block, true, "headless 下永不删除照样拦");
+		assert.equal(verdict.block, true, "never-delete still blocks under headless");
 		assert.match(verdict.reason ?? "", /protected/);
 		assert.equal(h.selects.length, 0);
 	} finally {
@@ -475,13 +486,13 @@ test("apply_patch：非交互环境也拦永不删除路径（理由点名档位
 	}
 });
 
-test("只读工具与无删除目标的工具一律放行", { skip }, async () => {
+test("read-only tools and tools with no delete target all pass", { skip }, async () => {
 	const h = await loadHarness();
 	try {
-		assert.deepEqual(await h.call("read", { path: `${HOME}/.zshrc` }), {}, "read 是只读的");
-		assert.deepEqual(await h.call("grep", { pattern: "x" }), {}, "grep 无路径");
-		assert.deepEqual(await h.call("bash", { command: "rm -rf /" }), {}, "bash 归沙箱管，不归这里");
-		assert.deepEqual(await h.call("apply_patch", { patch: "*** Update File: x.ts\n" }), {}, "无 Delete 行");
+		assert.deepEqual(await h.call("read", { path: `${HOME}/.zshrc` }), {}, "read is read-only");
+		assert.deepEqual(await h.call("grep", { pattern: "x" }), {}, "grep has no path");
+		assert.deepEqual(await h.call("bash", { command: "rm -rf /" }), {}, "bash belongs to the sandbox, not here");
+		assert.deepEqual(await h.call("apply_patch", { patch: "*** Update File: x.ts\n" }), {}, "no Delete lines");
 		assert.equal(h.selects.length, 0);
 		assert.equal(h.confirms.length, 0);
 	} finally {
@@ -489,15 +500,15 @@ test("只读工具与无删除目标的工具一律放行", { skip }, async () =
 	}
 });
 
-test("PI_SANDBOX=off 时整个钩子不生效", { skip }, async () => {
+test("PI_SANDBOX=off disables the whole hook", { skip }, async () => {
 	const prior = process.env.PI_SANDBOX;
 	process.env.PI_SANDBOX = "off";
 	let h: Harness | undefined;
 	try {
 		h = await loadHarness();
 		const verdict = await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/.zshrc\n` });
-		assert.deepEqual(verdict, {}, "off 时不该拦");
-		assert.equal(h.selects.length, 0, "off 时不该弹窗");
+		assert.deepEqual(verdict, {}, "off must not block");
+		assert.equal(h.selects.length, 0, "off must not prompt");
 		assert.equal(h.confirms.length, 0);
 	} finally {
 		if (prior === undefined) delete process.env.PI_SANDBOX;
@@ -506,41 +517,41 @@ test("PI_SANDBOX=off 时整个钩子不生效", { skip }, async () => {
 	}
 });
 
-test("/sandbox-boundary 命令报告边界、白名单与会话豁免", { skip }, async () => {
+test("the /sandbox-boundary command reports the boundary, the allowlist, and session exemptions", { skip }, async () => {
 	const h = await loadHarness({ selections: ["Allow for this session (and remember the directory)"] });
 	try {
 		await h.call("apply_patch", { patch: `*** Delete File: ${HOME}/Downloads/sbx-probe.txt\n` });
 		await h.runCommand();
 		const report = h.notifies[h.notifies.length - 1] ?? "";
 		assert.match(report, /Deletion boundary/);
-		assert.match(report, /Persistent allowlist/, "要列出持久白名单");
-		assert.ok(report.includes(`${HOME}/Downloads`), "白名单条目要显示出来");
+		assert.match(report, /Persistent allowlist/, "must list the persistent allowlist");
+		assert.ok(report.includes(`${HOME}/Downloads`), "allowlist entries must be shown");
 		assert.match(report, /Session exemptions/);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("/sandbox-boundary allow 预授权、forget 移除、clear 清空", { skip }, async () => {
+test("/sandbox-boundary allow pre-authorizes, forget removes, clear empties", { skip }, async () => {
 	const h = await loadHarness();
 	try {
 		await h.runCommand(`allow ${HOME}/Downloads`);
 		let onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
-		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/Downloads`], "allow 落盘");
-		assert.equal(onDisk.entries[0].source, "command", "手动加的标 command");
+		assert.deepEqual(onDisk.entries.map((e: { path: string }) => e.path), [`${HOME}/Downloads`], "allow persists");
+		assert.equal(onDisk.entries[0].source, "command", "manually added entries are tagged command");
 
 		await h.runCommand(`allow ${HOME}/.ssh`);
 		onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
-		assert.equal(onDisk.entries.length, 1, "永不删除路径预授权被安全闸挡下");
+		assert.equal(onDisk.entries.length, 1, "pre-authorizing a never-delete path is stopped by the safety gate");
 
 		await h.runCommand(`forget ${HOME}/Downloads`);
 		onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
-		assert.deepEqual(onDisk.entries, [], "forget 移除");
+		assert.deepEqual(onDisk.entries, [], "forget removes");
 
 		await h.runCommand(`allow ${HOME}/Downloads`);
 		await h.runCommand("clear");
 		onDisk = JSON.parse(fs.readFileSync(h.allowlistFile, "utf8"));
-		assert.deepEqual(onDisk.entries, [], "clear 清空");
+		assert.deepEqual(onDisk.entries, [], "clear empties");
 	} finally {
 		h.cleanup();
 	}

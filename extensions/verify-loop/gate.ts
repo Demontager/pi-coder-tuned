@@ -1,48 +1,56 @@
 /**
- * gate.ts — 验证闸的纯判定：「本轮改了文件，但最后一次改动之后没跑过验证命令」→ block。
+ * gate.ts — the verification gate's pure judgment: "files were changed this turn, but no
+ * verification command ran after the last change" → block.
  *
- * 这是 CC `Stop` hook 的确定性（`type: "command"`）形态在 pi 里的等价物：
- * CC 每次回合结束 fire Stop，hook 返回 `{"decision":"block","reason":...}` 阻止结束；
- * pi 的等价落点是 `agent_before_settle` 返回 `{entries, continue:true}`
- * （dist/core/agent-session.js:1142 `_runBeforeSettleBoundary`）。本文件只做判定，
- * 不发事件、不碰 pi —— 所以可以 `node --test` 直测。
+ * This is the pi equivalent of CC's `Stop` hook in its deterministic (`type: "command"`)
+ * shape: CC fires Stop at every turn end and a `{"decision":"block","reason":...}` result
+ * prevents finishing; pi's landing point is `agent_before_settle` returning
+ * `{entries, continue:true}` (`agent-session.js:1142` `_runBeforeSettleBoundary`). This file
+ * only judges — no events, no pi — so it is directly `node --test`-able.
  *
- * ## 判定输入
+ * ## The judgment input
  *
- * `agent_before_settle` 事件的 `context.contextMessages`（模型可见投影，
- * `agent-session.js:_buildBoundaryContext` 构建）——**天然分支正确**：
- * rewind/分支导航后被丢弃的分支不在投影里，不需要增量状态。
+ * The `agent_before_settle` event's `context.contextMessages` (the model-visible projection,
+ * built by `agent-session.js:_buildBoundaryContext`) — **naturally branch-correct**: branches
+ * dropped by rewind/navigation are absent from the projection, so no incremental state is
+ * needed.
  *
- * ## 「本轮」的界定，以及为什么拦截次数也从投影里数
+ * ## What counts as "this turn", and why block counts are read from the projection too
  *
- * 投影里**最后一条 `role:"user"` 消息之后**的所有消息 = 本次 run。
- * 为什么不是整个投影：上一轮跑过的测试不能为本轮的改动作证
- * （verification-before-completion 的铁律是 FRESH evidence）。
+ * All messages after **the last `role:"user"` message in the projection** = this run.
+ * Why not the whole projection: last turn's test run cannot vouch for this turn's change
+ * (verification-before-completion's iron rule is FRESH evidence).
  *
- * 拦截次数（CC 的 `stop_hook_active` + 连续 8 次上限）**不用内存计数器，而是数投影里
- * 已有的注入消息**。两个理由：
- *   1. `agent_start` 在每次边界续跑时都会再 fire 一次（`runAgentLoopContinue` 里
- *      `emit({type:"agent_start"})`），所以任何挂在 agent_start 上的复位都会在续跑链里
- *      把计数清零，上限失效；
- *   2. 从投影数出来的值天然分支正确、resume 后仍然正确，且不需要任何可变状态。
+ * The block count (CC's `stop_hook_active` + the 8-strike cap) uses **no in-memory counter —
+ * it counts the injected messages already in the projection**. Two reasons:
+ *   1. `agent_start` fires again on every boundary continuation (`emit({type:"agent_start"})`
+ *      in `runAgentLoopContinue`), so any reset hung on agent_start would zero the count in
+ *      the continuation chain and the cap would never work;
+ *   2. a value counted from the projection is naturally branch-correct, still correct after
+ *      resume, and needs no mutable state.
  *
- * 我们注入的是 `role:"custom"` 消息（不是 user），所以它**不会**把 run 窗口切断 ——
- * 整条续跑链共用一个窗口，正是 CC「同一 turn 内连续 block」的语义。
+ * We inject `role:"custom"` messages (not user), so they do **not** cut the run window —
+ * the whole continuation chain shares one window, exactly CC's "consecutive blocks within one
+ * turn" semantics.
  *
- * ## mutation / verification 的口径（已知边界，与 destructive-guard 的词法口径同级）
+ * ## The mutation / verification criteria (known boundary, same level as destructive-guard's
+ * lexical rule)
  *
- * - mutation：assistant 消息里的 `toolCall` 块，工具名 ∈ MUTATION_TOOLS
- *   （`edit` / `write` / `apply_patch` / `multiedit` —— 后两个 pi 0.87.1 内置没有，
- *   dist/core/tools/ 只有 bash/edit/find/grep/ls/powershell/read/write，
- *   放进集合零成本，防未来或第三方注册），且目标路径不是纯文档
- *   （默认排除 `.md`/`.txt`：本仓库 AGENTS.md 编辑极频繁，不排除会把闸磨成噪音）。
- * - **bash 里的写操作（`sed -i` / 重定向 / 脚本改文件）不计为 mutation**——
- *   词法判定不做数据流分析，这是写进文档的已知边界，不是实现疏漏。
- * - verification：**任何一次 `bash` 调用**（成功或失败都算）。口径为什么这么宽，见下面
- *   「为什么 verification 是「跑过命令」而不是「跑过测试」」。
+ * - mutation: a `toolCall` block in an assistant message whose tool name ∈ MUTATION_TOOLS
+ *   (`edit` / `write` / `apply_patch` / `multiedit` — the latter two do not exist in pi
+ *   0.87.1 built-ins; dist/core/tools/ only has bash/edit/find/grep/ls/powershell/read/write,
+ *   so including them costs nothing and covers future or third-party registrations), and the
+ *   target path is not pure documentation
+ *   (`.md` / `.txt` excluded by default: this repo edits AGENTS.md constantly and the gate
+ *   would wear down to noise otherwise).
+ * - **Writes inside bash (`sed -i` / redirects / scripts editing files) do not count as
+ *   mutations** — lexical judgment does no data-flow analysis; this is a documented known
+ *   boundary, not an oversight.
+ * - verification: **any single `bash` call** (success or failure both count). Why the rule
+ *   is this wide: see "why verification is 'ran a command', not 'ran a test'" below.
  */
 
-/** 投影消息的最小结构鸭子类型（不 import pi，保持可单测）。 */
+/** Minimal duck-type for a projection message (no pi import — stays unit-testable). */
 export interface GateMessage {
 	role?: unknown;
 	customType?: unknown;
@@ -55,74 +63,80 @@ interface ToolCallBlock {
 	arguments: Record<string, unknown>;
 }
 
-/** 注入消息的 customType（index.ts 的 registerMessageRenderer 也用它）。 */
+/** The injected messages' customType (index.ts's registerMessageRenderer uses it too). */
 export const VERIFY_LOOP_CUSTOM_TYPE = "verify-loop";
 
-/** 注入消息的种类，存在 `details.kind` 里 —— 拦截次数按种类分别数。 */
+/** The injected message kinds, stored in `details.kind` — block counts are tallied per kind. */
 export type InjectKind = "gate" | "goal-not-met" | "goal-met" | "goal-impossible" | "goal-halted" | "goal-cap";
 
-/** 会改文件的工具名。pi 0.87.1 内置只有 edit/write；其余是防未来/第三方。 */
+/** Tool names that change files. pi 0.87.1 built-ins only have edit/write; the rest guards future/third-party. */
 export const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "multiedit"]);
 
 /**
- * 严格识别式：只认测试/构建/lint 形状的命令。
+ * The strict recognizer: only test/build/lint-shaped commands.
  *
- * **不是默认值** —— 默认口径是「跑过任何命令」（见下）。这个常量留给
- * `PI_VERIFY_PATTERN=strict` 与文档引用：想要「必须跑测试」的严格门时用它。
+ * **Not the default** — the default rule is "any command run counts" (see below). This
+ * constant exists for `PI_VERIFY_PATTERN=strict` and doc references: use it when a
+ * "must actually run tests" gate is wanted.
  */
 export const STRICT_VERIFY_PATTERN =
 	/\b(node\s+--test|npm\s+(run\s+)?test|pnpm\s+(run\s+)?test|yarn\s+(run\s+)?test|pytest|python3?\s+-m\s+unittest|cargo\s+(test|build|check)|go\s+(test|build|vet)|tsc\b|eslint\b|biome\s+check|ruff\s+check|flake8\b|make\s+(test|build|check))\b/i;
 
 /**
- * 默认验证口径：**任何一次 bash 调用都算证据**（`verifyPattern` 为 undefined）。
+ * The default verification rule: **any bash call counts as evidence** (`verifyPattern` is
+ * undefined).
  *
- * ## 为什么不是「必须跑测试」
+ * ## Why not "must have run a test"
  *
- * 2026-09-25 第一次活体冒烟就量到了误报：模型改完 `probe.js` 之后跑的是
+ * The first live smoke run on 2026-09-25 measured the false positive: after editing
+ * `probe.js` the model ran
  * `node --input-type=module -e "import('./probe.js').then(m => console.log(m.VALUE))"`
- * —— 这是货真价实的 fresh evidence（导入改动后的模块、把新值打出来），但它不匹配
- * 任何测试运行器形状，于是闸**第二次**把它拦下，模型回了一句「我上一条已经运行过验证」
- * 又白跑一轮。实测记录在案，不是推演。
+ * — genuinely fresh evidence (imports the changed module, prints the new value), but it
+ * matches no test-runner shape, so the gate blocked it a **second** time; the model said
+ * "I already ran a verification" and wasted a whole round. Measured on the record, not
+ * conjecture.
  *
- * 词法闸判不了「这条命令是不是一个*相关的*测试」—— 那需要语义判断，是 `/goal`
- * 评估器的活。所以两层分工：
+ * A lexical gate cannot decide "is this command a *relevant* test" — that needs semantic
+ * judgment, which is the `/goal` evaluator's job. So the two layers split the work:
  *
- *   - 闸（本文件）：**改动之后有没有对实际状态做过一次观察**（跑过命令、看到输出）。
- *     抓的是「什么都没跑就说完成」—— 也正是 issue #12 与
- *     verification-before-completion 要抓的那个形状。
- *   - `/goal` 评估器：**那次观察能不能证明条件成立**（语义层，CC 的 prompt hook）。
+ *   - the gate (this file): **was there any observation of actual state after the change**
+ *     (a command ran, output was seen). It catches "claims done without running anything" —
+ *     exactly the shape issue #12 and verification-before-completion target.
+ *   - the `/goal` evaluator: **did that observation prove the condition** (the semantic
+ *     layer, CC's prompt hook).
  *
- * 已知代价（写清楚，别当 bug 修）：模型跑一条 `ls` 也能过闸。CC 的 command 型
- * Stop hook 是同级的粗 —— 它就是用户写的那个脚本，判不了相关性。
- * 要严格门就 `PI_VERIFY_PATTERN=strict`（或给一个自己的正则）。
+ * The known cost (documented — do not fix as a bug): a plain `ls` also passes the gate.
+ * CC's command-type Stop hook is equally coarse — it is the user's own script and cannot
+ * judge relevance either.
+ * For a strict gate use `PI_VERIFY_PATTERN=strict` (or supply your own regex).
  */
 export const DEFAULT_VERIFY_PATTERN: RegExp | undefined = undefined;
 
-/** 默认排除的纯文档扩展名（改它们不触发闸）。 */
+/** Pure-doc extensions excluded by default (editing them does not trip the gate). */
 export const DEFAULT_DOC_EXTENSIONS = [".md", ".txt"];
 
 export interface GateConfig {
-	/** block / notify / off —— 由 index.ts 从 env 解析后传入。 */
+	/** block / notify / off — parsed from env by index.ts and passed in. */
 	mode: "block" | "notify" | "off";
-	/** 验证命令识别式；undefined = 任何 bash 调用都算（默认口径，见 DEFAULT_VERIFY_PATTERN）。 */
+	/** The verification-command recognizer; undefined = any bash call counts (default rule, see DEFAULT_VERIFY_PATTERN). */
 	verifyPattern: RegExp | undefined;
-	/** 纯文档扩展名（改这些不算 mutation）。 */
+	/** Pure-doc extensions (editing these is not a mutation). */
 	docExtensions: string[];
-	/** 连续 block 上限（CC 通用上限 8；我们只有一条规则，默认 2）。 */
+	/** The consecutive-block cap (CC's general cap is 8; with a single rule the default is 2). */
 	blockCap: number;
 }
 
 export interface MutationEvent {
 	tool: string;
-	/** 目标路径；apply_patch 等拿不到单路径的记为 undefined。 */
+	/** The target path; apply_patch and friends with no single path record undefined. */
 	path?: string;
 }
 
 export interface GateScan {
-	/** 扫描窗口内的全部工具调用数（goal 的无进展检测复用）。 */
+	/** Total tool-call count in the scan window (reused by goal's no-progress detection). */
 	toolCallCount: number;
 	mutations: MutationEvent[];
-	/** 最后一次 mutation 之后出现的验证命令数。 */
+	/** How many verification commands appear after the last mutation. */
 	verificationsAfterLastMutation: number;
 }
 
@@ -130,7 +144,7 @@ export type GateDecision =
 	| { action: "pass"; reason: string }
 	| { action: "block"; mutations: MutationEvent[]; attempt: number; cap: number };
 
-/** 取 toolCall 块的 path 参数（edit/write 的 schema 都是 `path: string`）。 */
+/** Pull a toolCall block's path argument (both edit's and write's schema use `path: string`). */
 function toolCallPath(block: ToolCallBlock): string | undefined {
 	const path = block.arguments?.path;
 	return typeof path === "string" && path !== "" ? path : undefined;
@@ -160,10 +174,11 @@ function asToolCallBlocks(content: unknown): ToolCallBlock[] {
 }
 
 /**
- * run 窗口起点：最后一条 `role:"user"` 消息的下标（不含它自己）。
- * 没有 user 消息时返回 -1（整个投影都算窗口）。
+ * The run window's start: the index of the last `role:"user"` message (excluding itself).
+ * With no user message returns -1 (the whole projection counts).
  *
- * 注意：我们注入的是 `role:"custom"`，**不算** user，所以续跑链共用一个窗口。
+ * Note: our injections are `role:"custom"` — **not** user — so the continuation chain shares
+ * one window.
  */
 export function findRunStart(messages: readonly GateMessage[]): number {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -173,8 +188,10 @@ export function findRunStart(messages: readonly GateMessage[]): number {
 }
 
 /**
- * 数投影里已注入的某类消息条数（从 startIndex 之后算）。
- * 这就是 CC 的「本 turn 已连续 block 几次」，只是从证据里数而不是靠内存计数。
+ * Count how many injected messages of a kind already exist in the projection (from
+ * startIndex on).
+ * This is CC's "how many consecutive blocks this turn", counted from evidence rather than
+ * an in-memory counter.
  */
 export function countInjected(messages: readonly GateMessage[], kind: InjectKind, startIndex = findRunStart(messages)): number {
 	let count = 0;
@@ -188,10 +205,10 @@ export function countInjected(messages: readonly GateMessage[], kind: InjectKind
 }
 
 /**
- * 扫描窗口内的工具调用事件。
+ * Scan tool-call events inside the window.
  *
- * `startIndex` 缺省 = run 窗口起点；goal 的无进展检测传「上一条注入消息之后」
- * 来只看最新那一段续跑。
+ * `startIndex` defaults to the run window start; goal's no-progress detection passes "after
+ * the last injected message" to see only the newest continuation stretch.
  */
 export function scanRun(
 	messages: readonly GateMessage[],
@@ -210,9 +227,9 @@ export function scanRun(
 			if (block.name === "bash") {
 				const command = block.arguments.command;
 				if (typeof command !== "string") continue;
-				// 默认口径：任何 bash 调用都算一次观察；配了识别式则只认匹配的。
+				// the default rule: any bash call counts as an observation; a configured recognizer limits it to matches.
 				if (verifyPattern !== undefined && !verifyPattern.test(command)) continue;
-				// 顺序统计：只有出现在最后一次 mutation 之后的验证才计数
+				// order matters: only verifications appearing after the last mutation count
 				if (scan.mutations.length > 0) scan.verificationsAfterLastMutation += 1;
 				continue;
 			}
@@ -220,7 +237,7 @@ export function scanRun(
 				const path = toolCallPath(block);
 				if (isDocPath(path, docExtensions)) continue;
 				scan.mutations.push({ tool: block.name, path });
-				// 新的 mutation 让之前的验证过期
+				// a new mutation expires earlier verifications
 				scan.verificationsAfterLastMutation = 0;
 			}
 		}
@@ -229,8 +246,8 @@ export function scanRun(
 }
 
 /**
- * 闸判定。调用方（index.ts）已经过滤了 `outcome !== "completed"`
- * （CC：abort 不触发 Stop，API 错误走 StopFailure）。
+ * The gate judgment. The caller (index.ts) has already filtered `outcome !== "completed"`
+ * (CC: abort does not fire Stop; API errors go through StopFailure).
  */
 export function decideGate(messages: readonly GateMessage[], config: GateConfig): GateDecision {
 	if (config.mode === "off") return { action: "pass", reason: "off" };
@@ -250,12 +267,12 @@ export function decideGate(messages: readonly GateMessage[], config: GateConfig)
 	};
 }
 
-/** 闸拦截消息（CC 的 reason —— 同时是给模型的指令和给用户看的 "Stop hook feedback"）。 */
+/** The gate's block message (CC's reason — both the model's next instruction and the user-visible "Stop hook feedback"). */
 export function renderGateMessage(decision: Extract<GateDecision, { action: "block" }>): string {
 	const files = decision.mutations
 		.map((mutation) => mutation.path ?? `(${mutation.tool})`)
 		.filter((value, index, all) => all.indexOf(value) === index);
-	const fileList = files.length > 0 ? files.join("、") : "(no specific paths identified)";
+	const fileList = files.length > 0 ? files.join(", ") : "(no specific paths identified)";
 	return (
 		`You claimed completion, but after this run's file changes (${fileList}) no command was run to observe the actual result.
 ` +

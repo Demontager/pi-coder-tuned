@@ -1,64 +1,69 @@
 /**
- * destructive-guard / targets.ts — 删除目标的抽取与判定。
+ * destructive-guard / targets.ts — extraction and judgment of deletion targets.
  *
- * 纯函数，不碰文件系统、不 import pi（所以能直接 `node --test`）。判定口径来自
- * `~/.pi/agent/AGENTS.md` 的 `## Destructive actions`，这里把它变成代码。
+ * Pure functions: no filesystem access, no pi imports (directly `node --test`-able). The
+ * judgment rules come from `~/.pi/agent/AGENTS.md`'s `## Destructive actions` — turned into
+ * code here.
  *
- * 为什么需要确定性检查：2026-09-23 的事故里，删除目标是**算出来的** ——
+ * Why deterministic checking: in the 2026-09-23 incident the deletion target was
+ * **computed** —
  *
  *     fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true })
  *
- * `s.log[0].x` 不存在 → `?? "/tmp"` 兜底 → `dirname("/tmp")` = `"/"`。这类错误不需要
- * “理解语义”就能发现，纯符号分析比 LLM 判定更可靠，也绕不过去。
+ * `s.log[0].x` missing → `?? "/tmp"` fallback → `dirname("/tmp")` = `"/"`. This class of
+ * mistake needs no "semantic understanding" to find — pure symbolic analysis is more reliable
+ * than LLM judgment and cannot be talked around.
  *
- * 词法解析（不解析符号链接）是刻意的：符号链接要访问磁盘才能跟上，而这里要的是
- * **确定性、可测、零副作用**。`/etc` 在 macOS 上是 `/private/etc` 的链接，两条路径
- * 都在保护表里，所以词法解析不吃亏。
+ * Lexical resolution (no symlink resolution) is deliberate: following symlinks needs disk
+ * access, while what is wanted here is **deterministic, testable, zero-side-effect**.
+ * `/etc` is a link to `/private/etc` on macOS — both paths are in the protection table, so
+ * lexical resolution loses nothing.
  */
 
 import { inspectWrittenContent, type WriteFinding } from "./writes.ts";
 
-/** 判定的三档。`ok` 放行，`confirm` 问一次，`block` 直接拒绝。 */
+/** The three verdict tiers: `ok` pass, `confirm` ask once, `block` refuse outright. */
 export type Verdict = "ok" | "confirm" | "block";
 
-/** 一条命中记录。 */
+/** One finding record. */
 export interface Finding {
-	/** 命令里原样的目标文本（可能带引号、变量）。 */
+	/** The target's verbatim text in the command (may carry quotes or variables). */
 	target: string;
-	/** 词法解析后的绝对路径；含未展开变量时为空串。 */
+	/** The lexically resolved absolute path; empty when it still holds unexpanded variables. */
 	resolved: string;
 	verdict: Exclude<Verdict, "ok">;
-	/** 规则名，展示用。 */
+	/** The rule name, for display. */
 	rule: string;
-	/** 一句人话。 */
+	/** A one-line plain reason. */
 	reason: string;
-	/** 这个目标所在的命令片段（拆过 `&&` / `|` / `;` 之后），展示用。 */
+	/** The command segment this target lives in (after `&&` / `|` / `;` splitting), for display. */
 	segment?: string;
 }
 
-/** 一次删除调用点：哪个命令、删什么。 */
+/** One deletion call site: which command, deleting what. */
 export interface DeleteSite {
-	/** `rm` / `find` / `git clean` / `rsync` / `shred` / `truncate`。 */
+	/** `rm` / `find` / `git clean` / `rsync` / `shred` / `truncate`. */
 	command: string;
-	/** 目标原文，顺序同命令行。 */
+	/** The target texts, in command-line order. */
 	targets: string[];
-	/** 所在片段（拆过 `&&` / `|` / `;` 之后），展示用。 */
+	/** The containing segment (after `&&` / `|` / `;` splitting), for display. */
 	segment: string;
 }
 
-/** 一段被解释器直接执行的源码（内联代码或 heredoc 正文）。 */
+/** A stretch of source code about to be executed by an interpreter (inline code or a heredoc body). */
 export interface InlineRun {
 	/** `node` / `sh` / `python3` … */
 	interpreter: string;
-	/** 会被执行的源码正文。 */
+	/** The source body that will be executed. */
 	code: string;
 }
 
 /**
- * 完全不能删的根：等它、是它的祖先，都命中 `block`。
+ * Roots that must never be deleted: matching them or being their ancestor → `block`.
  *
- * 只列“删掉就是灾难、且几乎不存在正当用途”的。**在里面**不算命中 ——
- * `/usr/local/bin/tsc` 是我自己装的，该删还能删；`/usr` 本身不行。
+ * Only "deleting it is catastrophic and almost never legitimate" entries are listed.
+ * **Inside** them does not count — `/usr/local/bin/tsc` is self-installed and may still be
+ * deletable; `/usr` itself may not.
  */
 export const HARD_ROOTS: readonly string[] = [
 	"/",
@@ -81,11 +86,13 @@ export const HARD_ROOTS: readonly string[] = [
 ];
 
 /**
- * 在它里面也要问一句：系统所有的树。不在 `HARD_ROOTS` 里是因为 `/usr/local`（我自己装东西
- * 的地方）在 `/usr` 下 —— 整个 `/usr` 全拦会把正常安装也堵死。
+ * Worth asking even inside: system-owned trees. Not in `HARD_ROOTS` because `/usr/local`
+ * (where self-installed things go) lives under `/usr` — blocking all of `/usr` would jam
+ * normal installs.
  *
- * 同理 `/usr/local/bin/tsc` 这类具体文件是**我自己装的**，删它是正常运维，不该问；所以
- * 这一档只在目标是**目录层级较浅**时命中，深到具体文件就不问（见 `isInsideSystemTree`）。
+ * Similarly a concrete file like `/usr/local/bin/tsc` is **self-installed** — deleting it is
+ * normal maintenance and should not be asked about; so this tier only fires for **shallow
+ * directory levels** — deep concrete files are not asked about (see `isInsideSystemTree`).
  */
 export const SYSTEM_TREES: readonly string[] = [
 	"/System",
@@ -99,18 +106,22 @@ export const SYSTEM_TREES: readonly string[] = [
 	"/Volumes",
 ];
 
-/** 版本控制存储的根名：删掉就是丢掉只此一份的历史。 */
+/** VCS store root names: deleting one loses the only copy of history. */
 const VCS_DIRS = [".git", ".hg", ".svn"];
 
 /**
- * 临时根：`mktemp -d` 的产物落在这里，是“本会话自己创建的”路径的实际代理。
+ * Temp roots: what `mktemp -d` produces lands here — the practical proxy for "created by this
+ * session itself".
  *
- * AGENTS.md 的断言是“工作目录之外、**且不是本会话创建的**”才要确认；“本会话创建的”
- * 静态判不出来，而临时目录是它唯一可靠的近似 —— 守卫自己的测试、调试脚本全在这里，
- * 每次都弹窗等于没有守卫。`/tmp` 与 `/private/tmp` 都列：macOS 上前者是后者的链接，
- * 而本模块刻意不解析符号链接。`/var/tmp` 与 `/private/var/tmp` 同理补上：它是 macOS 自带
- * bash 3.2 的 heredoc 临时目录（编译期写死，`TMPDIR` 改不动），与 seatbelt 边界的
- * `TEMP_WRITE_ROOTS` 保持同一套名单，否则两边对「什么算临时目录」的口径会漂移。
+ * AGENTS.md's assertion is "outside the working directory **and not created by this
+ * session**" needs confirming; "created by this session" cannot be judged statically, and
+ * the temp dirs are its only reliable approximation — the guard's own tests and debug
+ * scripts all live there, and prompting every time would be no guard at all. Both `/tmp`
+ * and `/private/tmp` are listed: the former links to the latter on macOS and this module
+ * deliberately does not resolve symlinks. `/var/tmp` and `/private/var/tmp` are added the
+ * same way: the stock macOS bash 3.2's heredoc temp dir (compiled in, `TMPDIR` cannot move
+ * it), kept in the same list as the seatbelt boundary's `TEMP_WRITE_ROOTS` so the two sides
+ * do not drift on "what counts as a temp dir".
  */
 const TEMP_ROOTS: readonly string[] = [
 	"/tmp",
@@ -122,37 +133,39 @@ const TEMP_ROOTS: readonly string[] = [
 ];
 
 /**
- * 守卫必须保护自己的路径后缀 / 文件名。
+ * Path suffixes / filenames the guard must protect for itself.
  *
- * 2026-09-23 第二次事故里，`rm -rf ~/.pi/agent/extensions/destructive-guard` 与
- * `rm -f ~/.pi/agent/AGENTS.md` 都是**放行**的 —— 守卫看不见自己，也看不见定义它的那份
- * 纪律。删掉前者等于当场解除武装，删掉后者等于把判定口径的出处抹掉，所以这一档是
- * `block` 而不是 `confirm`。
+ * In the second 2026-09-23 incident, `rm -rf ~/.pi/agent/extensions/destructive-guard` and
+ * `rm -f ~/.pi/agent/AGENTS.md` were both **allowed** — the guard could not see itself, nor
+ * the discipline that defines it. Deleting the former disarms it on the spot; deleting the
+ * latter erases the source of the judgment rules — so this tier is `block`, not `confirm`.
  */
 const SELF_PROTECTED_SUFFIXES: readonly string[] = [
 	"/extensions/destructive-guard",
 	"/extensions/destructive-guard/",
 ];
 
-/** 守卫自己的文件名（落在 agent 目录下时受保护）。 */
+/** The guard's own filenames (protected when under the agent directory). */
 const SELF_PROTECTED_BASENAMES: readonly string[] = ["AGENTS.md"];
 
-/** agent 目录里“删掉就等于解除武装”的子树。 */
+/** Subtrees under the agent directory where "deleting equals disarming". */
 const SELF_PROTECTED_AGENT_SUBTREES: readonly string[] = ["/extensions", "/rewind", "/sessions"];
 
-/** 认读的删除命令。 */
+/** The deletion commands recognized. */
 const DELETE_COMMANDS = new Set(["rm", "unlink", "shred", "truncate"]);
 
 /**
- * 会被当作透明前缀跳过的包装命令（`sudo -u root rm -rf x` 的 `rm` 也要认出来）。
- * 与 plan-mode 的表一致：这些命令自己不改动任何东西，真正的动作在后面。
+ * Wrapper commands skipped as transparent prefixes (`sudo -u root rm -rf x` must still
+ * recognize the `rm`).
+ * Same list as plan-mode's: these commands change nothing themselves; the real action comes
+ * after.
  */
 const WRAPPER_COMMANDS = new Set(["sudo", "doas", "env", "command", "nohup", "time", "nice", "xargs", "builtin", "exec"]);
 
-/** 包装命令里“消耗一个值”的开关：`nice -n 10 rm` 的 `10`、`env -u HOME rm` 的 `HOME`。 */
+/** Wrapper flags that "consume one value": `nice -n 10 rm`'s `10`, `env -u HOME rm`'s `HOME`. */
 const WRAPPER_VALUE_FLAGS = new Set(["-n", "-u", "-C", "-S", "-s", "--user", "--unset", "--chdir"]);
 
-/** 解释器 → 内联代码开关。`node -e` / `sh -c` / `python3 -c` 里的代码就是即将执行的东西。 */
+/** Interpreters → their inline-code flags. The code in `node -e` / `sh -c` / `python3 -c` is what is about to run. */
 const INLINE_CODE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 	node: ["-e", "--eval", "-p", "--print"],
 	sh: ["-c"],
@@ -167,8 +180,8 @@ const INLINE_CODE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * 跳过 `FOO=bar` 赋值与包装命令，拿到真正的命令词与参数。
- * `sudo` 自己的开关（`-u root`）连着它的值一起丢掉。
+ * Skip `FOO=bar` assignments and wrapper commands to reach the real command word and args.
+ * `sudo`'s own flags (`-u root`) are dropped together with their values.
  */
 export function unwrapCommand(words: readonly string[]): { head: string; args: string[] } {
 	let index = 0;
@@ -181,7 +194,7 @@ export function unwrapCommand(words: readonly string[]): { head: string; args: s
 		const name = word.split("/").pop() ?? "";
 		if (WRAPPER_COMMANDS.has(name)) {
 			index += 1;
-			// 包装命令自己的开关与它消耗的值
+			// the wrapper's own flags and the values they consume
 			while (index < words.length) {
 				const flag = words[index]!;
 				if (flag === "--") {
@@ -200,22 +213,23 @@ export function unwrapCommand(words: readonly string[]): { head: string; args: s
 }
 
 /**
- * 把 shell 词还原成它实际传给子进程的文本。
+ * Restore a shell word to the text it actually passes to the child process.
  *
- * 与 `stripQuotes` 的区别：双引号里的 `\"` / `\\` / `\$` / ``\` `` 会被 shell 吃掉
- * 转义符（`sh -c "node -e 'fs.rmSync(\"/Users\")'"` 里的子命令真的是
- * `fs.rmSync("/Users")`），这里要把那一层去掉，否则内联代码会被判成语法错误。
+ * Difference from `stripQuotes`: inside double quotes, `\"` / `\\` / `\$` / `\`` escapes
+ * are eaten by the shell (in `sh -c "node -e 'fs.rmSync(\"/Users\")'"` the subcommand
+ * really is `fs.rmSync("/Users")`); that layer must come off, or the inline code misjudges
+ * as a syntax error.
  */
 export function unquoteShellWords(raw: string): string {
 	let text = raw.trim();
 	for (let round = 0; round < 8; round += 1) {
 		let peeled = false;
 		if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
-			// 双引号：只吃掉对 `"` `\\` `\$` ``\` `` 的转义，其他反斜杠原样保留
+			// double quotes: only escapes for `"` `\` `$` `` ` `` are eaten; other backslashes stay
 			text = text.slice(1, -1).replace(/\\(["\\$`])/g, "$1");
 			peeled = true;
 		} else if (text.length >= 2 && text.startsWith("'") && text.endsWith("'")) {
-			// 单引号：里面没有任何转义
+			// single quotes: nothing inside is escaped
 			text = text.slice(1, -1);
 			peeled = true;
 		}
@@ -225,11 +239,13 @@ export function unquoteShellWords(raw: string): string {
 }
 
 /**
- * 把“整体被引号包住、剥完还是一个命令行”的词补上一份展开态：
- * `sh -c "node -e '…'"` 的第三段展开后是 `node -e '…'`，内联代码才能抽出来。
+ * For words that are wholly wrapped in quotes and still form a command line after stripping,
+ * add an expanded variant: `sh -c "node -e '…'"`'s third word expands to `node -e '…'`,
+ * letting the inline code be extracted.
  *
- * 只给 `unwrapCommand` 用（抽内联代码），**不碰 `splitWords`** —— 那里多出来的词
- * 会被 `extractDeleteSites` 当成真目标，凭空造出 `node` / `-e` 这种不是路径的东西。
+ * Only for `unwrapCommand` (inline-code extraction) — **not `splitWords`**, where the extra
+ * words would be taken as real targets by `extractDeleteSites`, fabricating non-path things
+ * like `node` / `-e`.
  */
 export function expandQuotedWords(words: readonly string[]): string[] {
 	const out: string[] = [];
@@ -242,11 +258,13 @@ export function expandQuotedWords(words: readonly string[]): string[] {
 }
 
 /**
- * 从片段里抽出“即将被解释器执行的内联代码”。
+ * Extract "inline code about to be executed by an interpreter" from a segment.
  *
- * 事故形态在闸一的盲区里：`node -e 'fs.rmSync(path.dirname(x ?? "/tmp"))'`、
- * `sh -c 'rm -rf $DIR'`、`python3 -c 'shutil.rmtree(os.path.dirname(p))'` 这些命令的
- * 危险不在命令词上，而在解释器的参数里。把内联代码当子命令再扫一遍，盲区就补上了。
+ * The incident's shape lives in gate one's blind spot: commands like
+ * `node -e 'fs.rmSync(path.dirname(x ?? "/tmp"))'`, `sh -c 'rm -rf $DIR'`,
+ * `python3 -c 'shutil.rmtree(os.path.dirname(p))'` carry no danger at the command word — it
+ * is inside the interpreter's arguments. Scanning inline code as a subcommand closes the
+ * blind spot.
  */
 export function extractInlineCode(command: string): InlineRun[] {
 	const found: InlineRun[] = [];
@@ -270,8 +288,9 @@ export function extractInlineCode(command: string): InlineRun[] {
 }
 
 /**
- * 从 `interpreter - <<EOF … EOF` 这种“把脚本从 stdin 喂给解释器”的形态里取正文。
- * 与内联代码同理：正文才是真正要跑的东西。
+ * Take the body from an `interpreter - <<EOF … EOF` "feed the script to the interpreter via
+ * stdin" shape.
+ * Same reasoning as inline code: the body is what will really run.
  */
 export function extractStdinScript(command: string): InlineRun[] {
 	const found: InlineRun[] = [];
@@ -299,10 +318,11 @@ export function extractStdinScript(command: string): InlineRun[] {
 }
 
 /**
- * 词法解析：去引号 → 展开 `~` → 相对路径拼 cwd → 消掉 `.` 与 `..`。
+ * Lexical resolution: strip quotes → expand `~` → join cwd for relative paths → collapse `.`
+ * and `..`.
  *
- * 含未展开的变量（`$VAR` / `${...}` / `$(...)` / 反引号）时返回空串 —— 调用方据此
- * 判“目标未知”，而不是把一个假路径当成真路径。
+ * With unexpanded variables (`$VAR` / `${...}` / `$(...)` / backticks) returns "" — callers
+ * read that as "target unknown" rather than treating a fake path as real.
  */
 export function resolveLexical(raw: string, cwd: string, home: string): string {
 	const unquoted = stripQuotes(raw);
@@ -327,17 +347,17 @@ export function resolveLexical(raw: string, cwd: string, home: string): string {
 	return "/" + out.join("/");
 }
 
-/** 路径的段数（`/` 是 0 段，`/tmp` 是 1 段）。 */
+/** A path's segment count (`/` is 0, `/tmp` is 1). */
 export function componentCount(resolved: string): number {
 	if (resolved === "" || resolved === "/") return 0;
 	return resolved.split("/").filter((part) => part !== "").length;
 }
 
-/** 去掉最外层的成对引号（**多层**：`"'code'"` 要剥到 `code`）。 */
+/** Strip the outermost paired quotes (**multi-layer**: `"'code'"` must reach `code`). */
 export function stripQuotes(raw: string): string {
 	let text = raw.trim();
-	// 嵌套引号（`sh -c "node -e '…'"`）需要剥多轮。每轮必须成对才继续，
-	// 所以 `"a" + "b"` 这类拼接到一半的串不会越剥越短。
+	// nested quotes (`sh -c "node -e '…'"`) need several rounds. Each round must be paired to continue,
+	// so a half-finished concatenation like `"a" + "b"` does not keep shrinking.
 	for (let round = 0; round < 8; round += 1) {
 		let peeled = false;
 		for (const quote of ['"', "'"]) {
@@ -351,13 +371,13 @@ export function stripQuotes(raw: string): string {
 	return text;
 }
 
-/** 是否含未展开的 shell 展开（变量、命令替换、反引号）。 */
+/** Whether it contains unexpanded shell expansions (variables, command substitution, backticks). */
 export function hasExpansion(text: string): boolean {
 	return text.includes("$") || text.includes("`");
 }
 
 /**
- * 判定单个目标。`cwd` / `home` 由调用方传入（保持纯函数）。
+ * Judge a single target. `cwd` / `home` come from the caller (keeping it pure).
  */
 export function evaluateTarget(raw: string, cwd: string, home: string): Finding | undefined {
 	const text = stripQuotes(raw);
@@ -369,18 +389,18 @@ export function evaluateTarget(raw: string, cwd: string, home: string): Finding 
 		reason,
 	});
 
-	// 显式的主目录 / 根的同义词：不等解析就能判死。
+	// explicit home dir / root synonyms: dead without even resolving.
 	if (text === "/" ) return finding("block", "filesystem-root", "The target is the filesystem root");
 	if (text === "~" || text === "$HOME" || text === "${HOME}") {
 		return finding("block", "home-root", "The target is the home directory itself");
 	}
 
-	// 落点在删除目标上的兜底值：事故的直接成因。
+	// a fallback value sitting on the deletion target: the incident's direct cause.
 	if (/\?\?|\|\||\$\{[A-Za-z_][A-Za-z0-9_]*:-/.test(text)) {
 		return finding("confirm", "fallback-in-target", "The deletion target has a fallback value (a missing value falls back to a default path)");
 	}
 
-	// 算出来的目标：dirname / basename / 变量 / 命令替换。
+	// a computed target: dirname / basename / variables / command substitution.
 	if (/\bdirname\b|\bbasename\b/.test(text) || hasExpansion(text)) {
 		return finding(
 			"confirm",
@@ -425,21 +445,21 @@ export function evaluateTarget(raw: string, cwd: string, home: string): Finding 
 		}
 	}
 
-	// 守卫自己：删掉它等于当场解除武装，所以是 block 而不是 confirm。
+	// the guard itself: deleting it disarms on the spot, so block not confirm.
 	const selfFinding = evaluateSelfProtection(resolved, home);
 	if (selfFinding !== undefined) return finding("block", selfFinding.rule, selfFinding.reason, resolved);
 
-	// AGENTS.md 的第三条断言：工作目录之外、且不是本会话创建的路径，先确认。
-	// “本会话创建的”静态判不出来，临时目录是它唯一可靠的近似（见 TEMP_ROOTS）。
-	// 只在 **主目录子树** 内触发：两次事故的全部损失面都在 `$HOME` 里，而
-	// `/usr/local/bin/tsc` 这类包管理器地盘每次确认只是噪音（AGENTS.md 也明说它可删）。
+	// AGENTS.md's third assertion: outside the working directory and not created by this session → confirm.
+	// "created by this session" is not statically decidable; temp dirs are its only reliable approximation (see TEMP_ROOTS).
+	// fires only inside the **home subtree**: both incidents' entire loss surface was inside `$HOME`, while
+	// package-manager turf like `/usr/local/bin/tsc` would only produce noise (AGENTS.md explicitly says it is deletable).
 	const outside = evaluateOutsideWorkdir(resolved, cwd, home);
 	if (outside !== undefined) return finding("confirm", outside.rule, outside.reason, resolved);
 
 	return undefined;
 }
 
-/** 解析后的路径是不是守卫自己（或定义守卫的那份纪律）。 */
+/** Whether the resolved path is the guard itself (or the discipline that defines it). */
 function evaluateSelfProtection(resolved: string, home: string): { rule: string; reason: string } | undefined {
 	for (const suffix of SELF_PROTECTED_SUFFIXES) {
 		if (resolved.endsWith(suffix.replace(/\/$/, ""))) {
@@ -472,7 +492,7 @@ function evaluateSelfProtection(resolved: string, home: string): { rule: string;
 	return undefined;
 }
 
-/** 解析后的路径是不是“工作目录之外、又不在临时目录里”。 */
+/** Whether the resolved path is "outside the working directory and not inside a temp dir". */
 function evaluateOutsideWorkdir(
 	resolved: string,
 	cwd: string,
@@ -490,7 +510,7 @@ function evaluateOutsideWorkdir(
 	};
 }
 
-/** `child` 是不是 `parent` 本身或它的子路径（按已解析的绝对路径比）。 */
+/** Whether `child` is `parent` itself or under it (compared as resolved absolute paths). */
 export function isUnder(child: string, parent: string): boolean {
 	if (parent === "" || parent === "/") return false;
 	const base = parent.replace(/\/+$/, "");
@@ -498,10 +518,11 @@ export function isUnder(child: string, parent: string): boolean {
 }
 
 /**
- * 从一条 bash 命令里抽出所有删除调用点。
+ * Extract all deletion call sites from a bash command.
  *
- * 覆盖 `rm`（含 `-rf`/`-fr`/`--recursive`）、`find … -delete` 与 `find … -exec rm`、
- * `git clean -f`、`rsync --delete`、`shred`、`truncate`。只做词法切分，不执行任何东西。
+ * Covers `rm` (incl. `-rf` / `-fr` / `--recursive`), `find … -delete` and `find … -exec rm`,
+ * `git clean -f`, `rsync --delete`, `shred`, `truncate`. Lexical splitting only — nothing is
+ * executed.
  */
 export function extractDeleteSites(command: string): DeleteSite[] {
 	const sites: DeleteSite[] = [];
@@ -520,7 +541,7 @@ export function extractDeleteSites(command: string): DeleteSite[] {
 		}
 
 		if (head === "find") {
-			// 目标 = `find` 之后、第一个开关之前的路径（`-name` / `-delete` 这些都是开关）。
+			// targets = the paths after `find` and before the first switch (`-name` / `-delete` are switches).
 			const targets = args.filter((arg, index) => !arg.startsWith("-") && args.slice(0, index).every((prior) => !prior.startsWith("-")));
 			const deletes = args.some((arg) => arg === "-delete" || arg === "-delete;");
 			const execRms = /-exec\s+(rm|unlink|shred)\b/.test(segment);
@@ -549,23 +570,25 @@ export function extractDeleteSites(command: string): DeleteSite[] {
 }
 
 /**
- * 一条命令的完整判定结果：shell 侧的删除目标 + 文本侧的删除 API 调用。
+ * A command's complete judgment: shell-side deletion targets + text-side deletion API calls.
  *
- * 两者必须一起看：`sh -c 'rm -rf $D'` 命中前者，`node -e 'fs.rmSync(dirname(x))'` 命中
- * 后者，而它们的危险程度相同。
+ * Both must be read together: `sh -c 'rm -rf $D'` hits the former,
+ * `node -e 'fs.rmSync(dirname(x))'` hits the latter, and they are equally dangerous.
  */
 export interface CommandInspection {
-	/** shell 侧（`rm` / `find -delete` / 内联代码里剥出来的子命令）。 */
+	/** Shell side (`rm` / `find -delete` / subcommands peeled out of inline code). */
 	findings: Finding[];
-	/** 文本侧（`fs.rmSync(…)` / `shutil.rmtree(…)` / 写进脚本的 `rm -rf $VAR`）。 */
+	/** Text side (`fs.rmSync(…)` / `shutil.rmtree(…)` / a `rm -rf $VAR` written into a script). */
 	textFindings: WriteFinding[];
 }
 
 /**
- * 对一条 bash 命令做完整判定：命令本身 + 它即将交给解释器执行的内联代码 / heredoc 正文。
+ * Fully judge a bash command: the command itself + the inline code / heredoc bodies it is
+ * about to hand to an interpreter.
  *
- * 事故形态（`node -e 'fs.rmSync(path.dirname(x ?? "/tmp"))'`）不在命令词上，只有把内联
- * 代码当子命令递归判一次才能看见；深度限制避免恶意嵌套。
+ * The incident's shape (`node -e 'fs.rmSync(path.dirname(x ?? "/tmp"))'`) does not live at
+ * the command word — it is only visible by recursively judging inline code as a subcommand;
+ * the depth limit blocks hostile nesting.
  */
 export function inspectCommand(command: string, cwd: string, home: string, depth = 2): CommandInspection {
 	const findings = inspectBash(command, cwd, home);
@@ -587,8 +610,8 @@ export function inspectCommand(command: string, cwd: string, home: string, depth
 			if (!findings.includes(finding)) findings.push(finding);
 		}
 		for (const finding of nested.textFindings) {
-			// 去重带上 severity：外层“整条命令”的命中多半是 info 级（内联代码被 shell 引号包着），
-			// 不能因此把递归出来的 confirm 级命中吞掉。
+			// dedupe keeps severity: the outer "whole command" hit is usually info-tier (the inline code is inside shell quotes),
+			// and must not swallow the recursively-found confirm-tier hit.
 			const key = `${finding.line}\u0000${finding.rule}\u0000${finding.severity}`;
 			if (!textFindings.some((prior) => `${prior.line}\u0000${prior.rule}\u0000${prior.severity}` === key)) {
 				textFindings.push({ ...finding, reason: `[${run.interpreter} -c] ${finding.reason}` });
@@ -600,13 +623,15 @@ export function inspectCommand(command: string, cwd: string, home: string, depth
 }
 
 /**
- * 丢掉**未提交工作**的 git 命令。
+ * Git commands that discard **uncommitted work**.
  *
- * 与路径删除不同，它们的目标不是文件系统上的某个路径，而是工作区/暂存区/stash 里
- * 只此一份的内容，所以单独成一个提取器（不硬塞进 target 模型）。
+ * Unlike path deletion, their target is not a filesystem path but the one-of-a-kind content
+ * in the worktree / index / stash — so they get their own extractor (not shoehorned into the
+ * target model).
  *
- * 2026-09-23 第二次事故里，刚写好的“闸三”就是被一条 `git reset` 打回 HEAD 的 ——
- * 而当时的 `extractDeleteSites` 对它返回空数组，门禁连看都没看一眼。
+ * In the second 2026-09-23 incident the just-written "gate three" was rolled back to HEAD by
+ * a `git reset` — and the `extractDeleteSites` of that day returned an empty array for it:
+ * the gate never even looked.
  */
 export function extractGitHistoryLoss(command: string): Finding[] {
 	const findings: Finding[] = [];
@@ -633,9 +658,9 @@ export function extractGitHistoryLoss(command: string): Finding[] {
 			continue;
 		}
 
-		// `git checkout -- <path>`：丢弃工作区改动。
-		// 只认带 `--` 分隔符的形态 —— `git checkout <branch>` / `git checkout -b <branch>` 是
-		// 切分支，不丢东西；`--` 是“后面是路径不是分支”的可靠信号。
+		// `git checkout -- <path>`: discards worktree changes.
+		// only the `--`-separated shape counts — `git checkout <branch>` / `git checkout -b <branch>` switches branches,
+		// losing nothing; `--` is the reliable "paths follow, not a branch" signal.
 		if (sub === "checkout" && args.includes("--")) {
 			push("vcs-history-loss", "git checkout -- discards uncommitted working-tree changes that may have no other copy");
 			continue;
@@ -660,9 +685,9 @@ export function extractGitHistoryLoss(command: string): Finding[] {
 }
 
 /**
- * 对一条 bash 命令做完整判定，返回所有命中。
+ * Fully judge a bash command and return all findings.
  *
- * `cwd` / `home` 用于解析相对路径与 `~`。
+ * `cwd` / `home` resolve relative paths and `~`.
  */
 export function inspectBash(command: string, cwd: string, home: string): Finding[] {
 	const findings: Finding[] = [];
@@ -679,7 +704,7 @@ export function inspectBash(command: string, cwd: string, home: string): Finding
 	return findings;
 }
 
-/** 按 shell 的 `;` `&&` `||` `|` `&` 与换行切片段，引号感知。 */
+/** Split segments on shell `;` `&&` `||` `|` `&` and newlines, quote-aware. */
 export function splitSegments(command: string): string[] {
 	const segments: string[] = [];
 	let token = "";
@@ -705,7 +730,7 @@ export function splitSegments(command: string): string[] {
 			token += char;
 			continue;
 		}
-		// 命令替换内部不切：`$(a; b)` 是一个词里的事。
+		// command substitution does not split: `$(a; b)` is one word's business.
 		if (char === "$" && command[index + 1] === "(") depth += 1;
 		if (char === ")" && depth > 0) depth -= 1;
 		if (depth === 0 && (char === ";" || char === "\n" || char === "&" || char === "|")) {
@@ -721,7 +746,7 @@ export function splitSegments(command: string): string[] {
 	return segments;
 }
 
-/** 把片段切成词，引号感知；引号保留在词里（判定时再剥）。 */
+/** Split a segment into words, quote-aware; quotes stay inside the words (stripped at judgment time). */
 export function splitWords(segment: string): string[] {
 	const words: string[] = [];
 	let token = "";
@@ -749,9 +774,9 @@ export function splitWords(segment: string): string[] {
 			hasToken = true;
 			continue;
 		}
-		// 命令/参数替换（`$(...)` / `${...}` / 反引号）整体算一个词。
-		// 不这么做的话 `rm -rf $(dirname "$LOG")` 会被空格切成 `$(dirname` 和 `"$LOG")`
-		// 两个碎片，弹框里就显示出不是路径的东西。
+		// command/parameter substitution (`$(...)` / `${...}` / backticks) counts as one word.
+		// otherwise `rm -rf $(dirname "$LOG")` splits at the space into `$(dirname` and `"$LOG")` —
+		// two fragments that display as non-paths in the dialog.
 		if ((char === "$" && (segment[index + 1] === "(" || segment[index + 1] === "{")) || char === "`") {
 			const end = scanSubstitution(segment, index);
 			token += segment.slice(index, end);
@@ -765,7 +790,7 @@ export function splitWords(segment: string): string[] {
 			hasToken = false;
 			continue;
 		}
-		// `>` 之类不在这里处理：本模块只关心“删什么”，不关心重定向。
+		// `>` and friends are not handled here: this module only cares about "what gets deleted", not redirects.
 		token += char;
 		hasToken = true;
 	}
@@ -774,8 +799,9 @@ export function splitWords(segment: string): string[] {
 }
 
 /**
- * 从 `start`（指向 `$(` / `${` / 反引号）扫到匹配的结束符之后，返回结束索引（exclusive）。
- * 引号感知、括号计数；扫不到匹配符就吃到串尾（宁可多并一个词，也不要切出碎片）。
+ * Scan from `start` (pointing at `$(` / `${` / a backtick) to just past the matching closer;
+ * return the end index (exclusive).
+ * Quote-aware, paren-counted; no match → eat to end (better one bigger word than fragments).
  */
 export function scanSubstitution(segment: string, start: number): number {
 	const open = segment[start]!;
@@ -794,7 +820,7 @@ export function scanSubstitution(segment: string, start: number): number {
 	const closeChar = isParen ? ")" : "}";
 	let depth = 0;
 	let quote: '"' | "'" | null = null;
-	// 跳过前导 `$`。
+	// skip the leading `$'.
 	let index = segment[start] === "$" ? start + 1 : start;
 	for (; index < segment.length; index += 1) {
 		const char = segment[index]!;
@@ -819,7 +845,7 @@ export function scanSubstitution(segment: string, start: number): number {
 	return segment.length;
 }
 
-/** 取非开关参数，`--` 之后一律算目标。 */
+/** Non-switch args; everything after `--` counts as a target. */
 export function nonFlagArgs(args: readonly string[]): string[] {
 	const out: string[] = [];
 	let afterDoubleDash = false;
