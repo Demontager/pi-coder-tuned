@@ -1,43 +1,60 @@
 /**
- * loaded-sections.ts — 启动时把 `[Context]` / `[Prompts]` / `[Themes]` 三段从「已加载资源」清单里剪掉
+ * loaded-sections.ts — prune the `[Context]` / `[Prompts]` / `[Themes]` sections
+ * from the "loaded resources" listing at startup
  *
- * pi 启动后会在 header 下面打一份「已加载资源」清单（`interactive-mode.js` 的 `showLoadedResources`，
- * 每段 = 一个 `ExpandableText` 标题行 + 一行内容 + 一个 `Spacer(1)`）：
- * `[Context]`（AGENTS.md 等上下文文件）、`[Skills]`、`[Prompts]`（斜杠模板）、`[Extensions]`、`[Themes]`。
- * 其中 `[Context]` / `[Prompts]` / `[Themes]` 对使用者没有信息量（前两个每次启动都一样、主题文件也没人会去数），
- * 留着只是白占屏幕，所以这里在**它们进容器之前**就丢掉；`[Skills]` / `[Extensions]` 以及
- * `[Skill conflicts]` 之类的诊断段全部原样保留。
+ * After startup pi prints a "loaded resources" listing under the header
+ * (`interactive-mode.js`'s `showLoadedResources`; each section = one
+ * `ExpandableText` title row + one content row + one `Spacer(1)`):
+ * `[Context]` (AGENTS.md-style context files), `[Skills]`, `[Prompts]` (slash
+ * templates), `[Extensions]`, `[Themes]`.
+ * Of these, `[Context]` / `[Prompts]` / `[Themes]` carry no information (the
+ * first two are identical on every startup, and nobody counts theme files) —
+ * keeping them is pure screen waste, so they are dropped **before entering the
+ * container**; `[Skills]` / `[Extensions]` and diagnostic sections like
+ * `[Skill conflicts]` are kept verbatim.
  *
- * 为什么不用 pi 自己的 `quietStartup`：那个开关把**整份清单**（含 Skills / Extensions / 诊断）一起关掉，
- * 这里要的只是剪掉三段。清单是 pi 在 `bindCurrentSessionExtensions()` 里 `session_start` **之后**才填的
- * （`showLoadedResources` 紧跟 `await session.bindExtensions(...)`），所以扩展在 `session_start` 里
- * 接管容器的 `addChild` 就赶得上：被隐藏的段一次都不会进容器，也就不存在「先画出来再抹掉」的闪帧。
+ * Why not pi's own `quietStartup`: that switch disables the **whole listing**
+ * (incl. Skills / Extensions / diagnostics) — only three sections are unwanted
+ * here. The listing is filled by pi inside `bindCurrentSessionExtensions()`
+ * **after** `session_start` (`showLoadedResources` follows `await
+ * session.bindExtensions(...)`), so taking over the container's `addChild`
+ * inside `session_start` is early enough: a hidden section never enters the
+ * container — no "drawn then erased" flash frame exists.
  *
- * 怎么认出「已加载资源」那个容器：pi 的 `documentContainer` 固定按
- * `[headerContainer, loadedResourcesContainer, chatContainer]` 顺序挂子节点（`interactive-mode.js`
- * 构造函数），所以从**已挂载的 header 组件**反查出 header 容器（`findRenderContainer`），再往上找它的
- * 父容器、取紧随其后的那个兄弟容器即可。认不出就**什么都不做**（清单照旧显示），不猜下标、不抛错。
+ * How the "loaded resources" container is found: pi's `documentContainer`
+ * mounts children in the fixed order `[headerContainer,
+ * loadedResourcesContainer, chatContainer]` (`interactive-mode.js`'s
+ * constructor), so back-trace the **mounted header component** to its container
+ * (`findRenderContainer`), go up to its parent, and take the sibling container
+ * right after it. Not found → **do nothing** (the listing shows as usual) — no
+ * index guessing, no throwing.
  *
- * 判定与剪枝都是内容驱动的，跟容器认的是谁无关：只有「渲染出来的第一行恰好是 `[Context]` / `[Prompts]` /
- * `[Themes]`」的组件才会被丢，所以万一 pi 挪了容器位置、我们摸到了别的容器（例如 chatContainer），
- * 最多是白接管一次，不会误删别的东西。任何一步抛错都当作「不是要剪的段」，一律放行。
+ * Both detection and pruning are content-driven — it does not matter which
+ * container is found: only a component whose **rendered first row is exactly
+ * `[Context]` / `[Prompts]` / `[Themes]`** is dropped, so should pi move the
+ * containers and we grab the wrong one (e.g. chatContainer), the cost is one
+ * useless takeover, never a wrong deletion. Any throw anywhere counts as "not
+ * a hidden section" → pass through.
  *
- * 全部是纯逻辑（容器只要求 `children` 数组 + `addChild`），不 import pi / pi-tui，`node --test` 直接跑。
+ * All pure logic (a container only needs `children` + `addChild`), no pi /
+ * pi-tui imports — `node --test` runs it directly.
  */
 
-/** 要剪掉的段名（与 pi 的 `addLoadedSection("Context"…)` 逐字一致，大小写敏感）。 */
+/** The section names to prune (verbatim, case-sensitive — matches pi's `addLoadedSection("Context"…)`). */
 export const HIDDEN_SECTION_NAMES: readonly string[] = ["Context", "Prompts", "Themes"];
 
-/** 接管记录挂在容器上的符号键（全局符号注册表：`/reload` 后的新实例能看到并解除旧实例的接管）。 */
+/** The takeover-record key hung on the container (global symbol registry: a `/reload`'d new instance can see and release the old one's). */
 export const SECTION_PRUNER_KEY: symbol = Symbol.for("litellm-any.pi-startup-logo.sectionPruner");
 
 /**
- * 判定用的渲染宽度。标题行只有 `[Context]` 这么长（9 列），远小于任何终端宽度，不会因折行而认不出；
- * 取一个固定值是因为 `addChild` 那一刻还不知道真实宽度（`render` 才带宽度）。
+ * The render width used for detection. A title row is only `[Context]` long
+ * (9 columns) — far under any terminal width, so wrapping can never hide it;
+ * a fixed value because `addChild` time does not know the real width (`render`
+ * is the one that gets it).
  */
 export const DETECT_WIDTH = 200;
 
-/** pi-tui `Container` 里本模块用到的那部分结构（`children` / `addChild` 都是公开的）。 */
+/** The part of pi-tui `Container` this module uses (`children` / `addChild` are public). */
 export interface PrunableContainer {
 	children: unknown[];
 	addChild?(child: unknown): void;
@@ -50,7 +67,7 @@ interface PrunerRecord {
 
 const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
 
-/** 组件渲染出来的第一行（原样返回，可能是 undefined / 非字符串）。 */
+/** The component's first rendered row (returned verbatim — may be undefined / non-string). */
 function firstRenderedLine(component: unknown, width: number): unknown {
 	try {
 		if (component === null || typeof component !== "object") return undefined;
@@ -64,17 +81,17 @@ function firstRenderedLine(component: unknown, width: number): unknown {
 	}
 }
 
-/** 剥掉 ANSI、去掉首尾空白后，这一行是不是 `[Name]` 形状；是就返回名字。 */
+/** ANSI-stripped and trimmed, is this row a `[Name]` shape; returns the name if so. */
 export function sectionTitleOfLine(line: unknown): string | undefined {
 	if (typeof line !== "string") return undefined;
 	const plain = line.replace(ANSI_PATTERN, "").trim();
-	// 名字里可以带空格（`[Skill conflicts]` 这种诊断段），但不允许嵌套方括号。
+	// names may contain spaces (a diagnostic section like `[Skill conflicts]`), but no nested brackets.
 	const match = /^\[([^[\]]+)\]$/.exec(plain);
 	const title = match?.[1].trim();
 	return title ? title : undefined;
 }
 
-/** 这个组件的第一行是不是某个被隐藏的段标题。 */
+/** Is this component's first row one of the hidden section titles. */
 export function isHiddenSection(
 	component: unknown,
 	names: readonly string[] = HIDDEN_SECTION_NAMES,
@@ -84,7 +101,7 @@ export function isHiddenSection(
 	return title !== undefined && names.includes(title);
 }
 
-/** 这个组件是不是「一行空行」——`addLoadedSection` 每段后面那个 `Spacer(1)` 就是这个形状。 */
+/** Is this component "one blank row" — the `Spacer(1)` `addLoadedSection` appends after each section. */
 export function isBlankLineComponent(component: unknown, width: number = DETECT_WIDTH): boolean {
 	try {
 		if (component === null || typeof component !== "object") return false;
@@ -98,10 +115,12 @@ export function isBlankLineComponent(component: unknown, width: number = DETECT_
 }
 
 /**
- * 把 `container` 里现有的隐藏段（连同它后面那个分隔空行）直接删掉，返回删掉的段数。
+ * Delete the hidden sections already inside `container` (each with its trailing
+ * separator blank), returning the number removed.
  *
- * 正常路径用不到它（`addChild` 接管在前面就拦住了），留着是为了「接管装晚了」的情况 ——
- * 例如 `/reload` 之后清单已经填好才轮到新实例。
+ * The normal path never needs it (the `addChild` takeover blocks them upfront);
+ * kept for "the takeover went in late" — e.g. a `/reload` where the listing was
+ * already filled before the new instance ran.
  */
 export function pruneHiddenSections(
 	container: unknown,
@@ -112,7 +131,7 @@ export function pruneHiddenSections(
 	if (!target || !Array.isArray(target.children)) return 0;
 	const children = target.children;
 	let removed = 0;
-	// 倒着走：删掉下标 i 之后，原 i+1（紧跟的空行）正好落到 i 上。
+	// walk backwards: after removing index i, the old i+1 (the following blank row) lands exactly on i.
 	for (let i = children.length - 1; i >= 0; i--) {
 		if (!isHiddenSection(children[i], names, width)) continue;
 		try {
@@ -120,14 +139,14 @@ export function pruneHiddenSections(
 			removed++;
 			if (i < children.length && isBlankLineComponent(children[i], width)) children.splice(i, 1);
 		} catch {
-			// 数组只读之类：能删多少算多少，不再往下试。
+			// e.g. a read-only array: remove what can be removed, then stop.
 			break;
 		}
 	}
 	return removed;
 }
 
-/** 解除 `container` 上现有的接管（可能是别的扩展实例遗留的）。返回是否解掉了什么。 */
+/** Release whatever takeover `container` carries (possibly a leftover of another extension instance). Returns whether anything was released. */
 export function releaseHiddenSectionPruner(container: unknown): boolean {
 	try {
 		const record = (container as { [SECTION_PRUNER_KEY]?: PrunerRecord } | undefined)?.[SECTION_PRUNER_KEY];
@@ -149,10 +168,12 @@ function isPrunableContainer(value: unknown): value is PrunableContainer {
 }
 
 /**
- * 接管 `container.addChild`：隐藏段（以及它后面那个分隔空行）直接不放进去，其余一律透传。
- * 返回解除函数（幂等）；容器不可用时返回 undefined。
+ * Take over `container.addChild`: hidden sections (and each one's trailing
+ * separator blank) simply never go in; everything else passes through.
+ * Returns the release function (idempotent); an unusable container → undefined.
  *
- * 幂等：重复调用先解除上一次接管再装新的，不会叠 wrapper；`/reload` 后新实例能解除旧实例的接管。
+ * Idempotent: a repeat call releases the previous takeover first — no stacked
+ * wrappers; a `/reload`'d new instance can release the old one's.
  */
 export function installHiddenSectionPruner(options: {
 	container: unknown;
@@ -165,7 +186,7 @@ export function installHiddenSectionPruner(options: {
 
 	const names = options.names ?? HIDDEN_SECTION_NAMES;
 	const width = options.width ?? DETECT_WIDTH;
-	// 装晚了（清单已经填好）时先把现有的剪掉。
+	// prune whatever is already inside when the takeover went in late (the listing already filled).
 	pruneHiddenSections(container, names, width);
 
 	const originalAddChild = container.addChild!;
@@ -177,12 +198,12 @@ export function installHiddenSectionPruner(options: {
 		state.released = true;
 		try {
 			const holder = container as { [SECTION_PRUNER_KEY]?: PrunerRecord };
-			// 已经被别的实例的新接管顶掉：只管让自己的 wrapper 失效，别去拆新的那个。
+			// a different instance's newer takeover already replaced ours: only let our wrapper go dead — do not tear down the new one.
 			if (state.record && holder[SECTION_PRUNER_KEY] !== state.record) return;
 			delete holder[SECTION_PRUNER_KEY];
 			container.addChild = originalAddChild;
 		} catch {
-			// 容器只读 / 已被替换：wrapper 自己会因 released 标志透传。
+			// read-only container / already replaced: the wrapper passes through via its released flag.
 		}
 	};
 
@@ -193,7 +214,7 @@ export function installHiddenSectionPruner(options: {
 		}
 		try {
 			if (isHiddenSection(child, names, width)) {
-				// 段后面紧跟的就是它自己的 Spacer(1)，一起收掉，免得留下多余空行。
+				// the section's own Spacer(1) follows it immediately — take it too, or a stray blank row is left behind.
 				dropNextBlank = true;
 				return;
 			}
@@ -202,7 +223,7 @@ export function installHiddenSectionPruner(options: {
 				if (isBlankLineComponent(child, width)) return;
 			}
 		} catch {
-			// 判定失败：按普通 child 放行。
+			// detection failed: pass through as an ordinary child.
 		}
 		originalAddChild.call(container, child);
 	};
@@ -218,8 +239,9 @@ export function installHiddenSectionPruner(options: {
 }
 
 /**
- * 在 `root` 的子树里找「直接装着 `headerContainer` 的那个容器」，再取它**后面**那个兄弟容器 ——
- * 就是 pi 的 `loadedResourcesContainer`。认不出返回 undefined。
+ * Inside `root`'s subtree, find "the container directly holding
+ * `headerContainer`", then take its **following** sibling container — pi's
+ * `loadedResourcesContainer`. Not found → undefined.
  */
 export function findLoadedResourcesContainer(options: {
 	root: unknown;
@@ -254,7 +276,9 @@ export function findLoadedResourcesContainer(options: {
 }
 
 /**
- * 找到「已加载资源」容器并装上剪枝接管。返回是否装上了（找不到容器 / 容器形状不对 → false，界面照旧）。
+ * Find the "loaded resources" container and install the pruning takeover.
+ * Returns whether it was installed (container not found / wrong shape → false,
+ * the listing stays as usual).
  */
 export function hideLoadedSections(options: {
 	root: unknown;

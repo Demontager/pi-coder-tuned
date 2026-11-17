@@ -1,40 +1,52 @@
 /**
- * statusline — 极简 statusline（替代 npm:@narumitw/pi-statusline）
+ * statusline — a minimal statusline (replacing npm:@narumitw/pi-statusline)
  *
- * 只有一主行 + 一状态行（沿用原 pi-statusline 的两行结构），无配置文件、无 powerline 块、
- * 无 palette：颜色全走 `theme.fg(<语义色>)`，因此自动跟随当前主题（`theme` 是 pi 内部的
- * live Proxy 单例，`/theme` 换肤后下一次渲染即生效）。
+ * Just one main row + one status row (pi-statusline's two-row structure kept), no
+ * config file, no powerline blocks, no palette: every color goes through
+ * `theme.fg(<semantic color>)`, so it automatically follows the current theme
+ * (`theme` is pi's internal live-Proxy singleton — after a `/theme` switch the next
+ * render already picks it up).
  *
- * 主行形态：
+ * The main row's shape:
  *
  *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0)
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0) | thinking   ← 生成中
- *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ no git | (no git)          ← 不在 git 仓库
+ *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ main | (+0,-0) | thinking   ← generating
+ *   ⚡️ qwen3.8-flash/xhigh | Ctx 0.0% | ᗌ no git | (no git)          ← outside git
  *
- * 行首的 `⚡️` 是模型段图标（`line.ts` 的 `MODEL_ICON`，取代早期的 `Model:` 文字标签，
- * 省 4 列；emoji 自带颜色不上色）。模型段本体是 `ctx.model.id` + `ctx.thinkingLevel`
- * （live getter）拼成的 `<id>/<推理强度>`（level 读不到时只报 id）。刻意不加 `[1m]`
- * 那种上下文窗口后缀 —— 那是 Claude Code 的写法，pi 用不着。
+ * The leading `⚡️` is the model segment's icon (`line.ts`'s `MODEL_ICON`, replacing
+ * the earlier `Model:` text label — 4 columns saved; the emoji carries its own color
+ * and gets none). The model segment itself is `ctx.model.id` + `ctx.thinkingLevel`
+ * (a live getter) joined as `<id>/<reasoning level>` (just the id when the level is
+ * unreadable). Deliberately no `[1m]`-style context-window suffix — that is a Claude
+ * Code convention pi does not need.
  *
- * 换行策略：宁可截断也不折行 —— 每行都过 `truncateToWidth(..., width, "…")`；行首恒留一个
- * 空格，不顶格。
+ * The line policy: truncate rather than wrap — every line goes through
+ * `truncateToWidth(..., width, "…")`; a leading space is always kept, never
+ * flush-left.
  *
- * 拆四个模块：`line.ts`（纯格式化）+ `git.ts`（读 diff，注入 exec）+ `footer-guard.ts`
- * （换会话期间冻结 footer，防默认 footer 闪一帧）+ 本文件（pi 事件接线）。
- * 前三个都不 import pi / pi-tui，所以 `node --test clients/pi/extensions/statusline/*.test.ts`
- * 能直接跑。
+ * Split into four modules: `line.ts` (pure formatting) + `git.ts` (reads the diff,
+ * `exec` injected) + `footer-guard.ts` (freezes the footer across session swaps so
+ * the default footer never flashes one frame) + this file (the pi event wiring).
+ * The first three import no pi / pi-tui, so
+ * `node --test clients/pi/extensions/statusline/*.test.ts` runs them directly.
  *
- * git 读取一律在后台做（渲染路径上只有一次 Map 查找）：`turn_end` / `agent_end` /
- * `tool_execution_end` 防抖 400ms 刷一次，分支变化立即刷，另有 30s 兜底轮询。
+ * git reads always happen in the background (the render path only does one Map
+ * lookup): `turn_end` / `agent_end` / `tool_execution_end` debounce a refresh at
+ * 400ms, a branch change refreshes immediately, and a 30s polling fallback exists.
  *
- * 换会话（`/new`、`/clear`、`/resume`、fork、rewind）时 pi 会先把 footer 还原成内置那只、
- * 清掉所有 `setStatus`，新会话 `session_start` 才让我们重装 —— 中间那几十毫秒会真的出帧，
- * 于是底部「闪」一下。本扩展用 `footer-guard.ts` 在渲染路径上把这段窗口冻住（重放上一帧的
- * 行），原因与约束见那个文件的头注释；关掉它只需把 `PI_STATUSLINE_FREEZE` 设为 `off`。
+ * On a session swap (`/new`, `/clear`, `/resume`, fork, rewind) pi first restores
+ * the built-in footer and clears every `setStatus`; the new session's
+ * `session_start` lets us reinstall — the tens of milliseconds in between really
+ * emit frames, so the bottom visibly "flashes". This extension freezes that window
+ * on the render path via `footer-guard.ts` (replaying the previous frame's rows);
+ * the reasons and constraints are in that file's header. `PI_STATUSLINE_FREEZE=off`
+ * turns it off.
  *
- * 启动那一段（进程刚起来、`session_start` 还没轮到我们）走的是另一条路：`footer-suppress.ts`
- * 在扩展工厂里就把 `FooterComponent.prototype.render` 换成返回 0 行，内置 statusline 一帧
- * 都不出现（原因、时机与兜底见那个文件的头注释）。它由 `PI_STATUSLINE_BOOT_SUPPRESS=off` 关闭。
+ * The startup stretch (process just up, `session_start` not yet delivered to us)
+ * takes a different path: `footer-suppress.ts` replaces
+ * `FooterComponent.prototype.render` inside the extension factory, returning 0 rows
+ * — the built-in statusline never appears at all (reasons, timing, and fallbacks in
+ * that file's header). `PI_STATUSLINE_BOOT_SUPPRESS=off` disables it.
  */
 
 import { FooterComponent as PiFooterComponent } from "@earendil-works/pi-coding-agent";
@@ -55,7 +67,7 @@ const GIT_DEBOUNCE_MS = 400;
 const FROZEN_DISABLED = (process.env.PI_STATUSLINE_FREEZE ?? "").trim().toLowerCase() === "off";
 const BOOT_SUPPRESS_DISABLED = (process.env.PI_STATUSLINE_BOOT_SUPPRESS ?? "").trim().toLowerCase() === "off";
 
-/** footer 容器要的是这个组件对象；只要 render/dispose 形状，便于在守卫里按身份比对。 */
+/** The footer container wants this component object; only the render/dispose shape is needed, for identity checks in the guard. */
 interface FooterComponent {
 	render(width: number): string[];
 	dispose(): void;
@@ -63,8 +75,8 @@ interface FooterComponent {
 }
 
 export default function statusline(pi: ExtensionAPI) {
-	// 工厂在 TUI 创建之前跑，所以这里就能把内置 footer 静音：窗口内它渲染 0 行，
-	// 等下面 `installFooter` 把我们的组件挂上去再交还（见 footer-suppress.ts）。
+	// the factory runs before the TUI exists, so the built-in footer can be muted right here: inside the window it renders 0 rows,
+	// handed back once `installFooter` below mounts our component (see footer-suppress.ts).
 	const releaseBuiltInFooter: (() => void) | undefined = BOOT_SUPPRESS_DISABLED
 		? undefined
 		: suppressBuiltInFooter(PiFooterComponent);
@@ -82,7 +94,7 @@ export default function statusline(pi: ExtensionAPI) {
 		diffStat: undefined,
 	};
 
-	// 冻结窗口要用的四样：TUI 根（找容器）、当前 footer 组件、它的容器、上一帧渲染出的行。
+	// the four things the freeze window needs: the TUI root (to find the container), the current footer component, its container, the last rendered rows.
 	let tuiHandle: unknown;
 	let footerComponent: FooterComponent | undefined;
 	let footerContainer: unknown;
@@ -156,25 +168,25 @@ export default function statusline(pi: ExtensionAPI) {
 	};
 
 	const installFooter = (ctx: ExtensionContext) => {
-		// 先交还上一段换会话窗口的冻结再装新 footer：两步在同一个同步块里，中间出不了帧。
+		// release the previous swap window's freeze before installing the new footer: both steps in one sync block — no frame can slip between.
 		guardRelease?.();
 		guardRelease = undefined;
 		cancelDiffRefresh();
 		generation += 1;
 		resetState();
-		// print / rpc / json 模式没有 footer，别白跑 git。
+		// print / rpc / json modes have no footer — don't waste git runs.
 		activeTarget = ctx.mode === "tui" ? { cwd: ctx.cwd, generation } : undefined;
 		ctx.ui.setStatus(STATUSLINE_KEY, undefined);
 		if (!activeTarget) {
 			requestRender = undefined;
-			// print / rpc 模式没有 footer，不会有人来装，直接交还内置那只。
+			// print / rpc modes have no footer — nobody will install ours, so hand the built-in one back now.
 			releaseBuiltInFooter?.();
 			return;
 		}
 		const target = activeTarget;
 
-		// 挂上我们的组件前先交还内置那只：两条语句之间是同一个同步块，出不了帧。
-		// 放在 `setFooter` 之前（而不是之后）是为了万一它抛错也不会让底部空着。
+		// hand the built-in footer back before mounting ours: both statements in one sync block — no frame can slip between.
+		// placed before `setFooter` (not after) so a throw still does not leave the bottom empty.
 		releaseBuiltInFooter?.();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			requestRender = () => tui.requestRender();
@@ -190,7 +202,7 @@ export default function statusline(pi: ExtensionAPI) {
 				dispose() {
 					unsubscribeBranch();
 					clearInterval(clock);
-					// 只有仍属当前会话时才清，避免旧 footer 的 dispose 抹掉新会话的状态。
+					// only clear while this still belongs to the current session — an old footer's dispose must not wipe the new session's state.
 					if (target === activeTarget) {
 						activeTarget = undefined;
 						state.diffStat = undefined;
@@ -199,9 +211,9 @@ export default function statusline(pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render(width: number): string[] {
-					// 截断 / 缩进 / 不折行的约定在 line.ts 里，统一由单测覆盖。
+					// the truncate / indent / no-wrap rules live in line.ts, covered by unit tests.
 					const lines = composeFooterLines(theme, ctx, footerData, state, width, truncateToWidth);
-					// 换会话时按身份比对我们是否还在容器里，不在就拿这份行重放（见 footer-guard.ts）。
+					// on a session swap the guard checks by identity whether we are still in the container; if not, these rows replay (see footer-guard.ts).
 					lastFooterLines = lines;
 					return lines;
 				},
@@ -210,17 +222,19 @@ export default function statusline(pi: ExtensionAPI) {
 			return component;
 		});
 
-		// 组件此刻已被 pi 挂进 footer 容器（`setFooter` 是同步的），按对象身份认出那个容器；
-		// 换会话时冻结要用。顺手解除别的扩展实例遗留的接管（`/reload` 之后可能有一次）。
+		// the component is already mounted in the footer container (`setFooter` is synchronous) — identify that container by object identity;
+		// the swap-window freeze needs it. Also release any takeover a previous extension instance left (`/reload` may leave one).
 		footerContainer = findRenderContainer(tuiHandle, footerComponent);
 		if (footerContainer) releaseFooterGuard(footerContainer);
 		scheduleDiffRefresh(0);
 	};
 
 	/**
-	 * 换会话窗口内把 footer 钉在上一帧：pi 紧接着（在我们的 `session_shutdown` 回调之后）会
-	 * 还原内置 footer 并清空 statuses，此时接管容器渲染，默认 footer 一帧都不会出。
-	 */
+ * Pin the footer to its last frame inside the session-swap window: right after our
+ * `session_shutdown` callback, pi restores the built-in footer and clears the
+ * statuses — with the container's render taken over, the default footer never draws
+ * a single frame.
+ */
 	const freezeFooter = () => {
 		if (FROZEN_DISABLED || !footerContainer || !footerComponent) return;
 		const component = footerComponent;
@@ -256,7 +270,7 @@ export default function statusline(pi: ExtensionAPI) {
 		installFooter(ctx);
 	});
 
-	// resume / fork / rewind 会换掉会话对象，footer 得按新 ctx 重装
+	// resume / fork / rewind replace the session object — the footer must reinstall on the new ctx
 	pi.on("session_tree", (_event, ctx) => {
 		installFooter(ctx);
 		render();
@@ -286,7 +300,7 @@ export default function statusline(pi: ExtensionAPI) {
 		render();
 	});
 
-	// agent_end 之后 pi 还可能自动重试 / 压缩 / 跑排队消息，settled 才算真停
+	// after agent_end pi may still auto-retry / compact / run queued messages — only settled means truly stopped
 	pi.on("agent_settled", () => {
 		state.streaming = false;
 		state.activeTools.clear();

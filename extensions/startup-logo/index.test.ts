@@ -1,14 +1,19 @@
 /**
- * Tests for startup-logo/index.ts — 「启动 header 的 logo」与「剪掉三段启动清单」这条链路。
+ * Tests for startup-logo/index.ts — the "logo in the startup header" and "prune three
+ * sections of the startup listing" chain.
  *
  * Run with:  node --test clients/pi/extensions/startup-logo/index.test.ts
  *
- * pi 自己的扩展加载器真的加载 `index.ts`（import 面、事件注册面都在覆盖范围内），假的是扩展
- * 外面的一切：`ctx.ui.setHeader` 按 pi 的行为同步建组件并挂进假 header 容器，`ctx` 是一个
- * 最小对象。于是「装 header → 认容器 → 接管已加载资源清单」这条链能被完整摆出来。
+ * pi's own extension loader really loads `index.ts` (the import surface and the event
+ * registration surface are both covered); faked is everything outside the extension:
+ * `ctx.ui.setHeader` synchronously builds the component and mounts it into a fake
+ * header container exactly as pi does, and `ctx` is a minimal object. So the
+ * "install header → find the container → take over the loaded-resources listing"
+ * chain can be exercised end to end.
  *
- * 这里**不**覆盖 pi 内部真实行为（渲染节流、换会话冻结窗口、诊断段），那些靠
- * `header-guard.test.ts` / `loaded-sections.test.ts` 的纯逻辑用例与本机实测。
+ * pi's real internals are **not** covered here (render throttling, the swap-freeze
+ * window, diagnostic sections) — those live in `header-guard.test.ts` /
+ * `loaded-sections.test.ts`'s pure-logic cases plus live runs.
  */
 
 import assert from "node:assert/strict";
@@ -21,20 +26,24 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARK_WIDTH } from "./logo.ts";
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 
 /**
- * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
+ * pi's library entry (not the CLI): bundle is the shape `pi` actually runs, dist is
+ * the node build shape.
  *
- * 先从 `pi` 可执行文件反查**真正的安装位置**（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 后者是**扩展包的安装根**，`pi update --extensions` 会用
- * `--config.auto-install-peers=false` 把自动装进去的 `@earendil-works/pi-*` 同伴包剪掉，
- * 于是那份副本只剩空壳（文件都在、import 报 `ERR_MODULE_NOT_FOUND`；2026-09 升
- * pi-subagents 0.68.0 时实测踩到）。
+ * First back-trace the `pi` executable to the **real install location** (pnpm/npm shim
+ * scripts carry a `# cmd-shim-target=<abs path>` line; npm on Unix uses a symlink —
+ * both are tried), then fall back to the `~/.pi/agent/npm` copy — the latter is the
+ * **extension-package install root**: `pi update --extensions` trims the auto-installed
+ * `@earendil-works/pi-*` sibling packages with
+ * `--config.auto-install-peers=false`, leaving that copy a hollow shell (files present,
+ * import fails with `ERR_MODULE_NOT_FOUND`; hit live while upgrading pi-subagents
+ * 0.68.0 in 2026-09).
  *
- * 判定方式是**能不能真 import**，不是路径存不存在 —— 只有真 import 一次才分得清空壳。
- * 全都不行就返回 undefined，调用方整体 skip（不假装通过）。
+ * The check is **whether it really imports**, not whether the path exists — only an
+ * actual import can tell a hollow shell apart. All failing → undefined; the caller
+ * skips wholesale (never fakes a pass).
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -44,17 +53,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 		if (!dir) continue;
 		const shimPath = path.join(dir, "pi");
 		try {
-			// npm 的 shim 是符号链接
+			// npm's shim is a symlink
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -67,7 +76,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -95,7 +104,7 @@ function createTestBus(): { emit(channel: string, data: unknown): void; on(chann
 	};
 }
 
-/** 形状照 pi-tui：`children` 是公开数组，`addChild` 住数组尾部推。 */
+/** Shaped after pi-tui: `children` is a public array, `addChild` pushes to its tail. */
 class FakeContainer {
 	children: unknown[] = [];
 	addChild(child: unknown): void {
@@ -112,7 +121,7 @@ class FakeSection {
 		this.name = name;
 	}
 	render(_width: number): string[] {
-		return [`\u001b[38;2;121;214;193m[${this.name}]\u001b[39m`, `  ${this.name} 的内容`, ""];
+		return [`\u001b[38;2;121;214;193m[${this.name}]\u001b[39m`, `  ${this.name}'s content`, ""];
 	}
 }
 
@@ -128,7 +137,7 @@ interface FakeTui {
 	loadedResourcesContainer: FakeContainer;
 	chatContainer: FakeContainer;
 	documentContainer: FakeContainer;
-	/** 当前挂着的 header 组件（`setHeader(undefined)` 之后是 undefined）。 */
+	/** The currently mounted header component (undefined after `setHeader(undefined)`). */
 	headerComponent: unknown;
 }
 
@@ -150,7 +159,7 @@ function createFakeTui(): FakeTui {
 	};
 }
 
-/** 主题：恒等上色（剥 ANSI 后就是纯文本，宽度口径跟真实主题一致）。 */
+/** The theme: identity coloring (ANSI-stripped it is plain text — same width rule as the real theme). */
 const fakeTheme = {
 	fg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
@@ -161,7 +170,7 @@ function createContext(tui: FakeTui): { ctx: unknown; setHeaderCalls: number } {
 	const state = { setHeaderCalls: 0 };
 	const ui = {
 		theme: fakeTheme,
-		// pi 的 setExtensionHeader 是同步建组件 + 挂进容器，这里照做（顺序对扩展可见）。
+		// pi's setExtensionHeader synchronously builds the component and mounts it — mirrored here (order visible to the extension).
 		setHeader(factory?: (tui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void }) {
 			state.setHeaderCalls += 1;
 			const children = tui.headerContainer.children;
@@ -184,7 +193,7 @@ interface LoadedExtension {
 	errors: Array<{ path: string; error: string }>;
 }
 
-/** 用 pi 自己的加载器加载本扩展（`./logo.ts` / `./loaded-sections.ts` 的 import 也一起验证）。 */
+/** Load this extension via pi's own loader (the `./logo.ts` / `./loaded-sections.ts` imports are verified along the way). */
 async function loadExtension(agentDir: string, projectDir: string): Promise<LoadedExtension> {
 	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
 		discoverAndLoadExtensions: (
@@ -195,7 +204,7 @@ async function loadExtension(agentDir: string, projectDir: string): Promise<Load
 		) => Promise<{ extensions: LoadedExtension[]; errors: Array<{ path: string; error: string }> }>;
 	};
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, createTestBus());
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
@@ -227,21 +236,21 @@ const sectionTitlesIn = (container: FakeContainer): string[] =>
 		})
 		.filter((title) => title.length > 0);
 
-test("扩展注册面：只有会话事件，不再有 `/logo` 命令", { skip, timeout: 30_000 }, async () => {
+test("the registration surface: session events only — no `/logo` command anymore", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
-		assert.equal(extension.commands.size, 0, "`/logo` 命令已按用户要求去掉");
+		assert.equal(extension.commands.size, 0, "the `/logo` command was removed per user request");
 		assert.equal(extension.commands.has("logo"), false);
 		for (const event of ["session_start", "session_tree", "session_shutdown"]) {
-			assert.ok(extension.handlers.get(event)?.length, `应该注册了 ${event}`);
+			assert.ok(extension.handlers.get(event)?.length, `should register ${event}`);
 		}
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示），清单被剪掉三段", { skip, timeout: 30_000 }, async () => {
+test("session_start: the header is the logo (every row indented one, no /logo hint), and the listing loses three sections", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
@@ -251,22 +260,22 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 		const { ctx } = createContext(tui);
 
 		await sessionStart({}, ctx);
-		assert.ok(tui.headerComponent, "session_start 应该装上 logo header");
+		assert.ok(tui.headerComponent, "session_start should install the logo header");
 
 		const lines = (tui.headerComponent as { render(w: number): string[] }).render(80);
 		const plain = lines.map(stripAnsi);
-		// 前四行是印记：每行都以留白开头，第 0/3 行（没挂侧栏）等宽
-		for (const line of plain.slice(0, 4)) assert.ok(line.startsWith(" "), `印记行不能顶格：${JSON.stringify(line)}`);
-		assert.equal(plain[0]!.length, MARK_WIDTH, "没挂侧栏的印记行就是整行宽度");
-		assert.equal(plain[3]!.length, MARK_WIDTH, "没挂侧栏的印记行就是整行宽度");
-		// 挂侧栏的第 1/2 行：侧栏贴在同一列（MARK_WIDTH + 2），所以列对齐
-		assert.ok(plain[1]?.includes("pi v"), "侧栏应该带版本号");
-		assert.equal(plain[1]!.indexOf("pi v"), MARK_WIDTH + 2, "版本号应该贴在第 MARK_WIDTH + 2 列");
-		assert.ok(plain.some((line) => line.includes("/Users/someone/proj")), "侧栏应该带 cwd");
-		assert.ok(plain.some((line) => line.includes("Pi can explain its own features")), "说明行应该保留");
-		assert.equal(plain.some((line) => line.includes("/logo")), false, "`/logo toggles this header.` 提示已删掉");
+		// the first four rows are the mark: each leads with a blank, and rows 0/3 (no side text) are full-width
+		for (const line of plain.slice(0, 4)) assert.ok(line.startsWith(" "), `a mark row must not be flush-left: ${JSON.stringify(line)}`);
+		assert.equal(plain[0]!.length, MARK_WIDTH, "a mark row without side text is the full row width");
+		assert.equal(plain[3]!.length, MARK_WIDTH, "a mark row without side text is the full row width");
+		// rows 1/2 carry the side text: it lands on the same column (MARK_WIDTH + 2), so the columns align
+		assert.ok(plain[1]?.includes("pi v"), "the side text should carry the version");
+		assert.equal(plain[1]!.indexOf("pi v"), MARK_WIDTH + 2, "the version should land on column MARK_WIDTH + 2");
+		assert.ok(plain.some((line) => line.includes("/Users/someone/proj")), "the side text should carry the cwd");
+		assert.ok(plain.some((line) => line.includes("Pi can explain its own features")), "the tagline should be kept");
+		assert.equal(plain.some((line) => line.includes("/logo")), false, "the `/logo toggles this header.` hint is gone");
 
-		// 已加载资源清单：按 pi 的顺序填，被剪的三段连同各自的空行都不该进去
+		// the loaded-resources listing: filled in pi's order — the three pruned sections and their blank rows must never enter
 		const { loadedResourcesContainer: loaded } = tui;
 		loaded.addChild(new FakeSpacer());
 		for (const name of ["Context", "Skills", "Prompts", "Extensions", "Themes"]) {
@@ -279,7 +288,7 @@ test("session_start：header 是 logo（每行缩进一格、没有 /logo 提示
 	}
 });
 
-test("session_tree 重装 header：接管幂等，清单里依旧只有 Skills / Extensions", { skip, timeout: 30_000 }, async () => {
+test("session_tree reinstalls the header: the takeover is idempotent and the listing still only has Skills / Extensions", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace.agentDir, workspace.projectDir);
@@ -291,9 +300,9 @@ test("session_tree 重装 header：接管幂等，清单里依旧只有 Skills /
 
 		await sessionStart({}, ctx);
 		await sessionTree({}, ctx);
-		assert.equal(tui.headerContainer.children.filter((child) => child === tui.headerComponent).length, 1, "只应挂一个 header");
+		assert.equal(tui.headerContainer.children.filter((child) => child === tui.headerComponent).length, 1, "exactly one header should be mounted");
 
-		// /reload 形态：清空后重新填一份
+		// the /reload shape: clear, then fill a fresh listing
 		tui.loadedResourcesContainer.children = [];
 		tui.loadedResourcesContainer.addChild(new FakeSection("Themes"));
 		tui.loadedResourcesContainer.addChild(new FakeSpacer());

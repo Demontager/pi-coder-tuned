@@ -9,12 +9,13 @@ import {
 } from "./header-guard.ts";
 
 /**
- * 仿 pi-tui 的 `Container`：`clear()` 会**换掉**整个 children 数组
- * （`this.children = []`），所以守卫必须每次重读该字段而不是缓存它。
+ * A fake pi-tui `Container`: `clear()` **replaces** the whole children array
+ * (`this.children = []`), so the guard must re-read the field every time rather than
+ * cache it.
  */
 class FakeContainer implements RenderableContainer {
 	children: unknown[] = [];
-	/** 原 render 被调用的次数（断言「内置 header 一帧都没出」用）。 */
+	/** How many times the original render ran (for asserting "the built-in header drew zero frames"). */
 	originalRenders = 0;
 
 	addChild(component: unknown): void {
@@ -31,7 +32,7 @@ class FakeContainer implements RenderableContainer {
 	}
 }
 
-/** 仿叶子组件：行里带上自己的名字和宽度，方便看出行是谁、按哪个宽度渲染的。 */
+/** A fake leaf component: its rows carry its name and the width, so it is clear who rendered and at what width. */
 interface Leaf {
 	render(width: number): string[];
 }
@@ -40,12 +41,12 @@ function leaf(name: string, lines = 1): Leaf {
 	return { render: (width: number) => Array.from({ length: lines }, () => `${name}#${width}`) };
 }
 
-/** 仿 `tui`：只有 children，没有 render（findRenderContainer 只认 children）。 */
+/** A fake `tui`: only children, no render (findRenderContainer only looks at children). */
 function tuiRoot(...children: unknown[]): { children: unknown[] } {
 	return { children };
 }
 
-test("findRenderContainer 按对象身份认出直接持有它的容器", () => {
+test("findRenderContainer identifies the container directly holding it by object identity", () => {
 	const ours = leaf("startup-logo");
 	const inner = new FakeContainer();
 	inner.addChild(ours);
@@ -56,7 +57,7 @@ test("findRenderContainer 按对象身份认出直接持有它的容器", () => 
 	assert.equal(findRenderContainer(root, ours), inner);
 });
 
-test("findRenderContainer 找不到就返回 undefined，不猜位置", () => {
+test("findRenderContainer returns undefined when not found — never guesses", () => {
 	const inner = new FakeContainer();
 	inner.addChild(leaf("other"));
 	const root = tuiRoot(inner);
@@ -67,7 +68,7 @@ test("findRenderContainer 找不到就返回 undefined，不猜位置", () => {
 	assert.equal(findRenderContainer({ notAContainer: true }, leaf("x")), undefined);
 });
 
-test("findRenderContainer 容忍环状引用与只读 children", () => {
+test("findRenderContainer tolerates cyclic references and read-only children", () => {
 	const a = new FakeContainer();
 	const b = new FakeContainer();
 	a.addChild(b);
@@ -79,7 +80,7 @@ test("findRenderContainer 容忍环状引用与只读 children", () => {
 	assert.equal(findRenderContainer(frozenRoot, leaf("y")), undefined);
 });
 
-test("我们的组件在位时原样透传，被换成内置 header 时出重放行", () => {
+test("passes through while our component is mounted; replays the frozen rows once swapped to the built-in header", () => {
 	const ours = leaf("startup-logo");
 	const builtIn = leaf("pi-default-header");
 	const container = new FakeContainer();
@@ -92,20 +93,20 @@ test("我们的组件在位时原样透传，被换成内置 header 时出重放
 	});
 	assert.equal(typeof release, "function");
 
-	// 正常会话：真实渲染照旧。
+	// a normal session: real rendering passes through.
 	assert.deepEqual(container.render(80), ["startup-logo#80"]);
 	assert.equal(container.originalRenders, 1);
 
-	// 换会话窗口：pi 已经 clear() 并挂上内置 header。
+	// the session-swap window: pi has already clear()ed and mounted the built-in header.
 	container.clear();
 	container.addChild(builtIn);
 	assert.deepEqual(container.render(80), ["frozen#80"]);
 	assert.deepEqual(container.render(40), ["frozen#40"]);
-	// 内置 header 一次都没被渲染 → 屏幕上不会出现它。
+	// the built-in header rendered zero times → it never reaches the screen.
 	assert.equal(container.originalRenders, 1);
 });
 
-test("重放行按当前宽度重新截断", () => {
+test("the replayed rows re-truncate at the current width", () => {
 	const ours = leaf("startup-logo");
 	const container = new FakeContainer();
 	container.addChild(ours);
@@ -121,7 +122,7 @@ test("重放行按当前宽度重新截断", () => {
 	assert.deepEqual(container.render(10), [wide.slice(0, 10)]);
 });
 
-test("解除接管后恢复原渲染，且不留 own render 属性与接管记录", () => {
+test("releasing restores the original render — no own render property or takeover record left", () => {
 	const ours = leaf("startup-logo");
 	const builtIn = leaf("pi-default-header");
 	const container = new FakeContainer();
@@ -141,23 +142,23 @@ test("解除接管后恢复原渲染，且不留 own render 属性与接管记�
 	assert.equal((container as { [HEADER_GUARD_KEY]?: unknown })[HEADER_GUARD_KEY], undefined);
 	assert.deepEqual(container.render(10), ["pi-default-header#10"]);
 
-	// 幂等：重复解除不再改动任何东西。
+	// idempotent: a repeat release changes nothing.
 	release();
 	assert.equal(Object.prototype.hasOwnProperty.call(container, "render"), false);
 });
 
-test("releaseHeaderGuard 只在确有接管时报告成功", () => {
+test("releaseHeaderGuard reports success only when a takeover actually existed", () => {
 	const container = new FakeContainer();
 	assert.equal(releaseHeaderGuard(container), false);
 	assert.equal(releaseHeaderGuard(undefined), false);
 	const release = freezeHeaderContainer({ container, ownComponent: {}, frozenRender: () => ["frozen"] });
 	assert.equal(releaseHeaderGuard(container), true);
-	// 已被解除 → 再解除报 false。
+	// already released → a second release reports false.
 	release?.();
 	assert.equal(releaseHeaderGuard(container), false);
 });
 
-test("对同一容器重复接管会先交还上一次，不叠两层", () => {
+test("a repeat takeover of one container first releases the previous — no stacked wrappers", () => {
 	const first = leaf("first");
 	const second = leaf("second");
 	const container = new FakeContainer();
@@ -167,18 +168,18 @@ test("对同一容器重复接管会先交还上一次，不叠两层", () => {
 	freezeHeaderContainer({ container, ownComponent: first, frozenRender: () => ["frozen-first"] });
 	freezeHeaderContainer({ container, ownComponent: second, frozenRender: () => ["frozen-second"] });
 
-	// first 在位、second 不在位：若两层的 wrapper 还叠着，这里会出 frozen-first；
-	// 只保留最后一次接管 → 判定 second 不在位 → 出 frozen-second。
+	// first mounted, second not: if two wrapper layers were still stacked this would emit frozen-first;
+	// only the last takeover remains → second judged absent → frozen-second comes out.
 	container.clear();
 	container.addChild(first);
 	assert.deepEqual(container.render(7), ["frozen-second"]);
 
-	// second 回到位 → 透传。
+	// second back in place → pass through.
 	container.addChild(second);
 	assert.deepEqual(container.render(7), ["first#7", "second#7"]);
 });
 
-test("超时后自愈：组件在位与否都交还原渲染", () => {
+test("self-heals past the timeout: releases the original render whether mounted or not", () => {
 	const ours = leaf("startup-logo");
 	const builtIn = leaf("pi-default-header");
 	const container = new FakeContainer();
@@ -192,12 +193,12 @@ test("超时后自愈：组件在位与否都交还原渲染", () => {
 		now: () => clock,
 	})!;
 
-	// 组件仍在新位置（正常交接后的样子）+ 已超时 → 透传并交还。
+	// the component is still in its new spot (a completed handover's look) + past the timeout → pass through and release.
 	clock = 1600;
 	assert.deepEqual(container.render(9), ["startup-logo#9"]);
 	assert.equal(Object.prototype.hasOwnProperty.call(container, "render"), false);
 
-	// 另一侧：新 header 一直没来（换会话失败）→ 超时后回到 pi 默认行为。
+	// the other side: the new header never arrived (a failed swap) → after the timeout, back to pi's default behavior.
 	const ours2 = leaf("startup-logo2");
 	const container2 = new FakeContainer();
 	container2.addChild(ours2);
@@ -216,7 +217,7 @@ test("超时后自愈：组件在位与否都交还原渲染", () => {
 	release();
 });
 
-test("未超时期间无论多少帧都只出重放行", () => {
+test("before the timeout, every frame emits only the replayed rows", () => {
 	const ours = leaf("startup-logo");
 	const container = new FakeContainer();
 	container.addChild(ours);
@@ -233,7 +234,7 @@ test("未超时期间无论多少帧都只出重放行", () => {
 	}
 });
 
-test("容器形状不对时什么都不做（非 tui 模式 / pi 改了结构）", () => {
+test("a wrong container shape → nothing happens (non-tui mode / pi changed internals)", () => {
 	const noop = () => ["frozen"];
 	assert.equal(freezeHeaderContainer({ container: undefined, ownComponent: {}, frozenRender: noop }), undefined);
 	assert.equal(freezeHeaderContainer({ container: {}, ownComponent: {}, frozenRender: noop }), undefined);
@@ -249,14 +250,14 @@ test("容器形状不对时什么都不做（非 tui 模式 / pi 改了结构）
 		}),
 		undefined,
 	);
-	// ownComponent 为 undefined（header 还没装上）也不接管。
+	// ownComponent undefined (the header not installed yet) → no takeover either.
 	assert.equal(
 		freezeHeaderContainer({ container: new FakeContainer(), ownComponent: undefined, frozenRender: noop }),
 		undefined,
 	);
 });
 
-test("frozenRender 抛错时回落到原渲染，不把异常漏给宿主", () => {
+test("a throwing frozenRender falls back to the original render — the exception never reaches the host", () => {
 	const ours = leaf("startup-logo");
 	const container = new FakeContainer();
 	container.addChild(ours);

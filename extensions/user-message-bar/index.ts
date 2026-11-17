@@ -1,26 +1,37 @@
 /**
- * user-message-bar — 用户消息框行首竖线（接线）
+ * user-message-bar — a vertical bar at the start of every user-message row (wiring)
  *
- * 本文件只做接线：补丁装在 pi 的 `UserMessageComponent.prototype.render` 上，取色源来自
- * `ctx.ui.theme`；全部逻辑在 `bar.ts`（不 import pi，`node --test` 能直跑）。
+ * This file only wires things up: the patch goes on pi's
+ * `UserMessageComponent.prototype.render`, and the color source comes from
+ * `ctx.ui.theme`; all the logic lives in `bar.ts` (no pi imports — `node --test`
+ * runs it directly).
  *
- * 补丁在**模块求值时就装**（此时取色源还是空，`bar.ts` 会安静地不加竖线），这样它一定赶在
- * 第一次渲染之前到位，不依赖事件顺序。`session_start` 一到就把取色源补成 `ctx.ui.theme` ——
- * 那是个跨 `/theme` 换肤的活 Proxy，换肤下一帧即跟随。
+ * The patch is installed **at module-eval time** (the color source is still empty
+ * then — `bar.ts` quietly draws no bar), so it is guaranteed to be in place before
+ * the first render regardless of event order. At `session_start` the color source
+ * is set to `ctx.ui.theme` — a live Proxy that survives `/theme` switches, so the
+ * next frame follows.
  *
- * 取色源还必须在**会话被替换的那一瞬间**摘掉，否则会打死整个 pi（2026-09-20 修，`/clear` 实测
- * 崩过）。pi 的 `teardownCurrent()` 顺序是：emit `session_shutdown` → `resetExtensionUI()` →
- * `session.dispose()`（里面 `extensionRunner.invalidate()`）—— 从第三步入起，旧 ctx 的**任何**
- * 属性读取都抛；而旧消息这时还挂在 `chatContainer` 上，pi 要等**下一次** `rebindCurrentSession()`
- * 里的 `renderCurrentSessionState()` 才清，新 ctx 更要等 `session_start` 才到手。这几步之间夹着
- * 多个 await，pi-tui 那个 16ms 节流的渲染 tick 足以落进去 —— 渲染 tick 里抛出的异常没人接得住，
- * 直达 pi 的 `uncaughtException` 让进程 `exit(1)`（`/clear`、`/new`、`/resume`、`/fork`、
- * `/reload` 全走这条路；恢复会话时窗口更长，`renderInitialMessages()` 还在 bind 之前）。
- * 所以：`session_shutdown` 一到就把取色源复位成空（该事件一定先于 `invalidate()`），读皮肤再
- * 兜一层 try/catch —— 最坏只是那几帧不画竖线，下一个 `session_start` 自动恢复。
+ * The color source must also be **dropped at the moment the session is replaced**
+ * — or it takes the whole pi down (fixed 2026-09-20; `/clear` crashed it live). pi's
+ * `teardownCurrent()` order is: emit `session_shutdown` → `resetExtensionUI()` →
+ * `session.dispose()` (which runs `extensionRunner.invalidate()`) — from step
+ * three on, **any** property read on the old ctx throws; the old messages are still
+ * mounted on `chatContainer` (pi only clears them in the **next**
+ * `rebindCurrentSession()`'s `renderCurrentSessionState()`), and the new ctx only
+ * arrives at `session_start`. Multiple awaits sit between these steps, and pi-tui's
+ * 16ms render throttle can easily land a tick inside them — an exception thrown in
+ * a render tick is uncatchable and reaches pi's `uncaughtException`, exiting the
+ * process (`/clear`, `/new`, `/resume`, `/fork`, `/reload` all take this path; a
+ * resumed session's window is even longer — `renderInitialMessages()` runs before
+ * bind).
+ * So: at `session_shutdown` the color source resets to empty (that event always
+ * precedes `invalidate()`), and reading the skin gets one more try/catch layer —
+ * worst case a few frames draw no bar, and the next `session_start` restores it.
  *
- * `PI_USER_MESSAGE_BAR=off` 关闭；`PI_USER_MESSAGE_BAR_COLOR=<皮肤槽位名>` 换颜色
- * （默认 `accent`，即皮肤的强调色；想要更暗可以试 `selectedBg`）。
+ * `PI_USER_MESSAGE_BAR=off` disables it; `PI_USER_MESSAGE_BAR_COLOR=<skin slot
+ * name>` picks the color (default `accent` — the skin's accent color; try
+ * `selectedBg` for something darker).
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -43,9 +54,12 @@ export default function (pi: ExtensionAPI) {
 }
 
 /**
- * 读当前皮肤，**永不抛**：会话被替换 / reload 后 pi 会作废旧 ctx，读 `ctx.ui` 抛
- * `This extension ctx is stale …`，而渲染 tick 里的异常没人接得住，会打死整个 pi（见文件头）。
- * 读不到就当这一帧没有皮肤（不画竖线），下一个 `session_start` 补上。
+ * Read the current skin — **never throws**: after a session swap / reload pi
+ * invalidates the old ctx, and reading `ctx.ui` throws `This extension ctx is
+ * stale …`, and an exception inside a render tick is uncatchable — it takes the
+ * whole pi down (see the file header).
+ * An unreadable skin counts as "no skin this frame" (no bar drawn); the next
+ * `session_start` fills it in.
  */
 function liveTheme(ctx: ExtensionContext): ThemeColorSource | undefined {
 	try {

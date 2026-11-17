@@ -1,50 +1,61 @@
 /**
- * /init：仿 Claude Code —— 让模型分析当前仓库，生成或更新「记忆文件」。
+ * /init: Claude Code-style — let the model analyze the current repo and create or
+ * update its "memory file".
  *
- * 目标文件的选取（没显式指定时，只看 `ctx.cwd` 这一层）：
- *   ① 有 `CLAUDE.md` → 更新 `CLAUDE.md`
- *   ② 否则有 `AGENTS.md` → 更新 `AGENTS.md`
- *   ③ 两个都没有 → 新建 `AGENTS.md`
- * 显式指定：`/init <文件.md>`（第一个词以 `.md` 结尾就当路径，其余的当附加要求），
- * 例如 `/init docs/NOTES.md`、`/init /tmp/foo.md`、`/init 重点写构建和测试`。
+ * How the target file is picked (when not given explicitly — only the `ctx.cwd`
+ * level is considered):
+ *   ① `CLAUDE.md` exists → update `CLAUDE.md`
+ *   ② else `AGENTS.md` exists → update `AGENTS.md`
+ *   ③ neither → create `AGENTS.md`
+ * Explicit: `/init <file.md>` (the first word ending in `.md` is the path, the
+ * rest is extra requirements), e.g. `/init docs/NOTES.md`, `/init /tmp/foo.md`,
+ * `/init focus on build and test`.
  *
- * 为什么 CLAUDE.md 优先：这个仓库（以及作者的大部分项目）把 `CLAUDE.md` 当正文、
- * `AGENTS.md` 只是指向它的符号链接 —— 写 `CLAUDE.md` 才不会在复制/打包时丢内容。
- * pi 自己两个名字都认（`docs/usage.md` 的 Context Files：从 cwd 逐层向上加载
- * `AGENTS.md` 或 `CLAUDE.md`，同目录有 `AGENTS.override.md` 时以它为准），所以这个顺序
- * 只决定「往哪个文件写」，不影响它会不会被加载。
+ * Why CLAUDE.md wins: this repo (and most of the author's projects) treats
+ * `CLAUDE.md` as the body and `AGENTS.md` as a symlink to it — writing
+ * `CLAUDE.md` loses nothing on copy/package.
+ * pi recognizes both names (`docs/usage.md`'s Context Files: `AGENTS.md` or
+ * `CLAUDE.md` load level by level up from cwd, `AGENTS.override.md` winning in
+ * the same directory), so this order only decides "which file gets written",
+ * never whether it loads.
  *
- * 扩展自己**不写文件**：只做目标判定 + 把一段提示词当**用户消息**发给模型
- *（`pi.sendUserMessage`），由模型的 read / write / edit 去落盘。这正是 Claude Code
- * `/init` 的形态（一条命令 + 一段提示词），好处是用户能在会话里看到模型的产出过程、
- * 也能中途纠正；扩展不碰文件，就没有「扩展在后台偷偷改仓库」这类意外。
+ * The extension itself **never writes files**: it only picks the target and
+ * sends a prompt **as a user message** (`pi.sendUserMessage`) — the model's
+ * read / write / edit do the on-disk work. That is exactly Claude Code's `/init`
+ * shape (a command + a prompt): the user watches the model's process in the
+ * session and can correct it midway; with the extension not touching files,
+ * there is no "the extension secretly changed the repo" surprise.
  *
- * 三个刻意的决定：
- *   ① **先 `await ctx.waitForIdle()`** 再判定：agent 正在跑的时候发用户消息要么抛错
- *      （未指定 `deliverAs`），要么被排成 followUp；而目标文件的判定会因此变旧 ——
- *      当前回合可能刚创建/删掉 `CLAUDE.md`，那样就会把内容写进错的记忆文件。
- *      等这轮结束再判定 + 发送，语义最稳（同 `/clear` 先 `waitForIdle` 的理由）。
- *   ② **只认 cwd 这一层，不向上找父目录**：pi 是逐层加载的，用户在子目录里 `/init`
- *      想写的就是这个子目录自己的记忆文件；要写别处直接传路径。向上找会让人在子目录里
- *      一不留神改到仓库根的记忆文件。
- *   ③ **不注册参数补全**：`/init` 的候选只有两个固定名字，补全的收益抵不上一个额外的
- *      pi-tui 依赖面；要指定路径就手敲，反正有 `read`/`write` 的相对路径习惯。
+ * Three deliberate decisions:
+ *   ① **`await ctx.waitForIdle()` first**: sending a user message while the
+ *      agent runs either throws (no `deliverAs` given) or queues as a
+ *      followUp — and the target check would go stale meanwhile: this turn may
+ *      just have created/deleted `CLAUDE.md`, which would write the content
+ *      into the wrong memory file. Judging + sending after the turn ends is
+ *      the safest semantics (same reason `/clear` waits for idle first).
+ *   ② **Only the cwd level — never search parents**: pi loads level by level;
+ *      a user running `/init` inside a subdirectory means that subdirectory's
+ *      own memory file — pass a path for anywhere else. Searching upward makes
+ *      it far too easy to accidentally rewrite the repo root's memory file.
+ *   ③ **No argument completion**: `/init` has only two fixed candidates — the
+ *      value does not justify an extra pi-tui dependency surface; a custom
+ *      path can be typed, with the usual `read`/`write` relative-path habits.
  *
- * `ctx.hasUI` 为 false（print / json 模式）时不 notify —— 那里没有 UI，提示无处可去；
- * 命令本身照常把提示词发出去。
+ * `ctx.hasUI` false (print / json modes) → no notify — there is no UI for the
+ * notice to go to; the command still sends the prompt.
  */
 
 import { statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** 自动判定时的候选顺序：有 `CLAUDE.md` 就写它，否则 `AGENTS.md`。 */
+/** The auto-detection order: `CLAUDE.md` if present, else `AGENTS.md`. */
 const CANDIDATES = ["CLAUDE.md", "AGENTS.md"];
 
-/** 两个候选都没有时新建哪个。 */
+/** Which file to create when neither candidate exists. */
 const NEW_FILE = "AGENTS.md";
 
-/** `statSync` 跟随符号链接 —— 本仓库就是 `AGENTS.md -> CLAUDE.md`，两个名字都该算“存在”。 */
+/** `statSync` follows symlinks — this very repo has `AGENTS.md -> CLAUDE.md`, so both names should count as "exists". */
 function isFile(path: string): boolean {
 	try {
 		return statSync(path).isFile();
@@ -54,18 +65,19 @@ function isFile(path: string): boolean {
 }
 
 interface InitTarget {
-	/** 交给模型落盘的**绝对路径**。 */
+	/** The **absolute path** handed to the model for writing. */
 	path: string;
-	/** 提示词里展示用的路径（在项目内用相对路径，否则回落绝对路径）。 */
+	/** The path shown inside the prompt (relative inside the project, absolute as fallback). */
 	display: string;
 	exists: boolean;
-	/** 用户显式指定的路径（提示词里换一种说法，并提醒别动兄弟文件）。 */
+	/** A path the user gave explicitly (the prompt says it differently and warns against touching the sibling file). */
 	explicit: boolean;
 }
 
 /**
- * 解析 `/init` 的参数：第一个词以 `.md` 结尾就算目标文件，其余文字当附加要求；
- * 没有这样的词就整串当附加要求（`/init 重点写构建和测试`）。
+ * Parse `/init`'s args: the first word ending in `.md` is the target file; the
+ * rest is extra requirements. No such word → the whole string is requirements
+ * (`/init focus on build and test`).
  */
 function parseArgs(args: string): { file?: string; extra: string } {
 	const trimmed = args.trim();
@@ -75,7 +87,7 @@ function parseArgs(args: string): { file?: string; extra: string } {
 	return { file: match[1], extra: (match[2] ?? "").trim() };
 }
 
-/** 项目内显示相对路径（`../x` 这种跳出去的回落绝对路径，免得看不出真写到哪了）。 */
+/** Relative inside the project (a `../x` escaping it falls back to absolute — no hiding where it writes). */
 function displayPath(cwd: string, path: string): string {
 	const rel = relative(cwd, path);
 	return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path;
@@ -94,18 +106,22 @@ function resolveTarget(cwd: string, file: string | undefined): InitTarget {
 }
 
 /**
- * 提示词。要点：
- *   - 把「文件会被之后的每次会话自动加载」说清楚，模型才知道该写什么（写给下一个 agent）。
- *   - 明确**只写验证过的事实**（这个仓库的一贯要求：不臆造命令、不猜路径）。
- *   - 已存在时强调「先 read、保留正确内容、别为重写而重写」，否则模型很容易整篇重写，
- *     把仓库里那些踩坑记录一把抹掉。
- *   - 列出「不要写」的清单（通用建议 / 目录树 / README 复述 / 临时信息）—— 这是
- *     Claude Code 的 /init 提示词里最起作用的那几条，照搬。
+ * The prompt. The points:
+ *   - Make clear "the file is auto-loaded by every later session" — the model
+ *     must know it is writing for the next agent.
+ *   - Stress **only verified facts** (this repo's standing rule: no invented
+ *     commands, no guessed paths).
+ *   - When it exists, stress "read first, keep accurate content, do not rewrite
+ *     for the sake of rewriting" — models happily rewrite the whole file,
+ *     wiping the repo's hard-earned pitfalls list.
+ *   - The "do not include" list (generic advice / directory trees / README
+ *     repetition / temporary info) — the most effective lines in Claude Code's
+ *     /init prompt, taken verbatim.
  */
 function buildPrompt(target: InitTarget, cwd: string, extra: string): string {
 	const action = target.exists ? "Update" : "Create";
 	const lines = [
-		`Analyze this codebase, then ${action} the memory file \`${target.display}\` (absolute path: \`${target.path}\`）。`,
+		`Analyze this codebase, then ${action} the memory file \`${target.display}\` (absolute path: \`${target.path}\`).`,
 		"",
 		"Pi automatically loads this file in **every subsequent session**, reading AGENTS.md / CLAUDE.md up from the working directory, with AGENTS.override.md taking precedence in the same directory. Write for the next agent working in this repository.",
 		`Project root: \`${cwd}\``,
@@ -148,14 +164,14 @@ export default function (pi: ExtensionAPI) {
 		description: "Analyze the repository and create/update its memory file (CLAUDE.md if present, otherwise AGENTS.md)",
 		handler: async (args, ctx) => {
 			const { file, extra } = parseArgs(args);
-			// 判定必须发生在「发消息」那一刻：agent 正在跑时先等它结束（见文件头 ①）。
+			// the target must be judged at send time: wait out a running agent first (see the file header ①).
 			if (!ctx.isIdle()) {
 				if (ctx.hasUI) ctx.ui.notify("Waiting for the current turn to finish before starting /init…", "info");
 				await ctx.waitForIdle();
 			}
 			const target = resolveTarget(ctx.cwd, file);
 			if (ctx.hasUI) {
-				ctx.ui.notify(`${target.exists ? "Update" : "Create"} ${target.display}（${target.path}）…`, "info");
+				ctx.ui.notify(`${target.exists ? "Update" : "Create"} ${target.display} (${target.path})…`, "info");
 			}
 			pi.sendUserMessage(buildPrompt(target, ctx.cwd, extra));
 		},

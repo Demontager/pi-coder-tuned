@@ -1,69 +1,80 @@
 /**
- * destructive-guard / writes.ts — 检查一段**可执行文本**里的危险删除调用。
+ * destructive-guard / writes.ts — check a stretch of **executable text** for dangerous
+ * deletion calls.
  *
- * 为什么要单独一层：2026-09-23 的事故里，bash 钩子看不见危险 —— 危险的是**更早写进去的
- * 那行代码**，而“运行脚本”那一步看起来只是 `node verify-a.mjs`，完全无害。Claude Code
- * 的分类器有对应规则（`WRITTEN FILE EXECUTION`）：
+ * Why a separate layer: in the 2026-09-23 incident the bash hook could not see the danger —
+ * the dangerous thing was **a line of code written earlier**, and the "run the script" step
+ * looked like just `node verify-a.mjs`, completely harmless. Claude Code's classifier has the
+ * matching rule (`WRITTEN FILE EXECUTION`):
  *
  *   "A file write or edit is itself an action to evaluate. Judge the written or edited
  *    content against the BLOCK rules now, at write time ... do not defer to a later
  *    execution."
  *
- * 本模块只做一件事：从文本里认出“删除目标由兜底值或路径运算得出”这种**事故形态**，
- * 它刻意不做完整数据流分析 —— 目标是少误报、抓得住真形态。
+ * This module does exactly one thing: recognize **the incident's shape** — "a deletion target
+ * derived from a fallback value or path arithmetic" — in text. It deliberately does no full
+ * data-flow analysis: the goal is few false positives while catching the real shape.
  *
- * ## 2026-09-23 之后的收紧（误报治理）
+ * ## The tightening after 2026-09-23 (false-positive governance)
  *
- * 第一版用的是**子串**匹配：`text.includes("rm")` + 同一行出现 `||` 就报警。回归到本机
- * 全部会话后，58 处命中里只有极少数是真代码 —— 谈论删除的文档、断言守卫行为的测试、
- * 守卫自己的错误文案全部在内（`const form = a || b` 也会命中）。判定于是改成三条：
+ * The first version used **substring** matching: `text.includes("rm")` plus a `||` on the
+ * same line meant alarm. Replayed over all local sessions, only a handful of 58 hits were
+ * real code — documents talking about deletion, tests asserting the guard's behavior, and
+ * the guard's own error strings all matched (`const form = a || b` included). The judgment
+ * was changed to three rules:
  *
- *   1. **必须是真调用**：`api(` 且标识符左侧是边界（`confirm(` / `transform(` 不算），
- *      shell 侧必须是 `rm -rf` 这类带开关的命令词（散文里的 “rm 那一段” 不算）。
- *   2. **危险目标必须落在参数区间内**：`??` / `||` / `dirname()` / 变量 / 裸根 / `..`
- *      必须出现在那个调用的括号里（跨行也算），而不是同一行里各说各的。
- *   3. **分级**：目标文件不可执行（`.md` / `.html` / `.json` …）或命中落在字符串字面量里
- *      且同行没有执行汇（eval / execSync / sh -c …）时降为 `info` —— 记录但不弹窗。
+ *   1. **Must be a real call**: `api(` with a non-identifier character on the left
+ *      (`confirm(` / `transform(` do not count); on the shell side it must be a switched
+ *      command word like `rm -rf` (a mention of "the rm part" in prose does not count).
+ *   2. **The dangerous target must land inside the call's argument region**: `??` / `||` /
+ *      `dirname()` / variables / a bare root / `..` must appear inside that call's parens
+ *      (across lines too) — not merely on the same line.
+ *   3. **Grading**: hits inside a non-executable target file (`.md` / `.html` / `.json` …),
+ *      or inside a string literal with no execution sink on the same line (eval / execSync /
+ *      sh -c …), degrade to `info` — recorded, no dialog.
  *
- * 第三闸（`index.ts` 里的运行时检查）也复用这里的检查器：即将被 `node <script>` 跑的
- * 脚本文件，内容和“刚写进去的内容”面对的是同一套判据。
+ * Gate three (the runtime check in `index.ts`) reuses this checker too: a script file about
+ * to be run by `node <script>` faces the same criteria as "content just written".
  *
- * 纯函数，不 import pi，可直接 `node --test`。
+ * Pure functions, no pi imports, directly `node --test`-able.
  */
 
-/** 一条命中。 */
+/** One finding. */
 export interface WriteFinding {
-	/** 命中的行号（从 1 起）。 */
+	/** The hit's line number (1-based). */
 	line: number;
-	/** 命中的那行原文（截断到 160 字符）。 */
+	/** The hit line's verbatim text (clipped to 160 chars). */
 	text: string;
-	/** 规则名。 */
+	/** The rule name. */
 	rule: string;
-	/** 一句人话。 */
+	/** A one-line plain reason. */
 	reason: string;
 	/**
-	 * `confirm` 需要用户确认；`block` 直接拒；`info` 只记录（不可执行的目标文件、或字符串字面量里的引用）。
-	 * 调用方按“最严的一条”决定怎么做。
-	 */
+ * `confirm` needs user approval; `block` refuses outright; `info` is only recorded
+ * (non-executable target files, or quotations inside string literals).
+ * The caller acts on the strictest finding.
+ */
 	severity: WriteSeverity;
 }
 
-/** 命中的轻重。 */
+/** How severe a finding is. */
 export type WriteSeverity = "block" | "confirm" | "info";
 
-/** 检查选项。 */
+/** Inspection options. */
 export interface WriteInspectOptions {
-	/** 这段文本要写到哪里 / 是哪个脚本文件（用于判断目标能否执行）。 */
+	/** Where this text is being written / which script file it is (judges whether the target can execute). */
 	targetPath?: string;
 	/**
-	 * 字面量目标的判定器（由调用方注入，典型是 `targets.ts` 的 `evaluateTarget`）。
-	 * 注入而不是 import：本模块要保持可直接 `node --test`、不依赖 cwd/home。
-	 * 返回 `undefined` 表示这个字面量目标放行。
-	 */
+ * The literal-target judge (injected by the caller — typically `targets.ts`'s
+ * `evaluateTarget`).
+ * Injected rather than imported: this module must stay directly `node --test`-able without
+ * cwd/home.
+ * Returning `undefined` means that literal target passes.
+ */
 	evaluateLiteral?: (literal: string) => { rule: string; reason: string; verdict: "block" | "confirm" } | undefined;
 }
 
-/** 删除类 API 的名字（按长度降序，避免 `rmSync` 被 `rm` 抢走）。 */
+/** The deletion-API names (longest first, so `rmSync` is not claimed by `rm`). */
 const DELETE_APIS = [
 	"os.removedirs",
 	"shutil.rmtree",
@@ -75,36 +86,36 @@ const DELETE_APIS = [
 	"unlink",
 ];
 
-/** 路径运算函数：把它们用在删除目标上就是“推导出来的目标”。 */
+/** Path-arithmetic functions: using them on a deletion target makes it a "derived target". */
 const PATH_OPS = /\b(dirname|basename|resolve|normalize|join|relative)\s*\(/;
 
-/** 目标里的兜底值（事故的直接成因）。 */
+/** A fallback value in the target (the incident's direct cause). */
 const FALLBACK = /\?\?|\|\|/;
 
-/** 变量 / 命令替换 / 模板串。 */
+/** Variables / command substitution / template literals. */
 const EXPANSION = /\$\{|\$[A-Za-z_]|`/;
 
-/** 上跳段：`..` 单独成段（`...rest` 与 `?.` 都不算）。 */
+/** A parent-directory segment: a standalone `..` (`...rest` and `?.` do not count). */
 const PARENT_SEGMENT = /(^|[^\w.])\.\.([^\w.]|$)/;
 
-/** 裸根目标：`("/")` / `('/')` / `(\`/\`)`。 */
+/** A bare-root target: `("/")` / `('/')` / `(\`/\`)`. */
 const BARE_ROOT = /[(,]\s*["'`]\/["'`]\s*[,)]/;
 
-/** shell 侧的删除命令词：必须带开关（散文里的 “rm 那一段” 不算）。
- * 前缀允许引号/反引号 —— `execSync("rm -rf $D")` 与模板串里的命令都是真命令；
- * 纯引文靠下面的“字面量降级”处理，不在这里分。 */
+/** Shell-side deletion command words: must carry a switch (a prose mention of "the rm part" does not count).
+ * The prefix allows quotes/backticks — `execSync("rm -rf $D")` and commands inside templates are real commands;
+ * pure quotations are downgraded by the "literal" path below, not decided here. */
 const SHELL_DELETE = /(?:^|[;&|(]|\s|["'`])(?:sudo\s+)?(rm|unlink|shred)\s+(-[^\s]+)([^;&|]*)/;
 
-/** PowerShell 的递归删除。 */
+/** PowerShell's recursive delete. */
 const POWERSHELL_DELETE = /Remove-Item\b[^\n]*-(?:Recurse|Force)\b/i;
 
-/** 同行出现这些就是“这段文本会被执行”，字符串里也不再当成纯数据。 */
+/** These on the same line mean "this text will be executed" — even inside a string it is not pure data. */
 const EXEC_SINK = /\b(exec|execSync|spawn|spawnSync|execFile|fork|eval|Function|os\.system|popen|subprocess|child_process|system)\b|\b(sh|bash|zsh)\s+-c\b/;
 
 /**
- * 不执行代码的目标文件扩展名：写进这些文件的内容不会跑起来。
- * 只列**确实不执行**的；`.json` / `.svg` / `.xml` 都是数据，`.html` 里的脚本不会
- * 因为写入而运行。
+ * Target-file extensions whose content never executes: what is written there cannot run.
+ * Only genuinely non-executing ones are listed; `.json` / `.svg` / `.xml` are data, and a
+ * script inside `.html` does not run because it was written.
  */
 const NON_EXECUTABLE_EXTENSIONS = new Set([
 	".md",
@@ -126,7 +137,7 @@ const NON_EXECUTABLE_EXTENSIONS = new Set([
 	".patch.txt",
 ]);
 
-/** 目标文件是否不会执行其中内容。没给路径时按“会执行”处理（宁可问一句）。 */
+/** Whether the target file never executes its content. No path → treated as executable (better to ask). */
 export function isNonExecutableTarget(targetPath: string | undefined): boolean {
 	if (targetPath === undefined || targetPath === "") return false;
 	const lower = targetPath.toLowerCase();
@@ -135,18 +146,19 @@ export function isNonExecutableTarget(targetPath: string | undefined): boolean {
 	return NON_EXECUTABLE_EXTENSIONS.has(lower.slice(dot));
 }
 
-/** 一处字符串/模板字面量区间。 */
+/** One string/template-literal range. */
 export interface QuotedRange {
 	start: number;
 	end: number;
 	kind: '"' | "'" | "`";
-	/** 模板串里有没有 `${…}`：有就是真代码（会拼进命令），不是引文。 */
+	/** Whether the template carries `${…}`: if so it is real code (spliced into a command), not a quotation. */
 	interpolates: boolean;
 }
 
 /**
- * 扫描全文，标出落在字符串/模板字面量里的区间。
- * 模板串额外带上 `interpolates`：含 `${…}` 的模板串是真代码（会被拼进命令），不是引文。
+ * Scan the whole text and mark the ranges inside string/template literals.
+ * Templates additionally carry `interpolates`: a template with `${…}` is real code (spliced
+ * into commands), not a quotation.
  */
 export function quotedRanges(content: string): QuotedRange[] {
 	const ranges: QuotedRange[] = [];
@@ -183,7 +195,7 @@ function insideRanges(ranges: readonly QuotedRange[], index: number): QuotedRang
 	return ranges.find((range) => index >= range.start && index < range.end);
 }
 
-/** 从 `open`（指向 `(`）扫到配对的 `)`，返回区间文本。扫不到就吃到串尾。 */
+/** Scan from `open` (pointing at `(`) to the matching `)` and return the region's text. No match → eat to end. */
 export function balancedRegion(content: string, open: number): string {
 	let depth = 0;
 	let quote: '"' | "'" | "`" | null = null;
@@ -211,7 +223,7 @@ export function balancedRegion(content: string, open: number): string {
 	return content.slice(open);
 }
 
-/** 这段参数区间里有没有“目标算出来的”形态；返回命中的规则名。 */
+/** Whether this argument region carries a "derived target" shape; returns the matching rule's name. */
 function classifyRegion(region: string): { rule: string; reason: string } | undefined {
 	if (FALLBACK.test(region)) {
 		return {
@@ -239,8 +251,8 @@ function classifyRegion(region: string): { rule: string; reason: string } | unde
 }
 
 /**
- * 调用里第一个字面量参数（`rmSync("/Users", …)` 的 `/Users`）。
- * 取不到或不是字面量就返回 undefined。
+ * The first literal argument of a call (`rmSync("/Users", …)`'s `/Users`).
+ * undefined when absent or not a literal.
  */
 export function firstLiteralArg(region: string): string | undefined {
 	const open = region.indexOf("(");
@@ -249,12 +261,12 @@ export function firstLiteralArg(region: string): string | undefined {
 	const match = /^(["'`])([^"'`]*)\1/.exec(after);
 	if (!match) return undefined;
 	const body = match[2] ?? "";
-	// 模板串里的变量不是字面量
+	// a variable inside a template is not a literal
 	if (body.includes("${")) return undefined;
 	return body;
 }
 
-/** 第 `index` 个字符所在行号（从 1 起）。 */
+/** The line number the `index`-th character sits on (1-based). */
 function lineAt(content: string, index: number): number {
 	let line = 1;
 	for (let cursor = 0; cursor < index; cursor += 1) {
@@ -263,13 +275,13 @@ function lineAt(content: string, index: number): number {
 	return line;
 }
 
-/** 行原文（用于展示）。 */
+/** The line's verbatim text (for display). */
 function lineText(content: string, line: number): string {
 	const raw = content.split("\n")[line - 1] ?? "";
 	return raw.length > 160 ? raw.slice(0, 160) + "…" : raw;
 }
 
-/** 这一行是不是注释/文档行（不执行）。 */
+/** Whether this line is a comment/doc line (does not execute). */
 function isCommentLine(text: string): boolean {
 	const trimmed = text.trim();
 	return (
@@ -283,9 +295,9 @@ function isCommentLine(text: string): boolean {
 	);
 }
 
-/** 去掉文档标记，避免 `<code>rm -rf b</code>` 这类引文被当成命令词。
- * 只剥**不插值**的反引号片段：带 `${…}` 的模板串是真代码（`execSync(\`rm -rf ${D}\`)`），
- * 剥掉它等于把真命令丢了。 */
+/** Strip doc markup so a quotation like `<code>rm -rf b</code>` is not judged a command word.
+ * Only **non-interpolating** backtick segments are stripped: a template with `${…}` is real
+ * code (`execSync(\`rm -rf ${D}\`)`) — stripping it would lose a real command. */
 function stripDocMarkup(text: string): string {
 	return text
 		.replace(/<code>[\s\S]*?<\/code>/gi, " ")
@@ -294,9 +306,9 @@ function stripDocMarkup(text: string): string {
 }
 
 /**
- * 检查一段文本里有没有危险的删除调用。
+ * Check a stretch of text for dangerous deletion calls.
  *
- * 返回全部命中；调用方按 `severity` 决定弹窗还是只记录。
+ * Returns all findings; the caller decides dialog vs. record-only by `severity`.
  */
 export function inspectWrittenContent(content: string, options: WriteInspectOptions = {}): WriteFinding[] {
 	if (content === "") return [];
@@ -317,11 +329,11 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 		});
 	};
 
-	// ---- 形态一：真正的删除 API 调用（跨行也算） ----
+	// ---- shape one: real deletion-API calls (across lines too) ----
 	for (const api of DELETE_APIS) {
 		const escaped = api.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		// 前面的字符不能是标识符的一部分（`myrmSync(` 不算），但 `.` 必须放行 ——
-		// `fs.rmSync(` / `os.remove(` 正是方法调用形态。
+		// the preceding char must not be part of an identifier (`myrmSync(` does not count) — but `.` must pass:
+		// `fs.rmSync(` / `os.remove(` is exactly the method-call shape.
 		const pattern = new RegExp(`(?:^|[^\\w])${escaped}\\s*\\(`, "g");
 		for (const match of content.matchAll(pattern)) {
 			const start = match.index + match[0].length - 1;
@@ -330,7 +342,7 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 			const hit = classifyRegion(region);
 			if (hit) {
 				const where = insideRanges(quoted, match.index);
-				// 字符串里的引用不拦（除非同行有执行汇），但带 `${…}` 的模板串是真代码。
+				// quotations inside strings are not blocked (unless the same line has an execution sink) — but a template with `${…}` is real code.
 				const literal =
 					where !== undefined &&
 					!where.interpolates &&
@@ -339,8 +351,8 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 				continue;
 			}
 
-			// 字面量目标：`fs.rmSync("/Users")` / `fs.rmSync("/")` 这类必须由调用方注入的
-			// 判定器（保护根表）来判，本模块自己不知道哪些是受保护目录。
+			// literal targets: `fs.rmSync("/Users")` / `fs.rmSync("/")`-style calls must be judged by the caller-injected
+			// judge (the protected-roots table) — this module does not know which directories are protected.
 			const literalArg = firstLiteralArg(region);
 			const verdict = literalArg === undefined ? undefined : options.evaluateLiteral?.(literalArg);
 			if (verdict === undefined) continue;
@@ -348,7 +360,7 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 		}
 	}
 
-	// ---- 形态二：shell 删除命令（写进脚本的 `rm -rf $VAR`） ----
+	// ---- shape two: shell delete commands (a `rm -rf $VAR` written into a script) ----
 	content.split("\n").forEach((raw, index) => {
 		const text = stripDocMarkup(raw);
 		if (isCommentLine(text)) return;
@@ -360,7 +372,7 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 			const recursive = /[rR]/.test(flags.replace(/^--/, ""));
 			const risky = EXPANSION.test(target) || /(^|[^\w.])\.\.([^\w.]|$)/.test(target) || /^["'`]?\/["'`]?$/.test(target.trim());
 			if (recursive && risky) {
-				// 引号里的引用同样降级（带 `${…}` 的模板串除外）。
+				// quotations are downgraded the same way (except templates carrying `${…}`).
 				const at = text.indexOf("rm ") >= 0 ? raw.indexOf("rm ") : raw.indexOf(shell[1] ?? "rm");
 				const where = insideRanges(quoted, Math.max(0, at));
 				const literal = where !== undefined && !where.interpolates && !EXEC_SINK.test(text);
@@ -384,15 +396,16 @@ export function inspectWrittenContent(content: string, options: WriteInspectOpti
 	return findings;
 }
 
-/** 命中的最严一级（没有命中时返回 `info`）。 */
+/** The strictest severity among the findings (`info` when none). */
 export function worstSeverity(findings: readonly WriteFinding[]): WriteSeverity {
 	if (findings.some((finding) => finding.severity === "block")) return "block";
 	return findings.some((finding) => finding.severity === "confirm") ? "confirm" : "info";
 }
 
 /**
- * 从一行里抽出工具调用的目标参数（用于报错信息里展示“它会删什么”）。
- * 找不到返回 undefined。
+ * Extract a tool call's target argument from a line (for the error message's "what it would
+ * delete").
+ * undefined when not found.
  */
 export function firstStringArg(text: string, api: string): string | undefined {
 	const index = text.indexOf(api);

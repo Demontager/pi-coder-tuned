@@ -1,50 +1,58 @@
 /**
- * subagents.ts — 探测「此刻有没有子代理在跑」。
+ * subagents.ts — detects "is a subagent running right now".
  *
- * recap 是**闲置制**触发的：回合结束（`agent_settled`）后静止 30s 就生成摘要。
- * 但异步子代理是**脱离回合**的：`subagent({ async: true })` 一发出去主回合就结束，
- * 子代理还在后台跑几十秒甚至几分钟，结果稍后由被唤醒的回合带回来。这时 30s 到点，
- * 摘要会把「刚把任务发出去、还在等」总结成「这轮干完了」。所以生成摘要前必须问一句
- * 「还有子代理在跑吗」，有就只重查、不生成 —— 等它们都结束了再重新起 30s 定时。
+ * recap triggers **on idle**: 30 quiet seconds after a turn ends (`agent_settled`) →
+ * generate. But an async subagent lives **outside the turn**: `subagent({ async: true
+ * })` returns at once — the main turn ends while the subagent keeps running in the
+ * background for tens of seconds or minutes, its result carried back by a woken turn
+ * later. A 30s expiry would then summarize "just dispatched the task, still waiting"
+ * as "turn done". So before generating it must ask "any subagent still running?" —
+ * yes → re-check only, never generate, and restart the 30s countdown once they all end.
  *
- * 为什么走 pi-subagents 的进程内 RPC，而不是自己数 `subagent` 工具调用：
- *   - **数不出来**。异步调用立刻返回（`details.asyncId`），结果由后续回合带回，工具调用
- *     本身看不出"还在跑"；状态只活在 pi-subagents 的进程内 state 里（`asyncJobs` /
- *     `foregroundControls`），没有 session 条目、没有落盘文件可以读。
- *   - **它的文档就给了这个口子**。`pi-subagents/docs/extension-api.md` 的
- *     "In-process event-bus RPC" 一节是给「其他 Pi 扩展」用的公开接口：发
- *     `subagents:rpc:v1:request`、在 `subagents:rpc:v1:reply:<requestId>` 上收回复；
- *     `status` 方法（不带任何 target）的回包里带 `data.fleet`（Fleet status DTO v1），
- *     `totalActive` 就是当前会话的活跃子代理数（前台 + 异步 + 排队都算）。
- *   - **不 import pi-subagents 的任何文件**。它是独立安装的 npm 包，不是本扩展可解析的
- *     依赖；而且它也可能没装（换台机器就没装）。协议是版本化的字符串频道 + JSON 回包，
- *     按结构化最小接口对接即可。同理本文件**也不 import pi**（总线按下面的接口注入），
- *     所以 `node --test` 能拿假总线直接跑：
+ * Why pi-subagents's in-process RPC instead of counting `subagent` tool calls ourselves:
+ *   - **Uncountable**. An async call returns immediately (`details.asyncId`) and its
+ *     result comes back in a later turn — the tool call itself cannot say "still
+ *     running"; that state lives only in pi-subagents's in-process state (`asyncJobs`
+ *     / `foregroundControls`), with no session entries and no files on disk to read.
+ *   - **Its docs give the hook**. `pi-subagents/docs/extension-api.md`'s
+ *     "In-process event-bus RPC" section is the public interface for "other Pi
+ *     extensions": emit `subagents:rpc:v1:request`, receive on
+ *     `subagents:rpc:v1:reply:<requestId>`; a `status` call (no target) replies with
+ *     `data.fleet` (Fleet status DTO v1) whose `totalActive` is the current session's
+ *     active subagent count (foreground + async + queued all included).
+ *   - **No pi-subagents file is imported**. It is an independently-installed npm
+ *     package, not a resolvable dependency here — and it may not be installed at all
+ *     (a different machine may lack it). The protocol is versioned string channels +
+ *     a JSON reply, so a minimal structural interface is enough. For the same reason
+ *     this file **does not import pi** (the bus is injected via the interface below),
+ *     and `node --test` can drive it with a fake bus:
  *
  *         node --test clients/pi/extensions/recap/subagents.test.ts
  *
- * 失败一律当「没有」：没装 pi-subagents、协议版本变了、回包格式不认识、超时/抛异常 ——
- * 全部返回 false（fail-open）。宁可偶尔在子代理运行中生成一条摘要，也不能因为探测环节
- * 把 recap 整个弄停摆。探测超时 1s：没有子代理时对端回的是内存快照，毫秒级就到。
+ * Every failure counts as "none": pi-subagents missing, protocol version changed,
+ * reply shape unrecognized, timeout / exception — all return false (fail-open).
+ * Better to occasionally generate a recap while a subagent runs than let the probe
+ * stall the whole recap. The probe timeout is 1s: with no subagents the peer answers
+ * from an in-memory snapshot in milliseconds.
  */
 
-/** pi 事件总线的子集（真实的 pi `EventBus` 结构兼容）。 */
+/** The subset of pi's event bus this uses (structurally compatible with pi's real `EventBus`). */
 export interface SubagentEventBus {
 	on(channel: string, handler: (data: unknown) => void): (() => void) | void;
 	emit(channel: string, data: unknown): void;
 }
 
-/** pi-subagents 的 RPC 频道（见其 docs/extension-api.md，协议版本 1）。 */
+/** pi-subagents's RPC channels (see its docs/extension-api.md; protocol version 1). */
 export const SUBAGENT_RPC_REQUEST = "subagents:rpc:v1:request";
 export const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 export const SUBAGENT_RPC_VERSION = 1;
 
-/** 探测超时：没有子代理时对端秒回，超时就当对端不在。 */
+/** The probe timeout: with no subagents the peer answers instantly — a timeout means it is absent. */
 export const SUBAGENT_RPC_TIMEOUT_MS = 1_000;
 
 let requestSeq = 0;
 
-/** 每个请求一个唯一 id —— 只认自己那条回复频道，不会吃到别人的回复。 */
+/** A unique id per request — only our own reply channel is matched, never someone else's reply. */
 export function nextSubagentRequestId(now = Date.now()): string {
 	requestSeq += 1;
 	return `recap-${requestSeq}-${now.toString(36)}`;
@@ -55,12 +63,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * 从 `status` 的回复里判断「有子代理在跑」。
+ * Decide "a subagent is running" from a `status` reply.
  *
- * 主判据是 `data.fleet.totalActive`（有界 entries 之外的**全量**活跃数，所以超过
- * entries 窗口的也不会漏）。`asyncSnapshot.runs` 里的 `queued` / `running` 是兜底：
- * fleet 是 v1 才有的能力（`ping.capabilities.fleetStatus` 没有就整个不出现），
- * 快照在旧版本里也可能单独存在。两条都不认识就返回 false（fail-open）。
+ * The primary signal is `data.fleet.totalActive` (the **total** active count beyond the
+ * bounded `entries` window, so anything past the window still counts). `queued` /
+ * `running` inside `asyncSnapshot.runs` is the fallback: `fleet` only exists since v1
+ * (absent when `ping.capabilities.fleetStatus` is missing) while the snapshot may exist
+ * alone on older versions. Recognizing neither → false (fail-open).
  */
 export function isSubagentWorkActive(reply: unknown): boolean {
 	if (!isRecord(reply) || reply.success !== true) return false;
@@ -77,10 +86,11 @@ export function isSubagentWorkActive(reply: unknown): boolean {
 }
 
 /**
- * 问一次 pi-subagents：现在有子代理在跑吗。
+ * Ask pi-subagents once: is a subagent running right now.
  *
- * 正常路径：先订阅回复频道 → 发 request → 收到回复（或超时）→ 退订 → 解析。
- * 任何一步出错都当「没有」，本函数**不抛异常**。
+ * The happy path: subscribe the reply channel → emit the request → receive the reply
+ * (or the timeout) → unsubscribe → parse.
+ * Any step failing counts as "none" — this function **never throws**.
  */
 export async function hasActiveSubagentWork(
 	events: SubagentEventBus,
@@ -101,7 +111,7 @@ export async function hasActiveSubagentWork(
 			try {
 				unsubscribe?.();
 			} catch {
-				// 退订失败无所谓：handler 已经 settled，再来回复也直接忽略。
+				// an unsubscribe failure is harmless: the handler already settled, and a late reply is ignored.
 			}
 			resolve(value);
 		};
@@ -115,7 +125,7 @@ export async function hasActiveSubagentWork(
 				version: SUBAGENT_RPC_VERSION,
 				requestId,
 				method: "status",
-				// 不带 target = 只要当前会话的舰队概要（对端走内存快照，秒回）。
+				// no target = only this session's fleet summary (the peer answers from an in-memory snapshot, instantly).
 				params: {},
 				source: { extension: "recap" },
 			});

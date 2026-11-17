@@ -1,35 +1,49 @@
 /**
- * auto-default-model — 换模型时顺手把它写成「启动默认模型」，省掉那次 Ctrl+S。
+ * auto-default-model — on every model switch, also write it as the "startup
+ * default model", saving the extra Ctrl+S.
  *
- * 为什么需要它：pi 的 `/model` 选择器**只改当前会话**的模型，想让下次启动停在某个模型上，
- * 必须额外按一次 Ctrl+S（`app.models.save` → `setModel(model, {persist: true})` →
- * `settingsManager.setDefaultModelAndProvider`，写 `~/.pi/agent/settings.json` 的
- * `defaultProvider` / `defaultModel`）。这是上游刻意的行为（CHANGELOG：「Fixed `/model` and
- * `/thinking` selections being persisted globally unless explicitly saved with Ctrl+S」），
- * 但对单人机器是多余的仪式：换完模型常常忘了按 Ctrl+S，下次启动又回到旧模型。
- * 本扩展把这一步自动化 —— 任何一次模型切换（`/model` 选择器、Ctrl+P 循环、
- * `pi-subagents` 的 profile 切换这类 `pi.setModel()` 调用）都立刻落盘。
+ * Why it exists: pi's `/model` picker **changes only the current session's**
+ * model; making a model stick across restarts takes an extra Ctrl+S
+ * (`app.models.save` → `setModel(model, {persist: true})` →
+ * `settingsManager.setDefaultModelAndProvider`, writing
+ * `~/.pi/agent/settings.json`'s `defaultProvider` / `defaultModel`). This is
+ * deliberate upstream behavior (CHANGELOG: "Fixed `/model` and `/thinking`
+ * selections being persisted globally unless explicitly saved with Ctrl+S")
+ * — but on a single-user machine it is needless ceremony: the Ctrl+S is
+ * easily forgotten and the next launch is back on the old model.
+ * This extension automates the step — every model switch (the `/model`
+ * picker, Ctrl+P cycling, `pi.setModel()` calls like pi-subagents's profile
+ * switching) persists immediately.
  *
- * 落盘走的是 **pi 自己的公开 API**（`SettingsManager`，从 `@earendil-works/pi-coding-agent`
- * 导入，加载器对这个 specifier 做了 alias / virtualModules 映射，所以扩展里 on-demand import 它
- 就是 pi 自己那份实现），也就是和 Ctrl+S 完全相同的那条持久化路径：
- * `FileSettingsStorage` + proper-lockfile 文件锁 + 「只把本次改动的字段合并进磁盘上最新内容」的
- * 读改写。所以①settings.json 里的其它字段（包括本扩展不认识的未来字段）不会被覆盖，
- * ②和 pi 自己的写入共用同一把锁，不会互相丢更新。**刻意不自己 `fs.writeFile`**：那样就会绕过
- * 那把锁，在用户同时改设置（`/theme`、`/settings`）时丢掉对方刚写进去的内容。
+ * Persistence goes through **pi's own public API** (`SettingsManager`,
+ * imported from `@earendil-works/pi-coding-agent` — the loader's alias /
+ * virtualModules mapping means an on-demand import here gets pi's own
+ * implementation) — the very same path Ctrl+S takes:
+ * `FileSettingsStorage` + proper-lockfile locking + a read-modify-write that
+ * merges only the changed fields into the latest on-disk content. So ① other
+ * settings.json fields (incl. future ones this extension does not know) are
+ * never clobbered, and ② it shares one lock with pi's own writes — no lost
+ * updates. **Deliberately not `fs.writeFile`-ing ourselves**: that would
+ * bypass the lock and lose whatever `/theme` or `/settings` just wrote
+ * concurrently.
  *
- * 三个刻意的取舍：
- *   - `source === "restore"` **不落盘**。恢复会话时 pi 会把模型带回该会话自己的那条，
- *     那是「打开旧会话」而不是「我换了个模型」，让它改写全局默认会很意外。
- *     （pi 0.85.1 只在 `setModel()` / `cycleModel()` 里发 `model_select`，恢复走的是直接设
- *      `agent.state.model`，所以当前版本这个分支根本不会触发；写在这里是为了将来 pi 把
- *     `restore` 接上以后，语义仍然明确。）
- *   - 值没变就不写。选中同一个模型、或 pi 自己已经 persist 过一次（Ctrl+S、`/login` 后自动选
- *     该 provider 的默认模型）时 `model_select` 也会触发，重复写只会白白动 settings.json。
- *   - 只在失败时提示（`ctx.ui.notify`），成功不打扰：当前模型名在 statusline 上本来就看得见，
- *     换模型时再弹一条通知是噪音。
+ * Three deliberate tradeoffs:
+ *   - `source === "restore"` **does not persist**. Resuming a session pulls
+ *     its model back — "opening an old session", not "I switched models" —
+ *     letting it rewrite the global default would be surprising.
+ *     (pi 0.85.1 only emits `model_select` from `setModel()` / `cycleModel()`
+ *     — restore sets `agent.state.model` directly — so this branch cannot
+ *     trigger on the current version; it is written so the semantics stay
+ *     explicit once pi wires `restore` up.)
+ *   - an unchanged value is never written. `model_select` also fires when
+ *     the same model is re-picked, or pi persisted already (Ctrl+S, the
+ *     auto-picked provider default after `/login`) — a repeat write only
+ *     dirties settings.json for nothing.
+ *   - notify only on failure (`ctx.ui.notify`) — never on success: the
+ *     current model name already shows on the statusline; a notice on every
+ *     switch is noise.
  *
- * 关掉：`PI_AUTO_DEFAULT_MODEL=off`（每次切换时读，不缓存）。
+ * Disable: `PI_AUTO_DEFAULT_MODEL=off` (read on every switch, not cached).
  */
 
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -51,21 +65,22 @@ function notify(ctx: ExtensionContext, message: string): void {
 }
 
 /**
- * 把 `provider/modelId` 写成全局启动默认模型。返回 "unchanged" 表示磁盘上已经是它。
+ * Write `provider/modelId` as the global startup default. "unchanged" means
+ * it already is on disk.
  */
 async function persistAsStartupDefault(cwd: string, provider: string, modelId: string): Promise<PersistResult> {
 	const settings = SettingsManager.create(cwd);
-	// 比的是**全局**设置而不是合并后的值：项目级 `.pi/settings.json` 里的 defaultProvider /
-	// defaultModel 会盖过全局值（那条启动路径本扩展也管不了），拿合并值去比会误判成「已经写过了」。
+	// compare against the **global** settings, not the merged values: a project-level `.pi/settings.json`'s defaultProvider /
+	// defaultModel overrides the global (a startup path this extension cannot control) — comparing merged values would misjudge it as "already written".
 	const global = settings.getGlobalSettings();
 	if (global.defaultProvider === provider && global.defaultModel === modelId) {
 		return { outcome: "unchanged" };
 	}
 	settings.setDefaultModelAndProvider(provider, modelId);
 	await settings.flush();
-	// settings.json 解析失败 / 写不进去时 `save()` 是**静默跳过**的（`globalSettingsLoadError`
-	// 直接 return，`enqueueWrite` 的 catch 只记错误），`flush()` 也不抛 —— 结果只能从
-	// `drainErrors()` 里读，否则扩展会假装写成功了。错误原文一并带出去，警告才有诊断价值。
+	// when settings.json fails to parse or write, `save()` **silently skips** (`globalSettingsLoadError`
+	// returns early, `enqueueWrite`'s catch only records) and `flush()` never throws — the outcome is only readable in
+	// `drainErrors()`, or the extension would fake a successful write. The error text goes out too — a warning without it diagnoses nothing.
 	const failure = settings.drainErrors()[0];
 	if (failure) return { outcome: "failed", detail: failure.error.message };
 	return { outcome: "written" };

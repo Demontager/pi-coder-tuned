@@ -1,5 +1,6 @@
 /**
- * Tests for validate.ts — 归一化（行终止符 / 单行化 / 截断）+ 运行时校验。
+ * Tests for validate.ts — normalization (line terminators / single-lining /
+ * clipping) + runtime validation.
  *
  * Run with:  node --test clients/pi/extensions/ask-user-question/validate.test.ts
  */
@@ -37,13 +38,13 @@ function params(overrides: Partial<AskParams> = {}): AskParams {
 	};
 }
 
-test("normalizeLineTerminators: CRLF 折成 LF，落单 CR 删除", () => {
+test("normalizeLineTerminators: CRLF folds to LF, a lone CR is deleted", () => {
 	assert.equal(normalizeLineTerminators("a\r\nb"), "a\nb");
 	assert.equal(normalizeLineTerminators("GEMBA\r_LOG\r_FILE"), "GEMBA_LOG_FILE");
 	assert.equal(normalizeLineTerminators("a\nb"), "a\nb");
 });
 
-test("normalizeParams: header 超长截断补 …", () => {
+test("normalizeParams: an over-long header clips to …", () => {
 	const long = "x".repeat(MAX_HEADER_LENGTH + 10);
 	const out = normalizeParams(params({ questions: [{ ...params().questions[0], header: long }] }));
 	const header = out.questions[0].header;
@@ -51,7 +52,7 @@ test("normalizeParams: header 超长截断补 …", () => {
 	assert.ok(header.endsWith("…"));
 });
 
-test("normalizeParams: label 超长截断补 …", () => {
+test("normalizeParams: an over-long label clips to …", () => {
 	const long = "y".repeat(MAX_LABEL_LENGTH + 5);
 	const out = normalizeParams(
 		params({ questions: [{ ...params().questions[0], options: [option(long), option("b")] }] }),
@@ -60,7 +61,7 @@ test("normalizeParams: label 超长截断补 …", () => {
 	assert.ok(out.questions[0].options[0].label.endsWith("…"));
 });
 
-test("normalizeParams: header/label/description 单行化（空白串折叠），question 保留换行", () => {
+test("normalizeParams: header/label/description single-line (whitespace runs collapse), question keeps newlines", () => {
 	const out = normalizeParams(
 		params({
 			questions: [
@@ -79,18 +80,18 @@ test("normalizeParams: header/label/description 单行化（空白串折叠）�
 	assert.equal(out.questions[0].options[0].description, "d1 d2");
 });
 
-test("normalizeParams: multiSelect 归一成布尔，不改入参", () => {
+test("normalizeParams: multiSelect normalizes to a boolean without mutating the input", () => {
 	const input = params({ questions: [{ ...params().questions[0], multiSelect: undefined }] });
 	const out = normalizeParams(input);
 	assert.equal(out.questions[0].multiSelect, false);
 	assert.equal(input.questions[0].multiSelect, undefined);
 });
 
-test("validateQuestionnaire: 合法问卷通过", () => {
+test("validateQuestionnaire: a valid questionnaire passes", () => {
 	assert.deepEqual(validateQuestionnaire(normalizeParams(params())), { ok: true });
 });
 
-test("validateQuestionnaire: 空 questions → no_questions", () => {
+test("validateQuestionnaire: empty questions → no_questions", () => {
 	const result = validateQuestionnaire({ questions: [] });
 	assert.equal(result.ok, false);
 	if (!result.ok) {
@@ -99,7 +100,7 @@ test("validateQuestionnaire: 空 questions → no_questions", () => {
 	}
 });
 
-test("validateQuestionnaire: 超过 4 题 → too_many_questions", () => {
+test("validateQuestionnaire: more than 4 questions → too_many_questions", () => {
 	const q = params().questions[0];
 	const five = {
 		questions: [1, 2, 3, 4, 5].map((i) => ({ ...q, question: `Q${i}?`, header: `H${i}` })),
@@ -112,7 +113,7 @@ test("validateQuestionnaire: 超过 4 题 → too_many_questions", () => {
 	}
 });
 
-test("validateQuestionnaire: 重复问题文本 → duplicate_question", () => {
+test("validateQuestionnaire: duplicate question text → duplicate_question", () => {
 	const q = params().questions[0];
 	const result = validateQuestionnaire({ questions: [q, { ...q, header: "Again" }] });
 	assert.equal(result.ok, false);
@@ -122,7 +123,7 @@ test("validateQuestionnaire: 重复问题文本 → duplicate_question", () => {
 	}
 });
 
-test("validateQuestionnaire: 选项太少 / 太多", () => {
+test("validateQuestionnaire: too few / too many options", () => {
 	const q = params().questions[0];
 	const tooFew = validateQuestionnaire({ questions: [{ ...q, options: [option("only")] }] });
 	assert.equal(tooFew.ok, false);
@@ -140,7 +141,7 @@ test("validateQuestionnaire: 选项太少 / 太多", () => {
 	}
 });
 
-test("validateQuestionnaire: 保留 label（Other / Type something.）被拒", () => {
+test("validateQuestionnaire: reserved labels (Other / Type something.) rejected", () => {
 	for (const label of ["Other", "Type something."]) {
 		const result = validateQuestionnaire({
 			questions: [{ ...params().questions[0], options: [option(label), option("b")] }],
@@ -153,7 +154,7 @@ test("validateQuestionnaire: 保留 label（Other / Type something.）被拒", (
 	}
 });
 
-test("validateQuestionnaire: 同题重复 label → duplicate_option_label", () => {
+test("validateQuestionnaire: duplicate labels in one question → duplicate_option_label", () => {
 	const result = validateQuestionnaire({
 		questions: [{ ...params().questions[0], options: [option("same"), option("same")] }],
 	});
@@ -164,7 +165,7 @@ test("validateQuestionnaire: 同题重复 label → duplicate_option_label", () 
 	}
 });
 
-test("reserved_label 短路在 duplicate_option_label 之前（两个 Other）", () => {
+test("reserved_label short-circuits before duplicate_option_label (two Others)", () => {
 	const result = validateQuestionnaire({
 		questions: [{ ...params().questions[0], options: [option("Other"), option("Other")] }],
 	});
@@ -172,7 +173,7 @@ test("reserved_label 短路在 duplicate_option_label 之前（两个 Other）",
 	if (!result.ok) assert.equal(result.error, "reserved_label");
 });
 
-test("归一化后再校验：\"Other\\r\" 不能溜过 reserved_label", () => {
+test("validation runs after normalization: \"Other\\r\" must not slip past reserved_label", () => {
 	const normalized = normalizeParams({
 		questions: [{ ...params().questions[0], options: [option("Other\r"), option("b")] }],
 	});

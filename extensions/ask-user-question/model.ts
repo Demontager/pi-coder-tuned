@@ -1,18 +1,25 @@
 /**
- * model.ts — 问卷的纯状态机（不 import pi / pi-tui），view.ts 只是它的一层
- * 按键解码 + 渲染外壳。所有交互语义（tab 切换、光标、多选勾选、单选/多选/
- * 自由输入的提交、提交页闸门、取消）都集中在这里，`node --test` 直接覆盖。
+ * model.ts — the questionnaire's pure state machine (no pi / pi-tui imports);
+ * view.ts is only its key-decoding + rendering shell. All the interaction
+ * semantics (tab switching, cursor, multi-select toggles, single/multi/free-
+ * text submits, the submit-page gate, cancel) live here — `node --test`
+ * covers them directly.
  *
- * 状态约定：
- * - `currentTab` 0..n-1 是问题页；`n`（=questions.length）是提交页，**只有
- *   多题（n>1）才有提交页**——单题选完即提交，没有可切换的页。
- * - `cursor` 是当前问题页内的行号：0..options.length-1 是模型给的选项，
- *   options.length 是自动追加的 "Type something." 哨兵行。
- * - `toggles[i][j]` 是第 i 题多选下第 j 个选项的勾选态（单选不用）。
- * - `answers[i]` 是第 i 题已提交的答案；重答覆盖旧值。
+ * State conventions:
+ * - `currentTab` 0..n-1 are question pages; `n` (= questions.length) is the
+ *   submit page — **only multi-question runs (n>1) have a submit page**: a
+ *   single question submits on selection, there is nothing to switch to.
+ * - `cursor` is the row index inside the current question page:
+ *   0..options.length-1 are the model's options; options.length is the
+ *   auto-appended "Type something." sentinel row.
+ * - `toggles[i][j]` is option j's checked state under question i's
+ *   multi-select (single-select does not use it).
+ * - `answers[i]` is question i's submitted answer; re-answering overwrites.
  *
- * reduce 原地改 state、返回 Outcome 告诉外壳下一步做什么（继续 / 进自由输入 /
- * 出自由输入 / 提交 / 取消）。提交与取消的 result 都是**已答部分**的快照。
+ * reduce mutates state in place and returns an Outcome telling the shell what
+ * to do next (continue / enter free input / leave free input / submit /
+ * cancel). The result of both submit and cancel is a snapshot of the
+ * **answered portion**.
  */
 
 import type { AskAnswer, AskParams, AskQuestion, AskResult } from "./types.ts";
@@ -58,7 +65,7 @@ export function createState(params: AskParams): QuestionnaireState {
 	};
 }
 
-/** 多题才有提交页。 */
+/** Only multi-question runs have a submit page. */
 export function hasSubmitTab(state: QuestionnaireState): boolean {
 	return state.questions.length > 1;
 }
@@ -67,7 +74,7 @@ export function isSubmitTab(state: QuestionnaireState): boolean {
 	return hasSubmitTab(state) && state.currentTab === state.questions.length;
 }
 
-/** 当前问题页的行数 = 选项数 + 1（哨兵行）。提交页无意义，返回 0。 */
+/** The current question page's row count = options + 1 (the sentinel row). Meaningless on the submit page → 0. */
 export function rowCount(state: QuestionnaireState): number {
 	const q = state.questions[state.currentTab];
 	return q ? q.options.length + 1 : 0;
@@ -77,7 +84,7 @@ export function allAnswered(state: QuestionnaireState): boolean {
 	return state.answers.every((a) => a !== undefined);
 }
 
-/** 未回答问题的 header 列表（提交页提示用）。 */
+/** The headers of unanswered questions (for the submit page's hint). */
 export function unansweredHeaders(state: QuestionnaireState): string[] {
 	const headers: string[] = [];
 	for (let i = 0; i < state.questions.length; i++) {
@@ -86,7 +93,7 @@ export function unansweredHeaders(state: QuestionnaireState): string[] {
 	return headers;
 }
 
-/** 已答部分（去掉 undefined）的快照，按题序。 */
+/** A snapshot of the answered portion (undefined dropped), in question order. */
 function compactAnswers(state: QuestionnaireState): AskAnswer[] {
 	return state.answers.filter((a): a is AskAnswer => a !== undefined);
 }
@@ -106,7 +113,7 @@ function selectedLabels(state: QuestionnaireState): string[] {
 	return labels;
 }
 
-/** 提交当前题后前进：单题直接提交；多题去下一题，最后一题去提交页。 */
+/** Advance after submitting the current question: a single question submits; multi goes to the next question, the last one to the submit page. */
 function advance(state: QuestionnaireState): Outcome {
 	if (state.questions.length === 1) {
 		return { status: "submit", result: { answers: compactAnswers(state), cancelled: false } };
@@ -114,13 +121,13 @@ function advance(state: QuestionnaireState): Outcome {
 	if (state.currentTab < state.questions.length - 1) {
 		focusTab(state, state.currentTab + 1);
 	} else {
-		state.currentTab = state.questions.length; // 提交页
+		state.currentTab = state.questions.length; // the submit page
 		state.cursor = 0;
 	}
 	return CONTINUE;
 }
 
-/** 切到某页并按已有答案恢复光标位置（重答时停在原选择上）。 */
+/** Switch to a page and restore the cursor from the existing answer (a re-answer parks on the previous pick). */
 function focusTab(state: QuestionnaireState, tab: number): void {
 	state.currentTab = tab;
 	state.cursor = 0;
@@ -129,7 +136,7 @@ function focusTab(state: QuestionnaireState, tab: number): void {
 	const answer = state.answers[tab];
 	if (!q || !answer) return;
 	if (answer.kind === "custom") {
-		state.cursor = q.options.length; // 哨兵行
+		state.cursor = q.options.length; // the sentinel row
 	} else if (answer.kind === "option" && answer.answer != null) {
 		const idx = q.options.findIndex((o) => o.label === answer.answer);
 		if (idx >= 0) state.cursor = idx;
@@ -188,7 +195,7 @@ export function reduce(state: QuestionnaireState, intent: Intent): Outcome {
 		case "nextTab":
 		case "prevTab": {
 			if (!hasSubmitTab(state)) return CONTINUE;
-			const total = state.questions.length + 1; // 含提交页
+			const total = state.questions.length + 1; // incl. the submit page
 			const delta = intent.type === "nextTab" ? 1 : -1;
 			const next = (state.currentTab + delta + total) % total;
 			focusTab(state, next);
@@ -197,7 +204,7 @@ export function reduce(state: QuestionnaireState, intent: Intent): Outcome {
 		case "toggle": {
 			const q = currentQuestion(state);
 			if (!q || isSubmitTab(state) || !q.multiSelect) return CONTINUE;
-			if (state.cursor >= q.options.length) return CONTINUE; // 哨兵行不可勾
+			if (state.cursor >= q.options.length) return CONTINUE; // the sentinel row cannot be checked
 			state.toggles[state.currentTab][state.cursor] = !state.toggles[state.currentTab][state.cursor];
 			return CONTINUE;
 		}

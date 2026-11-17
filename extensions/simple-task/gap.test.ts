@@ -47,7 +47,7 @@ describe("widgetGaps", () => {
 
 	it("adds nothing when the neighbour above already ends with a blank line (recap)", () => {
 		const self = widget(["● 3 tasks (3 open)"]);
-		const recap = widget([" ✦ Recap: 修 gap 空行", ""]);
+		const recap = widget([" ✦ Recap: fix the gap rows", ""]);
 		const tui = container([container([spacer, recap, self])]);
 		assert.deepEqual(widgetGaps(tui, self, 80), { above: false, below: false });
 	});
@@ -61,7 +61,7 @@ describe("widgetGaps", () => {
 
 	it("adds nothing when the widget below already starts with a blank line (recap's own gap)", () => {
 		const self = widget(["● 3 tasks (3 open)"]);
-		const recap = widget(["", " ✦ Recap: 修 gap 空行"]);
+		const recap = widget(["", " ✦ Recap: fix the gap rows"]);
 		const tui = container([container([spacer, self, recap])]);
 		assert.deepEqual(widgetGaps(tui, self, 80), { above: false, below: false });
 	});
@@ -69,7 +69,7 @@ describe("widgetGaps", () => {
 	it("adds both gaps when wedged between two widgets", () => {
 		const self = widget(["● 3 tasks (3 open)"]);
 		const above = widget(["async subagent · background"]);
-		const below = widget(["✦ Recap: 上一轮摘要"]);
+		const below = widget(["✦ Recap: the previous recap"]);
 		const tui = container([container([spacer, above, self, below])]);
 		assert.deepEqual(widgetGaps(tui, self, 80), { above: true, below: true });
 	});

@@ -1,38 +1,42 @@
 /**
- * logo.ts — 启动 logo 的字形（静态）
+ * logo.ts — the startup logo glyphs (static)
  *
- * 字形是 `curl -fsSL https://pi.dev/install.sh | sh` 顶部那只 π 印记，取自
- * `npm:pi-claude-code-tui@0.1.14`（它自己也是照抄安装脚本）。上游把它做成 22 帧动画，
- * 本仓库只要一只静态 logo，所以这里**只留落定态那一格的形状**，帧表、笔画推进、底座闪动
- * 全部去掉。
+ * The glyph is the π mark at the top of `curl -fsSL https://pi.dev/install.sh | sh`, taken
+ * from `npm:pi-claude-code-tui@0.1.14` (which itself copies the install script). Upstream
+ * animates it over 22 frames; this repo only wants a static logo, so here **only the settled
+ * frame's shape is kept** — the frame table, stroke progression, and base flicker are all
+ * dropped.
  *
- * 形状用 4×4 的布尔格（一格 = 三个 `█`，实心 / 空格），比上游那张「1 基坐标 + 逐帧取色」
- * 的表好读也好测。
+ * The shape is a 4×4 boolean grid (one cell = three `█`, filled / blank), easier to read and
+ * to test than upstream's "1-based coordinates + per-frame colors" table.
  *
- * **刻意补了上游漏掉的一格**：上游落定帧（phase 6）的格子表是
- * `3,2 3,3 3,4 4,2 4,4 5,2 5,3 6,2 6,5`，而它前几帧（phase 4/5 以及白闪帧）都带 `(5,5)`。
- * 少了这格，右腿会断成「悬空的一只脚」，静态显示时特别明显（动画里一闪而过没人注意），
- * 显然是上游那张表的笔误。这里按 `(5,5)` 在场的那版形状画。
+ * **Deliberately patches a cell upstream missed**: upstream's settled frame (phase 6) grid is
+ * `3,2 3,3 3,4 4,2 4,4 5,2 5,3 6,2 6,5`, while its earlier frames (phase 4/5 and the white
+ * flash frame) all include `(5,5)`. Without that cell the right leg breaks into "one
+ * dangling foot" — glaring in static display (it flashes by unnoticed in the animation), so
+ * it is clearly a typo in upstream's table. Here we draw the shape with `(5,5)` present.
  *
- * 本文件不 import pi / pi-tui：颜色由 `index.ts` 用 `theme.fg("accent", …)` 现取，
- * 所以 `/theme` 换肤能跟随；也让 `node --test clients/pi/extensions/startup-logo/*.test.ts` 能直接跑。
+ * This file imports neither pi nor pi-tui: colors are fetched live by `index.ts` via
+ * `theme.fg("accent", …)`, so `/theme` reskinning follows along; it also lets
+ * `node --test clients/pi/extensions/startup-logo/*.test.ts` run directly.
  */
 
-/** 一格 = 三个块字符。 */
+/** One cell = three block characters. */
 export const MARK_CELL = "███";
 
-/** 空格占位（与 `MARK_CELL` 等宽，保证每行可见宽度一致，侧栏才对得齐）。 */
+/** Space placeholder (same width as `MARK_CELL`, keeping every line's visible width equal so the sidebar aligns). */
 export const MARK_BLANK = " ".repeat(MARK_CELL.length);
 
 /**
- * 印记左侧留白：每行前面一个空格。
+ * Left margin of the mark: one space before each line.
  *
- * 顶格贴着终端最左边看着太挤，统一缩进一格；这一格算进 `MARK_WIDTH`，侧栏列与窄终端判定
- * 都跟着走，调用方不需要另补。
+ * Flush against the terminal's left edge looks too cramped; indent one space uniformly.
+ * That space counts toward `MARK_WIDTH`, so the sidebar column and the narrow-terminal
+ * decision follow along — callers need not add anything.
  */
 export const MARK_INDENT = " ";
 
-/** 4×4 布尔格，1 = 实心。行序自上而下，列序自左而右。 */
+/** The 4×4 boolean grid, 1 = filled. Row order top-to-bottom, column order left-to-right. */
 const MARK_GRID: readonly (readonly (0 | 1)[])[] = [
 	[1, 1, 1, 0],
 	[1, 0, 1, 0],
@@ -40,28 +44,31 @@ const MARK_GRID: readonly (readonly (0 | 1)[])[] = [
 	[1, 0, 0, 1],
 ];
 
-/** 印记高度（行）。 */
+/** The mark's height (rows). */
 export const MARK_ROWS = MARK_GRID.length;
 
-/** 印记本体宽度（列）× 每格字符数 = 12。 */
+/** The mark's body width (columns) × characters per cell = 12. */
 export const MARK_COLS = MARK_GRID[0]!.length;
 export const MARK_GLYPH_WIDTH = MARK_COLS * MARK_CELL.length;
 
-/** 每行可见宽度（含左侧留白）= 13。 */
+/** Visible width per line (including the left margin) = 13. */
 export const MARK_WIDTH = MARK_INDENT.length + MARK_GLYPH_WIDTH;
 
-/** 单格查询（越界当作空格），给单测和调试用。 */
+/** Single-cell query (out of bounds treated as blank), for unit tests and debugging. */
 export function markCellFilled(row: number, col: number): boolean {
 	return MARK_GRID[row]?.[col] === 1;
 }
 
 /**
- * 印记行的画笔：收「这一格实不实心」，返回**可见宽度为 3** 的字符串。
+ * The painter for one mark row: receives "is this cell filled" and returns a string with
+ * **visible width 3**.
  *
- * 刻意做成逐格而不是「整行交给一个 paint」：整行包色会把行尾那几个占位空格也吃进色块里，
- * 于是「每行可见宽度 == MARK_WIDTH」这个不变量在带色版本上就不成立了（侧栏列会歪）。
+ * Deliberately per-cell rather than "hand the whole row to one paint": wrapping the whole
+ * row in color would swallow the trailing placeholder spaces into the color block, so the
+ * "every line's visible width == MARK_WIDTH" invariant would no longer hold for the colored
+ * version (the sidebar column would skew).
  *
- * 默认画笔返回未着色的 `███` / 空格，方便单测。
+ * The default painter returns uncolored `███` / spaces, convenient for unit tests.
  */
 export type MarkCellPainter = (filled: boolean) => string;
 
@@ -70,15 +77,20 @@ export function markLines(paintCell: MarkCellPainter = (filled) => (filled ? MAR
 }
 
 /**
- * 把侧栏文字（已着色）贴到印记右侧，**垂直居中**（2 条落在第 1、2 行）。
+ * Attach the sidebar text (already colored) to the right of the mark, **vertically
+ * centered** (2 lines land on rows 1 and 2).
  *
- * 前提：传进来的行**可见宽度已等于 `MARK_WIDTH`**（`markLines` 保证），所以直接接在行尾就
- * 对得齐，这里不按字符串长度补 —— 行里有 ANSI 时按长度补一定歪。左侧留白（`MARK_INDENT`）
- * 已经算在 `MARK_WIDTH` 里，所以侧栏列也跟着右移一格，不需要在这里额外处理。
+ * Premise: the incoming lines **already have visible width `MARK_WIDTH`** (guaranteed by
+ * `markLines`), so simply appending to the line end aligns; no padding by string length
+ * here — with ANSI inside, padding by length always skews. The left margin (`MARK_INDENT`)
+ * is already counted in `MARK_WIDTH`, so the sidebar column shifts right with it; nothing
+ * extra is needed here.
  *
- * **不裁行尾占位空格**：它们是「每行 `MARK_WIDTH` 列」这个不变量的一部分。上游那种整行包色的写法
- * 在这里也不成立（行尾是 ANSI 重置符而不是空白，`trimEnd` 会静默变成空操作），所以统一不裁，
- * 让行为与调用方怎么上色无关。这些空格没有底色，终端里不可见，pi 也照样按宽度截断。
+ * **Trailing placeholder spaces are not trimmed**: they are part of the "every line is
+ * `MARK_WIDTH` columns" invariant. Upstream's whole-row coloring makes trimming moot anyway
+ * (the line tail is an ANSI reset, not whitespace, so `trimEnd` silently becomes a no-op);
+ * so we never trim, keeping behavior independent of how the caller colors. These spaces have
+ * no background, are invisible in the terminal, and pi truncates by width anyway.
  */
 export function attachSideText(lines: readonly string[], side: readonly string[], gap = 2): string[] {
 	if (lines.length === 0) return [];
@@ -90,17 +102,17 @@ export function attachSideText(lines: readonly string[], side: readonly string[]
 }
 
 export interface HeaderSections {
-	/** 已着色的 logo 行（含侧栏文字）。 */
+	/** The colored logo lines (with sidebar text). */
 	logo: readonly string[];
-	/** 已着色的快捷键提示行（内置 header 那一行紧凑版）。 */
+	/** The colored shortcut hint line (compact version of the built-in header's line). */
 	hints?: string;
-	/** 已着色的说明行。 */
+	/** The colored onboarding line. */
 	onboarding?: string;
 }
 
 /**
- * 完整 header 行序：logo → 空行 → 提示 → 空行 → 说明。
- * 缺某段就不留多余空行（窄终端回退时 logo 段为空）。
+ * The full header line order: logo → blank → hints → blank → onboarding.
+ * A missing section leaves no extra blank lines (on narrow-terminal fallback the logo section is empty).
  */
 export function composeHeaderLines(sections: HeaderSections): string[] {
 	const lines = [...sections.logo];
@@ -115,7 +127,7 @@ export function composeHeaderLines(sections: HeaderSections): string[] {
 	return lines;
 }
 
-/** 绝对路径缩短：家目录内显示成 `~/...`。 */
+/** Shorten an absolute path: under the home directory display as `~/...`. */
 export function shortenPath(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
 	if (cwd === home) return "~";

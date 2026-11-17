@@ -1,5 +1,5 @@
 /**
- * evaluator.ts 的验证：提示词构建与裁决解析，直接 `node --test`。
+ * Checks for evaluator.ts: prompt building and verdict parsing, directly `node --test`.
  *
  *   node --test clients/pi/extensions/verify-loop/evaluator.test.ts
  */
@@ -20,27 +20,27 @@ import {
 // buildEvaluatorPrompt
 // =============================================================================
 
-test("buildEvaluatorPrompt: 条件与对话都在里面", () => {
-	const prompt = buildEvaluatorPrompt("所有测试通过", "user: 改一下\nassistant: 改好了");
-	assert.match(prompt, /所有测试通过/);
-	assert.match(prompt, /改好了/);
+test("buildEvaluatorPrompt: the condition and conversation are both inside", () => {
+	const prompt = buildEvaluatorPrompt("all tests pass", "user: change it\nassistant: done");
+	assert.match(prompt, /all tests pass/);
+	assert.match(prompt, /done/);
 });
 
-test("buildEvaluatorPrompt: 超长对话截头留尾（最近的才是判定依据）", () => {
-	const conversation = `${"早".repeat(500)}\n${"晚".repeat(500)}`;
-	const prompt = buildEvaluatorPrompt("条件", conversation, 600);
+test("buildEvaluatorPrompt: an overlong conversation is head-truncated (the most recent is the judging basis)", () => {
+	const conversation = `${"early".repeat(500)}\n${"late".repeat(500)}`;
+	const prompt = buildEvaluatorPrompt("condition", conversation, 600);
 	assert.ok(prompt.length < conversation.length + 200);
 	assert.match(prompt, /truncated/);
-	assert.match(prompt, /晚/);
+	assert.match(prompt, /late/);
 });
 
-test("buildEvaluatorPrompt: 不超长时不截断", () => {
-	const prompt = buildEvaluatorPrompt("条件", "短对话", DEFAULT_CONTEXT_CHARS);
+test("buildEvaluatorPrompt: no truncation under the cap", () => {
+	const prompt = buildEvaluatorPrompt("condition", "short conversation", DEFAULT_CONTEXT_CHARS);
 	assert.ok(!prompt.includes("truncated"));
-	assert.match(prompt, /短对话/);
+	assert.match(prompt, /short conversation/);
 });
 
-test("EVALUATOR_SYSTEM_PROMPT: 声明无工具 + 三裁决 + JSON 输出", () => {
+test("EVALUATOR_SYSTEM_PROMPT: declares no tools + three verdicts + JSON output", () => {
 	assert.match(EVALUATOR_SYSTEM_PROMPT, /no tools/i);
 	assert.match(EVALUATOR_SYSTEM_PROMPT, /met/);
 	assert.match(EVALUATOR_SYSTEM_PROMPT, /not_met/);
@@ -52,24 +52,24 @@ test("EVALUATOR_SYSTEM_PROMPT: 声明无工具 + 三裁决 + JSON 输出", () =>
 // normalizeVerdict
 // =============================================================================
 
-test("normalizeVerdict: 三裁决的标准写法", () => {
+test("normalizeVerdict: the standard spellings of the three verdicts", () => {
 	assert.equal(normalizeVerdict("met"), "met");
 	assert.equal(normalizeVerdict("not_met"), "not_met");
 	assert.equal(normalizeVerdict("impossible"), "impossible");
 });
 
-test("normalizeVerdict: 大小写 / 空格 / 连字符 / 下划线都归一", () => {
+test("normalizeVerdict: case / spaces / hyphens / underscores all normalize", () => {
 	assert.equal(normalizeVerdict("MET"), "met");
 	assert.equal(normalizeVerdict(" Not Met "), "not_met");
 	assert.equal(normalizeVerdict("not-met"), "not_met");
 	assert.equal(normalizeVerdict("not met"), "not_met");
 });
 
-test("normalizeVerdict: CC prompt-hook 的 ok 写法也算 met", () => {
+test("normalizeVerdict: CC prompt-hook's ok spelling counts as met", () => {
 	assert.equal(normalizeVerdict("ok"), "met");
 });
 
-test("normalizeVerdict: 不认识的词返回 undefined（调用方 fail-open）", () => {
+test("normalizeVerdict: unrecognized words return undefined (callers fail open)", () => {
 	assert.equal(normalizeVerdict("maybe"), undefined);
 	assert.equal(normalizeVerdict(""), undefined);
 });
@@ -78,78 +78,78 @@ test("normalizeVerdict: 不认识的词返回 undefined（调用方 fail-open）
 // extractJsonObject
 // =============================================================================
 
-test("extractJsonObject: 裸 JSON", () => {
+test("extractJsonObject: bare JSON", () => {
 	assert.equal(extractJsonObject('{"verdict":"met"}'), '{"verdict":"met"}');
 });
 
-test("extractJsonObject: 包在 code fence 里", () => {
+test("extractJsonObject: wrapped in a code fence", () => {
 	assert.equal(extractJsonObject('```json\n{"verdict":"met","reason":"ok"}\n```'), '{"verdict":"met","reason":"ok"}');
 });
 
-test("extractJsonObject: 前后带杂字", () => {
-	assert.equal(extractJsonObject('好的，我的判定是 {"verdict":"met","reason":"ok"} 以上。'), '{"verdict":"met","reason":"ok"}');
+test("extractJsonObject: stray text before and after", () => {
+	assert.equal(extractJsonObject('Alright, my verdict is {"verdict":"met","reason":"ok"} — done.'), '{"verdict":"met","reason":"ok"}');
 });
 
-test("extractJsonObject: 字符串里的花括号不干扰配对", () => {
-	const text = '{"verdict":"not_met","reason":"需要跑 {test} 命令"}';
+test("extractJsonObject: braces inside strings do not disturb pairing", () => {
+	const text = '{"verdict":"not_met","reason":"need to run {test} command"}';
 	assert.equal(extractJsonObject(text), text);
 });
 
-test("extractJsonObject: 没有 JSON 返回 undefined", () => {
-	assert.equal(extractJsonObject("我觉得已经完成了"), undefined);
+test("extractJsonObject: no JSON returns undefined", () => {
+	assert.equal(extractJsonObject("I think it is done already"), undefined);
 });
 
 // =============================================================================
 // parseVerdict
 // =============================================================================
 
-test("parseVerdict: 标准回复", () => {
-	assert.deepEqual(parseVerdict('{"verdict":"not_met","reason":"测试还没跑"}'), {
+test("parseVerdict: a standard reply", () => {
+	assert.deepEqual(parseVerdict('{"verdict":"not_met","reason":"tests not run yet"}'), {
 		verdict: "not_met",
-		reason: "测试还没跑",
+		reason: "tests not run yet",
 	});
 });
 
-test("parseVerdict: 带 code fence 与前后杂字", () => {
-	const text = '判定如下：\n```json\n{"verdict": "met", "reason": "输出显示 34/34 通过"}\n```\n完毕';
-	assert.deepEqual(parseVerdict(text), { verdict: "met", reason: "输出显示 34/34 通过" });
+test("parseVerdict: with a code fence and stray text around", () => {
+	const text = 'Verdict as follows:\n```json\n{"verdict": "met", "reason": "output shows 34/34 passing"}\n```\nDone';
+	assert.deepEqual(parseVerdict(text), { verdict: "met", reason: "output shows 34/34 passing" });
 });
 
-test("parseVerdict: 缺 reason 时给占位（不因为少字段就 fail）", () => {
+test("parseVerdict: a missing reason gets a placeholder (does not fail over one field)", () => {
 	const parsed = parseVerdict('{"verdict":"impossible"}');
 	assert.equal(parsed?.verdict, "impossible");
 	assert.match(parsed?.reason ?? "", /provided no reason/);
 });
 
-test("parseVerdict: 空 reason 也给占位", () => {
+test("parseVerdict: an empty reason gets a placeholder too", () => {
 	const parsed = parseVerdict('{"verdict":"met","reason":"   "}');
 	assert.match(parsed?.reason ?? "", /provided no reason/);
 });
 
-test("parseVerdict: 超长 reason 截断到 1000 字符", () => {
-	const parsed = parseVerdict(JSON.stringify({ verdict: "not_met", reason: "长".repeat(3000) }));
+test("parseVerdict: an overlong reason is clipped to 1000 chars", () => {
+	const parsed = parseVerdict(JSON.stringify({ verdict: "not_met", reason: "long".repeat(3000) }));
 	assert.equal(parsed?.reason.length, 1000);
 });
 
-test("parseVerdict: verdict 不认识 → undefined（fail-open）", () => {
+test("parseVerdict: unrecognized verdict → undefined (fail-open)", () => {
 	assert.equal(parseVerdict('{"verdict":"perhaps","reason":"x"}'), undefined);
 });
 
-test("parseVerdict: 不是 JSON → undefined", () => {
-	assert.equal(parseVerdict("条件已经达成了"), undefined);
+test("parseVerdict: not JSON → undefined", () => {
+	assert.equal(parseVerdict("the condition is met"), undefined);
 });
 
-test("parseVerdict: 坏 JSON → undefined", () => {
+test("parseVerdict: broken JSON → undefined", () => {
 	assert.equal(parseVerdict('{"verdict":met,}'), undefined);
 });
 
-test("parseVerdict: 多个 JSON 对象取第一个", () => {
-	assert.deepEqual(parseVerdict('{"verdict":"met","reason":"ok"} 后面还有 {"a":1}'), {
+test("parseVerdict: multiple JSON objects → the first wins", () => {
+	assert.deepEqual(parseVerdict('{"verdict":"met","reason":"ok"} followed by {"a":1}'), {
 		verdict: "met",
 		reason: "ok",
 	});
 });
 
-test("parseVerdict: 顶层不是对象 → undefined", () => {
+test("parseVerdict: top level not an object → undefined", () => {
 	assert.equal(parseVerdict('["met"]'), undefined);
 });

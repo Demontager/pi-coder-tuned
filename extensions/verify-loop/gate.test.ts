@@ -1,5 +1,5 @@
 /**
- * gate.ts 的验证：纯判定，直接 `node --test`。
+ * Checks for gate.ts: pure judgment, directly `node --test`.
  *
  *   node --test clients/pi/extensions/verify-loop/gate.test.ts
  */
@@ -22,7 +22,7 @@ import {
 } from "./gate.ts";
 
 // =============================================================================
-// 构造投影消息的辅助函数
+// Helpers building projection messages
 // =============================================================================
 
 function user(text: string): GateMessage {
@@ -63,7 +63,7 @@ function config(overrides: Partial<GateConfig> = {}): GateConfig {
 	};
 }
 
-test("DEFAULT_VERIFY_PATTERN: 缺省是「任何 bash 都算」（undefined）", () => {
+test("DEFAULT_VERIFY_PATTERN: the default is \"any bash call counts\" (undefined)", () => {
 	assert.equal(DEFAULT_VERIFY_PATTERN, undefined);
 });
 
@@ -71,24 +71,24 @@ test("DEFAULT_VERIFY_PATTERN: 缺省是「任何 bash 都算」（undefined）",
 // findRunStart / scanRun
 // =============================================================================
 
-test("findRunStart: 最后一条 user 消息是窗口起点", () => {
+test("findRunStart: the last user message is the window start", () => {
 	const messages = [user("a"), assistantText("x"), user("b"), assistantText("y")];
 	assert.equal(findRunStart(messages), 2);
 });
 
-test("findRunStart: 没有 user 消息时整个投影都是窗口", () => {
+test("findRunStart: with no user message the whole projection is the window", () => {
 	const messages = [assistantText("x"), assistantText("y")];
 	assert.equal(findRunStart(messages), -1);
 });
 
-test("findRunStart: 注入的 custom 消息不算 user（续跑链共用一个窗口）", () => {
+test("findRunStart: injected custom messages are not user (the continuation chain shares one window)", () => {
 	const messages = [user("a"), assistantText("x"), injected("gate"), assistantText("y")];
 	assert.equal(findRunStart(messages), 0);
 });
 
-test("scanRun: 统计 mutation 与其后的验证", () => {
+test("scanRun: counts mutations and the verifications after them", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "node --test adapter/tests/*.test.js" } }),
@@ -99,9 +99,9 @@ test("scanRun: 统计 mutation 与其后的验证", () => {
 	assert.equal(scan.verificationsAfterLastMutation, 1);
 });
 
-test("scanRun: 验证在 mutation 之前不算数（FRESH evidence）", () => {
+test("scanRun: a verification before the mutation does not count (FRESH evidence)", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
 		toolResult(),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
@@ -111,9 +111,9 @@ test("scanRun: 验证在 mutation 之前不算数（FRESH evidence）", () => {
 	assert.equal(scan.verificationsAfterLastMutation, 0);
 });
 
-test("scanRun: 新 mutation 让之前的验证过期", () => {
+test("scanRun: a new mutation expires earlier verifications", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
@@ -126,21 +126,21 @@ test("scanRun: 新 mutation 让之前的验证过期", () => {
 	assert.equal(scan.verificationsAfterLastMutation, 0);
 });
 
-test("scanRun: 窗口外的改动不算（上一轮的事不为本次作证）", () => {
+test("scanRun: changes outside the window do not count (last turn's work cannot vouch for this one)", () => {
 	const messages = [
-		user("第一轮"),
+		user("round one"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
-		user("第二轮"),
-		assistantText("好的"),
+		user("round two"),
+		assistantText("ok"),
 	];
 	const scan = scanRun(messages);
 	assert.equal(scan.mutations.length, 0);
 });
 
-test("scanRun: bash 里的写操作不算 mutation（已知边界）", () => {
+test("scanRun: writes inside bash are not mutations (known boundary)", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "bash", args: { command: "sed -i '' 's/a/b/' src/a.js" } }),
 		toolResult(),
 	];
@@ -148,9 +148,9 @@ test("scanRun: bash 里的写操作不算 mutation（已知边界）", () => {
 	assert.equal(scan.mutations.length, 0);
 });
 
-test("scanRun: apply_patch / multiedit 也算 mutation（防未来/第三方注册）", () => {
+test("scanRun: apply_patch / multiedit count as mutations (future/third-party registrations)", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "apply_patch", args: {} }),
 		toolResult(),
 		assistantToolCalls({ name: "multiedit", args: { path: "src/c.js" } }),
@@ -166,12 +166,12 @@ test("scanRun: apply_patch / multiedit 也算 mutation（防未来/第三方注�
 // decideGate
 // =============================================================================
 
-test("decideGate: 改了文件没验证 → block", () => {
+test("decideGate: files changed, no verification → block", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 	];
 	const decision = decideGate(messages, config());
 	assert.equal(decision.action, "block");
@@ -182,127 +182,127 @@ test("decideGate: 改了文件没验证 → block", () => {
 	}
 });
 
-test("decideGate: 改完跑过验证 → pass", () => {
+test("decideGate: verification ran after the change → pass", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "node --test adapter/tests/*.test.js" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 	];
 	assert.equal(decideGate(messages, config()).action, "pass");
 });
 
-test("decideGate: 失败的验证也算跑过（证据已在上下文里）", () => {
+test("decideGate: a failed verification still counts (the evidence is in the context)", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
 		{ role: "toolResult", content: [{ type: "text", text: "Command exited with code 1" }] },
-		assistantText("测试挂了，我再看看"),
+		assistantText("the tests failed, checking again"),
 	];
 	assert.equal(decideGate(messages, config()).action, "pass");
 });
 
-test("decideGate: 没改文件 → pass（纯问答不拦）", () => {
-	const messages = [user("这段代码什么意思"), assistantText("解释如下")];
+test("decideGate: no files changed → pass (pure Q&A is not gated)", () => {
+	const messages = [user("what does this code do"), assistantText("here is the explanation")];
 	assert.equal(decideGate(messages, config()).action, "pass");
 });
 
-test("decideGate: 只改文档 → pass（默认排除 .md/.txt）", () => {
+test("decideGate: docs-only edits → pass (.md/.txt excluded by default)", () => {
 	const messages = [
-		user("更新文档"),
+		user("update docs"),
 		assistantToolCalls({ name: "edit", args: { path: "AGENTS.md" } }),
 		toolResult(),
-		assistantText("改好了"),
+		assistantText("done"),
 	];
 	assert.equal(decideGate(messages, config()).action, "pass");
 });
 
-test("decideGate: docExtensions 配空则文档也拦", () => {
+test("decideGate: an empty docExtensions also gates docs", () => {
 	const messages = [
-		user("更新文档"),
+		user("update docs"),
 		assistantToolCalls({ name: "edit", args: { path: "AGENTS.md" } }),
 		toolResult(),
-		assistantText("改好了"),
+		assistantText("done"),
 	];
 	assert.equal(decideGate(messages, config({ docExtensions: [] })).action, "block");
 });
 
-test("decideGate: mode=off → 永远 pass", () => {
+test("decideGate: mode=off → always pass", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 	];
 	assert.equal(decideGate(messages, config({ mode: "off" })).action, "pass");
 });
 
-test("decideGate: 已注入的 gate 消息达到上限 → 放行（CC 的 8 次强制放行）", () => {
+test("decideGate: enough injected gate messages → pass (CC's forced release)", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 		injected("gate"),
-		assistantText("还是完成了"),
+		assistantText("still done"),
 		injected("gate"),
-		assistantText("坚持完成"),
+		assistantText("insists done"),
 	];
 	assert.equal(decideGate(messages, config({ blockCap: 2 })).action, "pass");
 });
 
-test("decideGate: 已拦一次、又改了文件仍没验证 → 第二次 block", () => {
+test("decideGate: blocked once, files changed again without verification → a second block", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 		injected("gate"),
 		assistantToolCalls({ name: "edit", args: { path: "src/b.js" } }),
 		toolResult(),
-		assistantText("这次真完成了"),
+		assistantText("really done this time"),
 	];
 	const decision = decideGate(messages, config({ blockCap: 2 }));
 	assert.equal(decision.action, "block");
 	if (decision.action === "block") assert.equal(decision.attempt, 2);
 });
 
-test("decideGate: 自定义 verifyPattern 生效", () => {
+test("decideGate: a custom verifyPattern takes effect", () => {
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "src/a.py" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "./check.sh" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 	];
 	const custom = config({ verifyPattern: /check\.sh/i });
 	assert.equal(decideGate(messages, custom).action, "pass");
 });
 
-test("decideGate: 缺省口径下任何 bash 调用都算证据（2026-09-25 活体误报的回归）", () => {
-	// 模型改完 probe.js 跑的是 node -e 导入模块打印新值 —— 真证据，但不是测试形状。
+test("decideGate: under the default rule any bash call counts (regression for the 2026-09-25 live false positive)", () => {
+	// after editing probe.js the model ran a node -e import that printed the new value — real evidence, but no test-runner shape.
 	const messages = [
-		user("改一下"),
+		user("change it"),
 		assistantToolCalls({ name: "edit", args: { path: "probe.js" } }),
 		toolResult(),
 		assistantToolCalls({ name: "bash", args: { command: "node --input-type=module -e \"import('./probe.js').then(m => console.log(m.VALUE))\"" } }),
 		toolResult(),
-		assistantText("完成了"),
+		assistantText("done"),
 	];
-	assert.equal(decideGate(messages, config()).action, "pass", "缺省口径不应拦");
-	assert.equal(decideGate(messages, config({ verifyPattern: STRICT_VERIFY_PATTERN })).action, "block", "strict 口径会拦");
+	assert.equal(decideGate(messages, config()).action, "pass", "the default rule must not block");
+	assert.equal(decideGate(messages, config({ verifyPattern: STRICT_VERIFY_PATTERN })).action, "block", "the strict rule would block");
 });
 
-test("decideGate: strict 口径认测试/构建/lint 形状", () => {
+test("decideGate: the strict rule recognizes test/build/lint shapes", () => {
 	const strict = config({ verifyPattern: STRICT_VERIFY_PATTERN });
 	for (const command of ["node --test adapter/tests/*.test.js", "npm test", "pnpm run test", "pytest gateway/tests", "cargo test", "go build ./...", "tsc --noEmit", "eslint .", "make test"]) {
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
 			assistantToolCalls({ name: "bash", args: { command } }),
@@ -316,14 +316,14 @@ test("decideGate: strict 口径认测试/构建/lint 形状", () => {
 // countInjected / renderGateMessage
 // =============================================================================
 
-test("countInjected: 只数指定 kind 的注入消息", () => {
+test("countInjected: counts only injected messages of the given kind", () => {
 	const messages = [user("a"), injected("gate"), injected("goal-not-met"), injected("gate")];
 	assert.equal(countInjected(messages, "gate"), 2);
 	assert.equal(countInjected(messages, "goal-not-met"), 1);
 	assert.equal(countInjected(messages, "goal-met"), 0);
 });
 
-test("renderGateMessage: 带文件清单与次数", () => {
+test("renderGateMessage: carries the file list and the count", () => {
 	const text = renderGateMessage({
 		action: "block",
 		mutations: [

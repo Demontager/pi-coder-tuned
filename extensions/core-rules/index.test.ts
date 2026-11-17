@@ -1,11 +1,13 @@
 /**
- * core-rules 的验证：纯判定（decision.ts）直接测；注入链路**不 mock pi**，
- * 用 pi 自己的扩展加载器（`discoverAndLoadExtensions`）真加载 `index.ts`，
- * 再直接调用它注册的 `before_agent_start` handler，ctx 只给一个假的
- * `sessionManager.buildContextEntries()`。
+ * core-rules verification: the pure decision (decision.ts) is tested
+ * directly; the injection chain does **not mock pi** — pi's own extension
+ * loader (`discoverAndLoadExtensions`) really loads `index.ts`, then its
+ * registered `before_agent_start` handler is called directly, with ctx
+ * giving only a fake `sessionManager.buildContextEntries()`.
  *
- * 需要本机装过 pi；找不到库入口就整体 skip，不假装通过
- * （harness 与 auto-default-model/default-model.test.ts 同源）。
+ * Requires a local pi install; no library entry → skip wholesale, never
+ * fake a pass (the harness shares its origin with
+ * auto-default-model/default-model.test.ts).
  *
  *   node --test clients/pi/extensions/core-rules/index.test.ts
  */
@@ -22,42 +24,44 @@ import { decideInjection, renderBody, REPLACEMENT_NOTICE } from "./decision.ts";
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 
 // =============================================================================
-// 纯判定（decision.ts）
+// the pure decision (decision.ts)
 // =============================================================================
 
-test("decideInjection: 文件缺失 → 静默跳过", () => {
+test("decideInjection: file missing → silently skip", () => {
 	assert.deepEqual(decideInjection(undefined, []), { action: "skip", reason: "no-rules-file" });
 	assert.deepEqual(decideInjection(undefined, ["abc"]), { action: "skip", reason: "no-rules-file" });
 });
 
-test("decideInjection: 空投影（会话开始 / 已被压缩掉）→ 注入，不带替换声明", () => {
+test("decideInjection: an empty projection (session start / compacted away) → inject without the replacement notice", () => {
 	assert.deepEqual(decideInjection("abc", []), { action: "inject", replacement: false });
 });
 
-test("decideInjection: 最新 hash 相同 → 跳过", () => {
+test("decideInjection: the newest hash matches → skip", () => {
 	assert.deepEqual(decideInjection("abc", ["old", "abc"]), { action: "skip", reason: "unchanged" });
 });
 
-test("decideInjection: hash 变了 → 带替换声明重注入", () => {
+test("decideInjection: the hash changed → re-inject with the replacement notice", () => {
 	assert.deepEqual(decideInjection("new", ["old"]), { action: "inject", replacement: true });
 });
 
-test("decideInjection: 前文存在但 hash 不可知（旧格式条目）→ 保守重注入", () => {
+test("decideInjection: a prior entry exists but its hash is unknowable (old format) → conservative re-injection", () => {
 	assert.deepEqual(decideInjection("abc", [undefined]), { action: "inject", replacement: true });
 });
 
-test("renderBody: 替换声明只拼在重注入时", () => {
+test("renderBody: the replacement notice is prepended only on re-injection", () => {
 	assert.equal(renderBody("RULES", false), "RULES");
 	assert.equal(renderBody("RULES", true), `${REPLACEMENT_NOTICE}\n\nRULES`);
 });
 
 // =============================================================================
-// 经 pi loader 的真链路
+// the real chain through pi's loader
 // =============================================================================
 
 /**
- * pi 的库入口（非 CLI）：先从 `pi` 可执行文件的 shim 反查真正安装位置，
- * 再退回 `~/.pi/agent/npm/node_modules/` 那份副本；判定方式是**能不能真 import**。
+ * pi's library entry (not the CLI): first back-trace the `pi` executable's
+ * shim to the real install location, then fall back to the
+ * `~/.pi/agent/npm/node_modules/` copy; the check is **whether it really
+ * imports**.
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -70,13 +74,13 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -89,18 +93,18 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
 }
 
 const piEntry = await findPiLibraryEntry();
-const skip = piEntry === undefined ? "找不到本机 pi 的库入口（装过 pi 才有）" : false;
+const skip = piEntry === undefined ? "could not find the local pi library entry (requires an installed pi)" : false;
 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
 
-/** 真加载扩展，返回它注册的 before_agent_start handler（可能不存在）。 */
+/** Really load the extension, returning its registered before_agent_start handler (it may not exist). */
 async function loadHandler(agentDir: string): Promise<Handler | undefined> {
 	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
 		discoverAndLoadExtensions: (
@@ -110,8 +114,8 @@ async function loadHandler(agentDir: string): Promise<Handler | undefined> {
 		) => Promise<{ extensions: Array<{ handlers: Map<string, Handler[]> }>; errors: Array<{ path: string; error: string }> }>;
 	};
 	const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], agentDir, agentDir);
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
-	assert.equal(loaded.extensions.length, 1, "应该只加载到 core-rules 这一个扩展");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
+	assert.equal(loaded.extensions.length, 1, "only the core-rules extension should load");
 	return loaded.extensions[0]?.handlers.get("before_agent_start")?.[0];
 }
 
@@ -121,7 +125,7 @@ function makeAgentDir(rulesText?: string): { agentDir: string; cleanup: () => vo
 	return { agentDir, cleanup: () => fs.rmSync(agentDir, { recursive: true, force: true }) };
 }
 
-/** 驱动一次 before_agent_start；entries 是假的模型可见投影。 */
+/** Drive one before_agent_start; entries is a fake model-visible projection. */
 async function run(handler: Handler, entries: unknown[]): Promise<unknown> {
 	return handler(
 		{ type: "before_agent_start", prompt: "test", systemPromptOptions: {} },
@@ -129,13 +133,13 @@ async function run(handler: Handler, entries: unknown[]): Promise<unknown> {
 	);
 }
 
-/** 投影里一条 core-rules custom_message 条目。 */
+/** One core-rules custom_message entry inside the projection. */
 function coreRulesEntry(hash?: string): Record<string, unknown> {
 	return { type: "custom_message", customType: "core-rules", content: "...", display: false, details: hash === undefined ? {} : { hash } };
 }
 
 test(
-	"空投影 → 注入规则全文（无替换声明），details 带 hash",
+	"an empty projection → inject the full rules text (no replacement notice), details carry the hash",
 	{ skip },
 	async () => {
 		const { agentDir, cleanup } = makeAgentDir("# RULES\nbe safe");
@@ -143,9 +147,9 @@ test(
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		try {
 			const handler = await loadHandler(agentDir);
-			assert.ok(handler, "扩展应该注册了 before_agent_start handler");
+			assert.ok(handler, "the extension should register a before_agent_start handler");
 			const result = (await run(handler, [])) as { message?: Record<string, unknown> } | undefined;
-			assert.ok(result?.message, "空投影应该注入");
+			assert.ok(result?.message, "an empty projection should inject");
 			assert.equal(result.message.customType, "core-rules");
 			assert.equal(result.message.display, false);
 			assert.equal(result.message.content, "# RULES\nbe safe");
@@ -159,7 +163,7 @@ test(
 );
 
 test(
-	"投影里已有同 hash → 跳过",
+	"a same-hash entry already in the projection → skip",
 	{ skip },
 	async () => {
 		const text = "# RULES\nbe safe";
@@ -172,7 +176,7 @@ test(
 			const { createHash } = await import("node:crypto");
 			const hash = createHash("sha256").update(text).digest("hex").slice(0, 16);
 			const result = await run(handler, [{ type: "user", content: "hi" }, coreRulesEntry(hash)]);
-			assert.equal(result, undefined, "同 hash 不应重复注入");
+			assert.equal(result, undefined, "a same hash must not inject twice");
 		} finally {
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -182,7 +186,7 @@ test(
 );
 
 test(
-	"hash 变了 → 带替换声明重注入",
+	"the hash changed → re-inject with the replacement notice",
 	{ skip },
 	async () => {
 		const { agentDir, cleanup } = makeAgentDir("# RULES v2");
@@ -192,10 +196,10 @@ test(
 			const handler = await loadHandler(agentDir);
 			assert.ok(handler);
 			const result = (await run(handler, [coreRulesEntry("stalehash0000000")])) as { message?: Record<string, unknown> } | undefined;
-			assert.ok(result?.message, "hash 变更应该重注入");
+			assert.ok(result?.message, "a changed hash should re-inject");
 			assert.ok(
 				String(result.message.content).startsWith(REPLACEMENT_NOTICE + "\n\n"),
-				"重注入必须带替换声明",
+				"the re-injection must carry the replacement notice",
 			);
 			assert.ok(String(result.message.content).endsWith("# RULES v2"));
 		} finally {
@@ -207,16 +211,16 @@ test(
 );
 
 test(
-	"规则文件缺失 → 静默跳过",
+	"rules file missing → silently skip",
 	{ skip },
 	async () => {
-		const { agentDir, cleanup } = makeAgentDir(); // 不写 AGENTS.core.md
+		const { agentDir, cleanup } = makeAgentDir(); // no AGENTS.core.md written
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		try {
 			const handler = await loadHandler(agentDir);
 			assert.ok(handler);
-			assert.equal(await run(handler, []), undefined, "文件缺失不应注入");
+			assert.equal(await run(handler, []), undefined, "a missing file must not inject");
 		} finally {
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -226,7 +230,7 @@ test(
 );
 
 test(
-	"PI_CORE_RULES=off → 不注册 handler",
+	"PI_CORE_RULES=off → no handler is registered",
 	{ skip },
 	async () => {
 		const { agentDir, cleanup } = makeAgentDir("# RULES");
@@ -236,7 +240,7 @@ test(
 		process.env.PI_CORE_RULES = "off";
 		try {
 			const handler = await loadHandler(agentDir);
-			assert.equal(handler, undefined, "off 时不应注册 before_agent_start handler");
+			assert.equal(handler, undefined, "with off, no before_agent_start handler should be registered");
 		} finally {
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

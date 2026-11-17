@@ -1,74 +1,82 @@
 /**
- * plan-doc.ts — 计划文档的**路径生成**（纯逻辑，不 import pi / pi-tui / node:fs）。
+ * plan-doc.ts — the plan document's **path generation** (pure logic; no pi / pi-tui / node:fs).
  *
- * 文档正文由模型自己写（探索到的背景、文件结构、验证方式只存在于它的上下文里，
- * 扩展代写只能得到一份和任务清单一样薄的东西）。本模块只负责回答一个问题：
- * **写到哪个文件**。
+ * The document body is written by the model itself (the explored background, file structure,
+ * and verification approaches exist only in its context — an extension-written doc could only
+ * be as thin as a task list). This module answers exactly one question: **which file to
+ * write to**.
  *
- * ## 约定
+ * ## Convention
  *
  *   <cwd>/.pi/plans/YYYY-MM-DD-<slug>.md
  *
- *   - `.pi/plans/`：pi 专用，与已被 git 跟踪的 `.claude/plans/`（Claude Code 的计划）
- *     语义分开；`docs/` 是「冻结产物、非生成目录」，动态计划文档不放那里。
- *   - 日期用**本地日历**（与 usage-report.js 的口径一致），同一天多份计划靠 slug 区分。
- *   - slug 取 `exit_plan_mode` 的 `slug` 参数（模型给的英文短名，如 `m5-entity-runtime`）；
- *     缺省或清洗后为空时退回 `plan`。
- *   - 撞名（同一天同一个 slug）追加 `-2` / `-3`，而不是覆盖 —— 覆盖会毁掉上一份计划。
+ *   - `.pi/plans/`: pi-specific, semantically separate from the git-tracked `.claude/plans/`
+ *     (Claude Code's plans); `docs/` is "frozen artifacts, not a generated directory", so
+ *     dynamic plan documents do not go there.
+ *   - The date uses the **local calendar** (same convention as usage-report.js); same-day
+ *     plans are distinguished by slug.
+ *   - The slug comes from `exit_plan_mode`'s `slug` parameter (the model's short English name,
+ *     e.g. `m5-entity-runtime`); absent or cleaned-to-empty falls back to `plan`.
+ *   - A name collision (same day, same slug) appends `-2` / `-3` instead of overwriting —
+ *     overwriting would destroy the previous plan.
  *
- * ## 为什么 `exists` 是注入的
+ * ## Why `exists` is injected
  *
- * 撞名判定必须问文件系统，但本模块要保持纯逻辑好单测（与 plan.ts / plan-text.ts 同一条
- * 规矩）。调用方传 `existsSync` 即可；单测传一个假实现就能覆盖 `-2` / `-3` 分支。
+ * The collision check must ask the filesystem, but this module stays pure for testability
+ * (same rule as plan.ts / plan-text.ts). The caller passes `existsSync`; tests pass a fake to
+ * cover the `-2` / `-3` branches.
  *
- * ## slug 为什么是「纯英文 kebab-case」
+ * ## Why the slug is "plain English kebab-case"
  *
- * 文件名要短、要能一眼看出是哪次规划。中文长句塞进文件名会变成一百多列的路径
- * （实测踩过：`2026-09-24-两个问题的真因都已实测定位：反复弹框是因为批准按-…md`），
- * 在终端里既截不断也读不了。有意义的英文短名只能由模型给（纯逻辑不做翻译/音译），
- * 所以 `exit_plan_mode` 要求一个 `slug` 参数，本模块只负责把它**清洗**成安全形状：
- * 小写、`[a-z0-9]` 之外的字符（含 CJK、标点、空格、路径分隔符、控制字符）一律折成 `-`。
+ * The filename must be short and scannable. A long Chinese sentence stuffed into a filename
+ * becomes a hundred-plus-column path (hit for real:
+ * `2026-09-24-<a long Chinese plan title>…md`) — neither truncatable nor readable in a
+ * terminal. A meaningful short English name can only come from the model (pure logic does no
+ * translating/transliterating), so `exit_plan_mode` requires a `slug` parameter and this
+ * module only **cleans** it into a safe shape: lowercase, and every character outside
+ * `[a-z0-9]` (incl. CJK, punctuation, spaces, path separators, control chars) folds to `-`.
  *
- * 这条规则同时就是安全边界：`/` `\` 被折掉，所以借 slug 写不到 `.pi/plans/` 之外；
- * 开头的 `.` 被剥掉，所以 `..` 跳不出去、`.foo.md` 也不会变成隐藏文件。清洗后为空
- * 一律退回 `plan`，绝不产出 `.pi/plans/2026-09-24-.md` 这种残缺名。
+ * That rule doubles as the security boundary: `/` `\` fold away, so a slug cannot write
+ * outside `.pi/plans/`; leading `.` is stripped, so `..` cannot escape and `.foo.md` does not
+ * become a hidden file. An empty result falls back to `plan` — never a broken name like
+ * `.pi/plans/2026-09-24-.md`.
  */
 
 import { join } from "node:path";
 
-/** 计划文档目录（相对 cwd）。 */
+/** The plan-document directory (relative to cwd). */
 export const PLAN_DOC_DIR = ".pi/plans";
 
-/** slug 的最大长度（按码点算）。 */
+/** Max slug length (in code points). */
 export const MAX_SLUG_LENGTH = 60;
 
-/** 撞名后缀的上限；超过就退回时间戳，保证一定能产出一个可用路径。 */
+/** Cap on the collision suffix; past it, fall back to a timestamp — a usable path is guaranteed. */
 const MAX_COLLISION_SUFFIX = 99;
 
-/** 清洗后什么都不剩时用的兜底 slug。 */
+/** The fallback slug when cleaning leaves nothing. */
 const FALLBACK_SLUG = "plan";
 
 /**
- * slug 里保留的字符：小写字母与数字。其余（CJK、标点、空白、路径分隔符、控制字符）
- * 统一折成 `-`。
+ * Characters kept in a slug: lowercase letters and digits. Everything else (CJK, punctuation,
+ * whitespace, path separators, control chars) folds to `-`.
  */
 const KEEP_CHARS = /[^a-z0-9]+/g;
 
 export interface PlanDocPathOptions {
-	/** 工作目录（`ctx.cwd`）。 */
+	/** The working directory (`ctx.cwd`). */
 	cwd: string;
-	/** `exit_plan_mode` 的 `slug`（英文短名）；缺省或清洗后为空则用兜底 slug。 */
+	/** `exit_plan_mode`'s `slug` (the short English name); absent or cleaned-to-empty uses the fallback slug. */
 	slug?: string;
-	/** 当前时间，默认 `new Date()`；单测注入固定值。 */
+	/** The current time, default `new Date()`; tests inject a fixed value. */
 	now?: Date;
 	/**
-	 * 候选路径是否已被占用。调用方传 `existsSync`；不传则不做撞名处理
-	 * （单测里想覆盖 `-2` 分支必须显式传）。
-	 */
+ * Whether a candidate path is already taken. The caller passes `existsSync`; omitting it skips
+ * collision handling (tests covering the `-2` branch must pass it explicitly).
+ */
 	exists?: (path: string) => boolean;
 }
 
-/** 计划文档的绝对路径。 */
+/** The plan document's absolute path. */
 export function buildPlanDocPath(options: PlanDocPathOptions): string {
 	const now = options.now ?? new Date();
 	const dir = join(options.cwd, ...PLAN_DOC_DIR.split("/"));
@@ -84,18 +92,19 @@ export function buildPlanDocPath(options: PlanDocPathOptions): string {
 		if (!options.exists(candidate)) return candidate;
 	}
 
-	// 99 份同名计划：极端情况，用时分秒兜底，仍然不覆盖任何已有文件
+	// 99 same-named plans: extreme case — fall back to hour-min-sec, still never overwriting an existing file
 	const stamp = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 	return join(dir, `${base}-${stamp}.md`);
 }
 
 /**
- * 从模型给的 `slug` 生成文件名 slug（纯英文 kebab-case）。
+ * Build the filename slug from the model's `slug` (plain English kebab-case).
  *
- * 步骤：markdown 行内包装去掉 → 转小写 → 非 `[a-z0-9]` 的字符折成 `-` →
- * 折叠连续 `-` → 首尾的 `-` 与 `.` 剥掉 → 按码点截断 → 空则兜底。
- * CJK 会被整段折掉：`"修复 m5 entity runtime"` → `m5-entity-runtime`，
- * 纯中文则退回 `plan`。
+ * Steps: strip markdown inline wrappers → lowercase → fold non-`[a-z0-9]` chars to `-` →
+ * collapse consecutive `-` → strip leading/trailing `-` and `.` → truncate by code points →
+ * fall back when empty.
+ * CJK folds away in whole runs: `"fix the m5 entity runtime"` → `m5-entity-runtime`,
+ * an all-Chinese slug falls back to `plan`.
  */
 export function planDocSlug(slug: string | undefined): string {
 	if (typeof slug !== "string") return FALLBACK_SLUG;
@@ -113,7 +122,7 @@ export function planDocSlug(slug: string | undefined): string {
 	return truncateByCodePoints(cleaned, MAX_SLUG_LENGTH).replace(/[-.]+$/, "") || FALLBACK_SLUG;
 }
 
-/** 本地日历日期 `YYYY-MM-DD`（不是 UTC —— 跨时区的会话里日期会差一天）。 */
+/** Local calendar date `YYYY-MM-DD` (not UTC — a cross-timezone session's date may differ by a day). */
 export function localDateString(now: Date): string {
 	return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
@@ -122,7 +131,7 @@ function pad(value: number): string {
 	return value < 10 ? `0${value}` : String(value);
 }
 
-/** 按码点截断（`slice` 会把代理对劈成半个字符，emoji 会坏）。 */
+/** Truncate by code points (`slice` splits a surrogate pair into half a char — emoji would break). */
 function truncateByCodePoints(text: string, max: number): string {
 	const points = [...text];
 	return points.length <= max ? text : points.slice(0, max).join("");

@@ -14,14 +14,14 @@ import {
 	sectionTitleOfLine,
 } from "./loaded-sections.ts";
 
-/** 最小可用的假组件 / 假容器：形状照着 pi-tui 的 Container / Text / Spacer 来。 */
+/** The minimal fake component / container — shaped after pi-tui's Container / Text / Spacer. */
 class FakeSection {
 	name: string;
 	constructor(name: string) {
 		this.name = name;
 	}
 	render(_width: number): string[] {
-		return [`\u001b[38;2;121;214;193m[${this.name}]\u001b[39m`, `  ${this.name} 的内容`, ""];
+		return [`\u001b[38;2;121;214;193m[${this.name}]\u001b[39m`, `  ${this.name}'s content`, ""];
 	}
 }
 
@@ -37,7 +37,7 @@ class FakeText {
 		this.text = text;
 	}
 	render(_width: number): string[] {
-		// pi-tui 的 Text 对空串返回空数组（不是 [""]），这里照抄这个细节
+		// pi-tui's Text returns an empty array for an empty string (not [""]) — that detail is mirrored here
 		return this.text ? [this.text] : [];
 	}
 }
@@ -52,9 +52,9 @@ class FakeContainer {
 	}
 }
 
-/** 照 `showLoadedResources` 的顺序把一整份清单填进容器。 */
+/** Fill a whole listing into the container in `showLoadedResources`'s order. */
 function fillLoadedResources(container: FakeContainer, names: readonly string[] = ["Context", "Skills", "Prompts", "Extensions", "Themes"]): void {
-	container.addChild(new FakeSpacer()); // [Context] 前面那个额外空行
+	container.addChild(new FakeSpacer()); // the extra blank row before [Context]
 	for (const name of names) {
 		container.addChild(new FakeSection(name));
 		container.addChild(new FakeSpacer());
@@ -66,18 +66,18 @@ const titlesIn = (container: FakeContainer): string[] =>
 		.map((child) => sectionTitleOfLine((child as FakeSection).render(80)[0]))
 		.filter((title): title is string => title !== undefined);
 
-test("sectionTitleOfLine：只认 `[Name]` 整行，ANSI 不参与", () => {
+test("sectionTitleOfLine: only a whole `[Name]` row counts — ANSI plays no part", () => {
 	assert.equal(sectionTitleOfLine("\u001b[36m[Context]\u001b[39m"), "Context");
 	assert.equal(sectionTitleOfLine("  [Prompts]  "), "Prompts");
 	assert.equal(sectionTitleOfLine("[Skill conflicts]"), "Skill conflicts");
-	assert.equal(sectionTitleOfLine("[Context] 三个文件"), undefined);
+	assert.equal(sectionTitleOfLine("[Context] three files"), undefined);
 	assert.equal(sectionTitleOfLine("[[Context]]"), undefined);
 	assert.equal(sectionTitleOfLine(""), undefined);
 	assert.equal(sectionTitleOfLine(undefined), undefined);
 	assert.equal(sectionTitleOfLine(42), undefined);
 });
 
-test("isHiddenSection / isBlankLineComponent：只看第一行，渲染抛错只当「不是」", () => {
+test("isHiddenSection / isBlankLineComponent: only the first row is read; a render throw just counts as \"no\"", () => {
 	assert.equal(isHiddenSection(new FakeSection("Context")), true);
 	assert.equal(isHiddenSection(new FakeSection("Prompts")), true);
 	assert.equal(isHiddenSection(new FakeSection("Themes")), true);
@@ -95,23 +95,23 @@ test("isHiddenSection / isBlankLineComponent：只看第一行，渲染抛错只
 	);
 	assert.equal(isHiddenSection(undefined), false);
 	assert.equal(isBlankLineComponent(new FakeSpacer()), true);
-	assert.equal(isBlankLineComponent(new FakeText("")), false, "空 Text 渲染出 []，不是 spacer 形状");
+	assert.equal(isBlankLineComponent(new FakeText("")), false, "an empty Text renders [], not a spacer shape");
 	assert.equal(isBlankLineComponent(new FakeSection("Skills")), false);
 	assert.equal(isBlankLineComponent({ render: () => [""] }), true);
 });
 
-test("addChild 接管：被隐藏的三段连同各自的分隔空行都进不去", () => {
+test("the addChild takeover: the three hidden sections and their separator blanks never enter", () => {
 	const container = new FakeContainer();
 	assert.equal(installHiddenSectionPruner({ container }) !== undefined, true);
 	fillLoadedResources(container);
 
 	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
-	// 前面那个空行 + [Skills]、[Extensions] 各自的分隔空行
+	// the leading blank + the separator blanks after [Skills] and [Extensions]
 	assert.equal(container.children.length, 5);
 	assert.deepEqual(container.children.map((child) => child instanceof FakeSpacer), [true, false, true, false, true]);
 });
 
-test("addChild 接管：非 `[x]` 形状、渲染抛错、非对象的 child 一律放行", () => {
+test("the addChild takeover: non-`[x]` shapes, throwing renders, and non-object children all pass through", () => {
 	const container = new FakeContainer();
 	installHiddenSectionPruner({ container });
 	const throwing = {
@@ -119,15 +119,15 @@ test("addChild 接管：非 `[x]` 形状、渲染抛错、非对象的 child 一
 			throw new Error("boom");
 		},
 	};
-	const plainText = new FakeText("[Context] 这三个文件");
+	const plainText = new FakeText("[Context] these three files");
 	container.addChild(throwing);
 	container.addChild(plainText);
-	container.addChild("裸字符串");
+	container.addChild("a bare string");
 	container.addChild(new FakeText(""));
-	assert.deepEqual(container.children, [throwing, plainText, "裸字符串", container.children[3]]);
+	assert.deepEqual(container.children, [throwing, plainText, "a bare string", container.children[3]]);
 });
 
-test("addChild 接管：只有被剪掉的段才吃后面的空行，普通段后面照常", () => {
+test("the addChild takeover: only a pruned section eats its following blank — an ordinary section's stays", () => {
 	const container = new FakeContainer();
 	installHiddenSectionPruner({ container });
 	container.addChild(new FakeSection("Skills"));
@@ -139,7 +139,7 @@ test("addChild 接管：只有被剪掉的段才吃后面的空行，普通段�
 	assert.equal(container.children.length, 3);
 });
 
-test("pruneHiddenSections：装晚了（清单已填好）也能剪干净", () => {
+test("pruneHiddenSections: installed late (listing already filled) still prunes cleanly", () => {
 	const container = new FakeContainer();
 	fillLoadedResources(container);
 	assert.equal(container.children.length, 11); // 1 + 5×2
@@ -148,7 +148,7 @@ test("pruneHiddenSections：装晚了（清单已填好）也能剪干净", () =
 	assert.equal(container.children.length, 5);
 });
 
-test("pruneHiddenSections：没有任何隐藏段时原样返回 0", () => {
+test("pruneHiddenSections: no hidden sections → 0, unchanged", () => {
 	const container = new FakeContainer();
 	fillLoadedResources(container, ["Skills", "Extensions"]);
 	const before = [...container.children];
@@ -158,12 +158,12 @@ test("pruneHiddenSections：没有任何隐藏段时原样返回 0", () => {
 	assert.equal(pruneHiddenSections({}), 0);
 });
 
-test("installHiddenSectionPruner：装晚了先剪一遍已有内容，之后新加的也进不去", () => {
+test("installHiddenSectionPruner: late install first prunes existing content; new additions still never enter", () => {
 	const container = new FakeContainer();
 	fillLoadedResources(container);
 	installHiddenSectionPruner({ container });
 	assert.deepEqual(titlesIn(container), ["Skills", "Extensions"]);
-	// /reload：clear() 之后重新填一份清单
+	// /reload: after clear(), fill a fresh listing
 	container.children = [];
 	container.addChild(new FakeSpacer());
 	container.addChild(new FakeSection("Context"));
@@ -172,39 +172,39 @@ test("installHiddenSectionPruner：装晚了先剪一遍已有内容，之后新
 	assert.deepEqual(titlesIn(container), ["Skills"]);
 });
 
-test("接管幂等：重复安装不叠 wrapper，旧 release 不拆新 wrapper，release 后恢复原状", () => {
+test("the takeover is idempotent: repeat installs stack no wrappers, an old release cannot tear down the new one, release restores the original", () => {
 	const container = new FakeContainer();
 	const release1 = installHiddenSectionPruner({ container });
 	assert.equal(typeof release1, "function");
 	const release2 = installHiddenSectionPruner({ container });
 	assert.equal(typeof release2, "function");
 
-	// 第二次安装已经顶掉了第一次：再调旧 release 也不能把新 wrapper 拆掉
+	// the second install already replaced the first: calling the old release must not tear down the new wrapper
 	release1!();
 	container.addChild(new FakeSection("Context"));
-	assert.deepEqual(titlesIn(container), [], "旧 release 不应动到新接管");
+	assert.deepEqual(titlesIn(container), [], "an old release must not touch the new takeover");
 
 	assert.equal(releaseHiddenSectionPruner(container), true);
 	release2!();
 	assert.equal(releaseHiddenSectionPruner(container), false);
 
-	// 解除之后新加的段不再被剪（等价于 pi-tui Container 的原始 addChild）
+	// after release, newly added sections are no longer pruned (equivalent to pi-tui Container's original addChild)
 	container.addChild(new FakeSection("Context"));
 	assert.deepEqual(titlesIn(container), ["Context"]);
 });
 
-test("接管记录挂在符号键上：别的实例能解除旧的接管", () => {
+test("the takeover record hangs on the symbol key: another instance can release the old one", () => {
 	const container = new FakeContainer();
 	installHiddenSectionPruner({ container });
 	assert.equal(typeof (container as { [SECTION_PRUNER_KEY]?: unknown })[SECTION_PRUNER_KEY], "object");
-	// 模拟 /reload：新实例只拿到容器对象也要能清掉旧 wrapper
+	// simulating /reload: a new instance with only the container must still clear the old wrapper
 	assert.equal(releaseHiddenSectionPruner(container), true);
 	assert.equal((container as { [SECTION_PRUNER_KEY]?: unknown })[SECTION_PRUNER_KEY], undefined);
 	const container2 = new FakeContainer();
 	assert.equal(releaseHiddenSectionPruner(container2), false);
 });
 
-test("findLoadedResourcesContainer：按 header 容器的下一个兄弟容器认，认不出返回 undefined", () => {
+test("findLoadedResourcesContainer: identified as the header container's next sibling — undefined when unrecognizable", () => {
 	const headerContainer = new FakeContainer();
 	const loadedResources = new FakeContainer();
 	const chatContainer = new FakeContainer();
@@ -215,18 +215,18 @@ test("findLoadedResourcesContainer：按 header 容器的下一个兄弟容器�
 	const root = { children: [document] };
 
 	assert.equal(findLoadedResourcesContainer({ root, headerContainer }), loadedResources);
-	// header 容器自己不在树里 → 认不出
+	// the header container not in the tree → cannot be found
 	assert.equal(findLoadedResourcesContainer({ root, headerContainer: new FakeContainer() }), undefined);
 	assert.equal(findLoadedResourcesContainer({ root, headerContainer: undefined }), undefined);
-	// 兄弟不是容器形状 → 认不出
+	// the sibling is not container-shaped → cannot be found
 	const oddHeader = new FakeContainer();
 	const oddDocument = new FakeContainer();
 	oddDocument.addChild(oddHeader);
-	oddDocument.addChild({ 不是容器: true });
+	oddDocument.addChild({ notAContainer: true });
 	assert.equal(findLoadedResourcesContainer({ root: { children: [oddDocument] }, headerContainer: oddHeader }), undefined);
 });
 
-test("hideLoadedSections：整条链路（找容器 → 接管 → 填清单）", () => {
+test("hideLoadedSections: the whole chain (find the container → take over → fill the listing)", () => {
 	const headerContainer = new FakeContainer();
 	const loadedResources = new FakeContainer();
 	const document = new FakeContainer();
@@ -238,9 +238,9 @@ test("hideLoadedSections：整条链路（找容器 → 接管 → 填清单）"
 	fillLoadedResources(loadedResources);
 	assert.deepEqual(titlesIn(loadedResources), ["Skills", "Extensions"]);
 
-	// 找不到容器时返回 false，什么都不改
+	// finding no container returns false and changes nothing
 	assert.equal(hideLoadedSections({ root, headerContainer: new FakeContainer() }), false);
-	// 自定义隐藏名单
+	// a custom hidden-name list
 	const other = new FakeContainer();
 	const otherHeader = new FakeContainer();
 	const otherDocument = new FakeContainer();
@@ -251,7 +251,7 @@ test("hideLoadedSections：整条链路（找容器 → 接管 → 填清单）"
 	assert.deepEqual(titlesIn(other), ["Context", "Prompts", "Extensions", "Themes"]);
 });
 
-test("默认隐藏名单就是 Context / Prompts / Themes，判定宽度是个常规值", () => {
+test("the default hidden list is Context / Prompts / Themes, and the detection width is a normal value", () => {
 	assert.deepEqual(HIDDEN_SECTION_NAMES, ["Context", "Prompts", "Themes"]);
-	assert.ok(DETECT_WIDTH >= 80, "标题行 `[Context]` 只有 9 列，判定宽度够宽就行");
+	assert.ok(DETECT_WIDTH >= 80, "the title row `[Context]` is only 9 columns — the detection width just needs to be wide enough");
 });

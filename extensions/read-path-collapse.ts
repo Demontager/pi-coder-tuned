@@ -1,121 +1,159 @@
 /**
- * read-path-collapse — read 工具调用标题行的路径压缩：**永远一行**，超宽时用 `…` 前缀
- * 表示被省略的前缀，把**文件名尾部**显示完整。
+ * read-path-collapse — compresses the read tool's title-row path: **always one line**;
+ * on overflow a `…` prefix marks the elided prefix and the **filename tail** stays whole.
  *
- * 要解决的问题：pi 内置 read 的标题行是 `read <路径>:<行号>`，路径由 pi-tui 的
- * `Text`（`wrapTextWithAnsi`）折行 —— 那是**贪心词折行**，装不进当前行剩余空间的词会被
- * **整块挑到下一行**再去断。长路径是一整个「词」（中间没有空格），于是实测 79 列终端上
+ * The problem it solves: pi's built-in read title is `read <path>:<lines>` and the path
+ * wraps via pi-tui's `Text` (`wrapTextWithAnsi`) — a **greedy word wrap** that bumps a
+ * word not fitting the current line's leftover space **whole** to the next line before
+ * breaking it. A long path is one whole "word" (no spaces inside), so on a measured
+ * 79-column terminal
  *
  *     read
  *     ~/.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:62-116
  *
- * 会渲成 `read` 单独一行（首行只有 4 列、行尾白白空着七十多列）+ 路径从中间断成两截。
- * 和 `bash-command-collapse.ts` 里 `$ cp <78 列路径>` 那个「提前折行」是同一个根因，
- * 只是 bash 那边选择 break-all 硬折行（命令正文要尽量完整可见），这里选择**压缩到一行**：
- * 路径的信息量集中在**尾部**（文件名 + 最后几级目录），前面的 `~/.pi/agent/npm/...`
- * 那串前缀谁都知道，宁可省掉前缀也不要占两行。
+ * renders as `read` alone on one line (4 columns used, seventy wasted) plus the path
+ * split in two from the middle. Same root cause as the "early wrap" of `$ cp <78-col
+ * path>` in `bash-command-collapse.ts`; there bash chose break-all hard wrapping (the
+ * command text should stay as complete as possible), here the choice is **compress to one
+ * line**: a path's information concentrates in the **tail** (filename + last few dirs) —
+ * the `~/.pi/agent/npm/...` prefix is known to everyone, so dropping the prefix beats
+ * taking two rows.
  *
- * ## 结果形态
+ * ## The result shape
  *
  *     Read …@earendil-works/pi-coding-agent/dist/core/extensions/loader.js:62-116
  *
- * - `Read ` 前缀（`toolTitle` 色 + 粗体）与 `:62-116` 行号区间（`warning` 色）原样保留；
- * - 路径用 `text` 色（与 `tool-diff.ts` 的 `Edit <path>` 同一约定），**不是 pi 内置的
- *   `accent`**：pi 的 `renderToolPath()` 给路径上的是 `accent`，而标题行是「动词 + 路径」
- *   并排 —— 只要皮肤的 `accent` 与 `toolTitle` 取同一个调色板色（pi-coder-catppuccin 的 mauve），
- *   两段就完全同色、看不出层次。所以**装得下的短路径也换色**（见 `recolorToolPath`）；
- * - 路径从**尾部**往前装：一级一级目录往左加，装到恰好放不下为止，前面补一个 `…`；
- * - 装得下时（短路径）**结构完全不动 pi 的原始渲染**（只把路径颜色从 `accent` 换成 `text`），包括
- *   OSC 8 可点击超链接；
- * - 极窄终端下连最后一级目录都装不下时，按 grapheme 从右往左硬截（emoji / 组合字符
- *   不会被切成两半，CJK 按 2 列计）。
+ * - The `Read ` prefix (`toolTitle` color + bold) and the `:62-116` line range
+ *   (`warning`) are kept verbatim;
+ * - the path uses `text` color (same convention as `tool-diff.ts`'s `Edit <path>`),
+ *   **not pi's built-in `accent`**: pi's `renderToolPath()` colors the path `accent`, and
+ *   the title row is "verb + path" side by side — the moment a skin sets `accent` and
+ *   `toolTitle` to the same palette color (pi-coder-catppuccin's mauve), both segments
+ *   become the same color and the hierarchy disappears. So **even fitting short paths get
+ *   recolored** (see `recolorToolPath`);
+ * - the path fills **from the tail** backwards: directory levels are added leftwards
+ *   until nothing more fits, then a `…` is prepended;
+ * - when it fits (short paths) **pi's original render is kept structurally verbatim**
+ *   (only the path color goes `accent` → `text`) — including the OSC 8 clickable
+ *   hyperlink;
+ * - on an extremely narrow terminal where even the last dir level does not fit, the tail
+ *   is hard-clipped by grapheme (emoji / combining chars never split; CJK counts 2
+ *   columns).
  *
- * ## 工具名首字母大写（`Read`）
+ * ## Capitalized tool name (`Read`)
  *
- * pi 内置 read 渲染器写的是小写 `read`，本扩展显示成 `Read` —— 与 `tool-diff.ts` 的
- * `Edit` / `Write` 同一约定（仿 Claude Code 的工具标题观感），**只改显示形态**：注册名、
- * 路由、session 记录里的原文都不动。三种动词形态（`read <路径>:<行号>` /
- * `read docs <标签>` / `read resource <标签>`）与压缩后自绘的标题都覆盖；`[skill] <目录名>`
- * 形态里没有这个词，原样保留。替换只发生在**动词段**内、且只动**第一行**
- * （`capitalizeReadVerb` / `capitalizeReadTitle`），读一个名字里带 `read` 的文件、或折到行首的
- * `read ` 片段都不会被误改。`PI_READ_COLLAPSE=off` 只关长路径压缩，工具名照样大写。
+ * pi's built-in read renderer writes lowercase `read`; this extension shows `Read` —
+ * same convention as `tool-diff.ts`'s `Edit` / `Write` (mimicking Claude Code's tool
+ * titles), **display form only**: the registered name, routing, and session-log text are
+ * untouched. All three verb shapes (`read <path>:<lines>` / `read docs <label>` / `read
+ * resource <label>`) plus the compressed self-drawn title are covered; the
+ * `[skill] <dirname>` shape contains no verb and is kept verbatim. The replacement only
+ * touches the **verb segment** and only on the **first line** (`capitalizeReadVerb` /
+ * `capitalizeReadTitle`) — a file named something-read, or a `read ` fragment wrapped
+ * onto a line start, cannot be miscapitalized. `PI_READ_COLLAPSE=off` only disables the
+ * long-path compression; the name still capitalizes.
  *
- * ## 整块的壳：`renderShell: "self"` + 自绘左边距 + 状态圆点（用户 2026-09-21 定）
+ * ## The whole block's shell: `renderShell: "self"` + self-drawn left margin + status
+ * dot (decided by the user 2026-09-21)
  *
- * read 块与 `bash-command-collapse.ts` 的 bash 块**同一套观感**（那边是本节的原型）：
+ * The read block shares **one visual language** with `bash-command-collapse.ts`'s bash
+ * block (that side is this section's prototype):
  *
- *   - `renderShell: "self"` —— 让 pi 不再给整块套 `contentBox`，于是
- *     ① **没有底色**（pending 的 `toolPendingBg` / 成功的 `toolSuccessBg` / 失败的
- *     `toolErrorBg` 三种底都不画；是"不去画"而不是"画上再擦"，与 bash 侧同一手法），
- *     ② **没有上下两条边界空行**（默认壳是 `Box(1, 1)`，上/下各一行空行就是它画的）。
- *     只有 read 这样改，其他工具照旧走 pi 的默认壳（有底色、有边界空行）。
- *   - 左边距整体 **1 → 2 列**：首行是状态圆点 `•` + 一个空格，其余行两格空格（`withHeadBar`）。
- *     于是圆点在列 0、`Read` 的 `R` 在列 2、结果正文也在列 2 —— 比改动前各多让出一列。
- *   - 圆点颜色按状态走：**读的时候（pending / partial）`dim` 灰、成功 `toolDiffAdded` 绿、
- *     失败 `toolDiffRemoved` 红**（与 bash 侧 `stateBarAnsi` 同一份语义）。
+ *   - `renderShell: "self"` — pi stops wrapping the block in `contentBox`, giving
+ *     ① **no background** (none of pending's `toolPendingBg`, success's `toolSuccessBg`,
+ *     or failure's `toolErrorBg` — "never painted", not "painted then erased" — the same
+ *     trick as the bash side),
+ *     ② **no top/bottom blank border rows** (the default shell is a `Box(1, 1)` and
+ *     those blanks are what it paints).
+ *     Only read changes this way — every other tool keeps pi's default shell (background
+ *     + border blanks).
+ *   - Left margin **1 → 2 columns** overall: the first row is the status dot `•` + a
+ *     space, the other rows two spaces (`withHeadBar`).
+ *     So the dot sits at column 0, `Read`'s `R` at column 2, and the result body at
+ *     column 2 — one more column yielded than before.
+ *   - The dot color follows the state: **while reading (pending / partial) `dim` gray,
+ *     success `toolDiffAdded` green, failure `toolDiffRemoved` red** (same semantics as
+ *     the bash side's `stateBarAnsi`).
  *
- * 实现方式：`renderCall` / `renderResult` 各自把 pi 的渲染结果包进壳里 —— 一个**不带 bgFn** 的
- * `Box(0, 0)`，左边缘由孩子自己画（`withHeadBar`）。三个不能想当然的点：
- *   ① **左边距挂在标题那个组件的第一行上**（首行圆点 `• `、其余行两格空格），结果正文往下
- *      继续用两格缩进 —— 与 bash 的「命令 + 结果」是同一棵树的结构。
- *   ② 宽度：`Box` 的 `paddingX` 是 0，孩子拿到整宽 —— 所以壳内部按
- *      `width - MARGIN_WIDTH - RIGHT_PAD` 渲染（左边距 + 末尾那列留白），否则挂上前缀必超宽。
- *   ③ **「读的时候」判的是 `context.isPartial === true`**（`tool_execution_start` 之后、结果
- *      回来之前 pi 给的就是 partial），`isError` 必须从 `context` 读 —— pi 调 resultRenderer 时
- *      传的是 `{ content, details }`，**没有 `isError` 字段**（bash 侧踩过同一个坑）。
+ * How: `renderCall` / `renderResult` each wrap pi's rendered component in the shell — a
+ * `Box(0, 0)` **with no bgFn**, whose left edge the child draws itself (`withHeadBar`).
+ * Three things not to assume:
+ *   ① **The left margin hangs on the title component's first row** (`• ` first, two
+ *      spaces after); the result body keeps the two-space indent — the same "command +
+ *      result" tree as bash.
+ *   ② Width: the `Box`'s `paddingX` is 0 and the child gets the full width — so inside
+ *      the shell everything renders at `width - MARGIN_WIDTH - RIGHT_PAD` (margin + the
+ *      trailing blank column), or the prefix pushes it over.
+ *   ③ **"While reading" means `context.isPartial === true`** (after
+ *      `tool_execution_start`, before the result — pi's partial state), and `isError`
+ *      must be read from `context` — pi passes `{ content, details }` to the result
+ *      renderer, **with no `isError` field** (the bash side hit the same trap).
  *
- * ## 只在需要压缩时才接管渲染（不重写整个 renderCall）
+ * ## Take over rendering only when compression is needed (no full renderCall rewrite)
  *
- * 做法是**后处理** pi 渲好的组件：先委托内置 `readRenderers.renderCall` 拿到那个 `Text`，
- * 在 `render(width)` 里渲染它；**≤ 1 行就原样返回**（pi 的配色、`~` 缩写、OSC 8 超链接、
- * `[skill]` / `read docs` / `read resource` 紧凑形态、`(ctrl+o to expand)` 提示全部保留），
- * **> 1 行才自己重建一行压缩标题**。这样短路径（绝大多数 read）走的还是 pi 的原生渲染，
- * 本扩展不引入任何行为差异；只有真正超宽的那部分才换成压缩形态。
+ * The approach is **post-processing** pi's component: delegate to the built-in
+ * `readRenderers.renderCall` for the `Text`, render it inside `render(width)`; **≤ 1
+ * line → return verbatim** (pi's colors, `~` shortening, OSC 8 hyperlinks, `[skill]` /
+ * `read docs` / `read resource` compact shapes, `(ctrl+o to expand)` hints all
+ * preserved), **> 1 line → rebuild one compressed title row**. So short paths (the vast
+ * majority of reads) keep pi's native rendering — this extension introduces zero
+ * behavioral difference; only genuinely overlong paths switch to the compressed form.
  *
- * 两个必须注意的坑：
- *   1. **`lastComponent` 必须传内层 `Text`，不能传我们自己的 wrapper** —— 内置 read.js 是
- *      `context.lastComponent ?? new Text("", 0, 0)` 然后 `setText()`；pi 会把上一次
- *      renderCall 的返回值（我们的 wrapper）当 lastComponent 传回来，wrapper 没有 setText，
- *      于是 renderCall 抛异常，而 `updateDisplay()` 的 try/catch 会**静默退回**
- *      `createCallFallback()` —— 标题只剩一个光秃秃的 `read`，路径全丢。所以内层组件存在
- *      `context.state.innerText` 里跨次复用（与 `bash-command-collapse.ts` 的
- *      `state.innerComponent` 同一套做法）。
- *   2. **OSC 8 超链接的开关不能读我们自己那份 pi-tui 的 `getCapabilities()`** —— 扩展
- *      import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，pi 运行时（bundle）调的
- *      `setCapabilityOverrides(settings)` 只改 bundle 那份的缓存，副本按环境变量自己检测，
- *      两边可能不一致（终端不支持 OSC 8 时副本却判 true → 链接文本被吞）。所以改成
- *      **从 pi 渲出来的标题里探测**：pi 的标题串里出现 `\x1b]8;;` 就说明它启用了超链接，
- *      我们再用 pi-tui 的 `hyperlink()`（纯字符串拼接函数，不查能力）复刻同一个 URL。
+ * Two traps that must not be missed:
+ *   1. **`lastComponent` must get the inner `Text`, never our wrapper** — built-in
+ *      read.js does `context.lastComponent ?? new Text("", 0, 0)` then `setText()`; pi
+ *      passes the previous renderCall's return (our wrapper) back as lastComponent, the
+ *      wrapper has no setText, renderCall throws, and `updateDisplay()`'s try/catch
+ *      **silently falls back** to `createCallFallback()` — a bare `read` title with the
+ *      path gone. So the inner component lives in `context.state.innerText` across calls
+ *      (same approach as `bash-command-collapse.ts`'s `state.innerComponent`).
+ *   2. **The OSC 8 hyperlink switch must not come from our own pi-tui copy's
+ *      `getCapabilities()`** — the pi-tui the extension imports is the npm/dist copy
+ *      behind the loader alias; the `setCapabilityOverrides(settings)` pi's runtime
+ *      (bundle) calls only touches the bundle copy's cache, while our copy self-detects
+ *      from env — the two can disagree (a terminal without OSC 8 still judges true on
+ *      our copy → link text gets eaten). Instead it is **detected from pi's rendered
+ *      title**: a `\x1b]8;;` in pi's title string means hyperlinks are on, and our copy
+ *      of the URL is rebuilt with pi-tui's `hyperlink()` (a pure string joiner that does
+ *      not query capabilities).
  *
- * ## 紧凑形态（`[skill]` / `read docs` / `read resource`）
+ * ## The compact shapes (`[skill]` / `read docs` / `read resource`)
  *
- * pi 对 SKILL.md、pi 自己的 README/docs/examples、AGENTS.md/CLAUDE.md 这几类文件不显示
- * 完整路径，而是显示 `[skill] <目录名>` / `read docs <相对标签>` / `read resource <相对路径>`
- * （`getCompactReadClassification`，模块私有）。这些标签通常很短，但 `read resource` 的
- * 标签是**相对 cwd 的路径**，一样可能超宽。所以压缩分支把这三种形态一并复刻
- * （`getReadmePath()` 是包根导出的，docs 判定与 pi 同源），压缩的只是标签本身，前缀与
- * `(ctrl+o to expand)` 提示保留。
+ * For SKILL.md, pi's own README/docs/examples, and AGENTS.md/CLAUDE.md-type files, pi
+ * shows no full path but `[skill] <dirname>` / `read docs <relative label>` / `read
+ * resource <relative path>` (`getCompactReadClassification`, module-private). Those
+ * labels are usually short, but `read resource`'s label is a **cwd-relative path** and
+ * can overflow too — so the compressed branch reproduces all three shapes
+ * (`getReadmePath()` is package-root-exported, docs detection same source as pi), only
+ * the label itself is compressed; the prefix and `(ctrl+o to expand)` hint stay.
  *
- * 提示行里的键名**绝不能 import pi 的 `keyHint` / `keyText`**：实测 `keyHint` 抛
- * `Theme not initialized`（读的是 npm/dist 副本自己的 theme 单例，pi 只初始化了 bundle 那份）、
- * `keyText` 返回空串（副本的 keybindings 表是空的），而 renderCall 抛异常会被 pi 静默 catch
- * 退回 fallback。所以从 `~/.pi/agent/keybindings.json` 读 `app.tools.expand`，读不到用默认
- * `ctrl+o`（与 `bash-command-collapse.ts` 的 `expandKeyText()` 同一套做法）。
- * 终端窄到给标签留不出 `MIN_LABEL_WIDTH` 列时，先丢掉提示行再算一遍预算 —— 提示是说明性的，
- * 文件名更重要。
+ * The hint's key name **must never come from pi's `keyHint` / `keyText`**: measured,
+ * `keyHint` throws `Theme not initialized` (it reads the npm/dist copy's own theme
+ * singleton — pi only initializes the bundle copy's), `keyText` returns "" (the copy's
+ * keybindings table is empty), and a renderCall throw is silently caught into the
+ * fallback. Instead `~/.pi/agent/keybindings.json`'s `app.tools.expand` is read,
+ * defaulting to `ctrl+o` (same approach as `bash-command-collapse.ts`'s
+ * `expandKeyText()`).
+ * When the terminal is too narrow to leave `MIN_LABEL_WIDTH` columns for the label, the
+ * hint row is dropped first and the budget recomputed — the hint is decorative, the
+ * filename matters.
  *
- * ## 展开态（ctrl+o）
+ * ## Expanded state (ctrl+o)
  *
- * `context.expanded` 为 true 时 pi 不做紧凑形态判定（一律走完整路径），本扩展同样只在
- * 超宽时压缩，规则完全一致 —— 折叠态与展开态的折行规则必须一致，否则展开态又会提前折行。
- * 注意展开态**不影响文件内容**的显示（那是 renderResult 的事，本扩展不碰 renderResult）。
+ * With `context.expanded` true, pi skips compact-shape detection (always the full path);
+ * this extension likewise compresses only on overflow — identical rule — collapsed and
+ * expanded wrap rules must agree or expanded would wrap early again.
+ * Note expansion **does not affect the file content's** display (that is renderResult's
+ * business, which this extension does not touch).
  *
- * 纯显示层：发给模型的 tool call 参数、session 记录里的原文、read 的执行逻辑完全不变
- * （`execute` / `parameters` / `description` / `promptSnippet` / `promptGuidelines` /
- * `constrainedSampling` 全部由 `{ ...base }` 从 `createReadToolDefinition()` 原样继承）。
+ * Pure display layer: the tool-call args sent to the model, the session-log text, and
+ * read's execution logic are completely unchanged (`execute` / `parameters` /
+ * `description` / `promptSnippet` / `promptGuidelines` / `constrainedSampling` are all
+ * inherited verbatim via `{ ...base }` from `createReadToolDefinition()`).
  *
- * 用法：
- *   PI_READ_COLLAPSE=off    启动时就关闭长路径压缩（回到 pi 的贪心折行，长路径占两行）
+ * Usage:
+ *   PI_READ_COLLAPSE=off    disable long-path compression at startup (back to pi's
+ *                           greedy wrap — long paths take two rows)
  */
 
 import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
@@ -126,26 +164,27 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** 省略前缀的标记。1 列宽，`visibleWidth` 量出来就是 1。 */
+/** The elided-prefix marker. 1 column wide — `visibleWidth` measures 1. */
 const ELLIPSIS = "…";
-/** 紧凑形态下给标签留的最少列数，低于它就丢掉 `(ctrl+o to expand)` 提示再算一遍预算。 */
+/** The fewest columns a compact-shape label keeps; below it the `(ctrl+o to expand)` hint is dropped and the budget recomputed. */
 const MIN_LABEL_WIDTH = 12;
-/** pi 判定为「紧凑形态」的资源文件名（照抄 read.js 的 COMPACT_RESOURCE_FILE_NAMES）。 */
+/** The resource filenames pi treats as "compact shape" (copied from read.js's COMPACT_RESOURCE_FILE_NAMES). */
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
-/** grapheme 分段器（pi-tui 没导出它自己的实例，本地建一个；Node 内置 Intl.Segmenter）。 */
+/** The grapheme segmenter (pi-tui does not export its own instance — a local one; Node's built-in Intl.Segmenter). */
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-/** pi 的 agent 目录（`PI_CODING_AGENT_DIR` 可覆盖，否则 `~/.pi/agent`）。 */
+/** pi's agent dir (`PI_CODING_AGENT_DIR` overrides, else `~/.pi/agent`). */
 function resolveAgentDir(): string {
 	const envDir = process.env.PI_CODING_AGENT_DIR;
 	return envDir ? (envDir.startsWith("~") ? join(homedir(), envDir.slice(1)) : envDir) : join(homedir(), ".pi", "agent");
 }
 
 /**
- * `app.tools.expand` 的键名文本（默认 `ctrl+o`）。
+ * The key-name text for `app.tools.expand` (default `ctrl+o`).
  *
- * 不能用 pi 导出的 `keyText` / `keyHint`，理由见文件头「紧凑形态」一节。
+ * pi's exported `keyText` / `keyHint` cannot be used — see the file header's "compact
+ * shapes" section.
  */
 function expandKeyText(): string {
 	try {
@@ -155,19 +194,19 @@ function expandKeyText(): string {
 		const text = keys.filter((k: unknown): k is string => typeof k === "string" && k.trim() !== "").join("/");
 		if (text) return text;
 	} catch {
-		// 没配置文件 / 解析失败 / 没绑这个键，都用默认值
+		// no config file / parse failure / no such binding — all take the default
 	}
 	return "ctrl+o";
 }
 
-/** pi 的 `str()`：string 原样，null/undefined → ""，其它类型 → null（= invalid arg）。 */
+/** pi's `str()`: a string verbatim, null/undefined → "", anything else → null (= invalid arg). */
 function strArg(value: unknown): string | null {
 	if (typeof value === "string") return value;
 	if (value == null) return "";
 	return null;
 }
 
-/** pi 的 `shortenPath()`：`$HOME` 前缀换成 `~`（注意 pi 用的是裸 startsWith，不要求分隔符）。 */
+/** pi's `shortenPath()`: a `$HOME` prefix becomes `~` (note pi uses a bare startsWith — no separator required). */
 function shortenPath(path: string): string {
 	const home = homedir();
 	if (home && path.startsWith(home)) return `~${path.slice(home.length)}`;
@@ -175,9 +214,11 @@ function shortenPath(path: string): string {
 }
 
 /**
- * 复刻 `resolveToCwd()` 里我们用得上的那部分：剥 `@` 前缀、展开 `~`、相对 cwd 解析。
- * pi 还会归一 Unicode 空格（macOS 截图文件名那些窄不换行空格），这里跳过 ——
- * 它只影响文件名里带特殊空格的路径，且我们只用它来算 OSC 8 的 URL 与紧凑形态判定。
+ * The part of `resolveToCwd()` we need: strip a `@` prefix, expand `~`, resolve against
+ * cwd.
+ * pi also normalizes Unicode spaces (those narrow no-break spaces in macOS screenshot
+ * names) — skipped here: it only affects paths containing such spaces, and we only use
+ * this for the OSC 8 URL and compact-shape detection.
  */
 function resolveAgainstCwd(rawPath: string, cwd: string): string {
 	let normalized = rawPath;
@@ -188,22 +229,25 @@ function resolveAgainstCwd(rawPath: string, cwd: string): string {
 }
 
 /**
- * pi 的 `resolvePath(input, baseDir)`（`utils/paths.js`）—— **参数序与 node 的 `resolve` 相反**。
+ * pi's `resolvePath(input, baseDir)` (`utils/paths.js`) — **the argument order is the
+ * reverse of node's `resolve`**.
  *
- * 本文件把 node 的 `resolve` 别名成了 `resolvePath`（为了照抄 pi 的源码形状），于是
- * `resolvePath(filePath, cwd)` 看着像 pi 的那一行，实际是 node 的「base 在前」语义：
- * `filePath` 是绝对路径时 node 直接返回 `cwd`，文件本身被丢掉。后果是
- * `relative(cwd, cwd)` = `""` → `inside` 判定通过 → 标签退化成 `"."`，cwd **之外**的资源文件
- * （`~/.pi/agent/AGENTS.md`）在超宽压缩分支里被渲成 `Read resource .:67-80`（实测复现）。
- * cwd 之内的文件碰巧正确，所以这个坑只在读全局 AGENTS.md 时露出来。
+ * This file aliases node's `resolve` as `resolvePath` (to mirror pi's source shape), so
+ * `resolvePath(filePath, cwd)` looks like pi's line but is actually node's
+ * "base-first" semantics: when `filePath` is absolute node returns `cwd` outright and
+ * the file is dropped. The consequence: `relative(cwd, cwd)` = `""` → the `inside`
+ * check passes → the label degenerates to `"."` — and a resource file **outside** cwd
+ * (`~/.pi/agent/AGENTS.md`) renders as `Read resource .:67-80` on the overlong
+ * compression branch (reproduced live). Files inside cwd happen to be correct, so the
+ * trap only shows when reading the global AGENTS.md.
  *
- * 复刻 pi 的函数就复刻它的签名，别复刻它的名字。
+ * When replicating pi's function, replicate its signature — not its name.
  */
 function resolveLikePi(input: string, baseDir: string): string {
 	return isAbsolute(input) ? resolvePath(input) : resolvePath(baseDir, input);
 }
 
-/** pi 的 `getCwdRelativePath()`：cwd 内返回相对路径，否则 undefined。 */
+/** pi's `getCwdRelativePath()`: a relative path inside cwd, undefined outside. */
 function cwdRelativePath(filePath: string, cwd: string): string | undefined {
 	const resolvedCwd = resolvePath(cwd);
 	const resolved = resolveLikePi(filePath, resolvedCwd);
@@ -212,13 +256,13 @@ function cwdRelativePath(filePath: string, cwd: string): string | undefined {
 	return inside ? rel || "." : undefined;
 }
 
-/** pi 的 `formatPathRelativeToCwdOrAbsolute()`：cwd 内给相对路径，否则绝对路径，一律 posix 分隔符。 */
+/** pi's `formatPathRelativeToCwdOrAbsolute()`: relative inside cwd, absolute outside, always posix separators. */
 function pathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
 	const absolutePath = resolveLikePi(filePath, cwd);
 	return (cwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
 }
 
-/** pi 的 `getPiDocsClassification()`：pi 包内的 README.md / docs/** / examples/**。 */
+/** pi's `getPiDocsClassification()`: README.md / docs/** / examples/** inside the pi package. */
 function piDocsLabel(absolutePath: string): string | undefined {
 	try {
 		const packageRoot = dirname(getReadmePath());
@@ -227,7 +271,7 @@ function piDocsLabel(absolutePath: string): string | undefined {
 		const label = rel.split(sep).join("/");
 		if (label === "README.md" || label.startsWith("docs/") || label.startsWith("examples/")) return label;
 	} catch {
-		// getReadmePath() 抛了就放弃 docs 判定（回落到完整路径形态）
+		// a getReadmePath() throw abandons the docs check (falls back to the full-path shape)
 	}
 	return undefined;
 }
@@ -237,7 +281,7 @@ interface CompactClassification {
 	label: string;
 }
 
-/** 复刻 pi 的 `getCompactReadClassification()`（模块私有，只能照抄）。 */
+/** A replication of pi's `getCompactReadClassification()` (module-private — can only be copied). */
 function getCompactClassification(args: any, cwd: string): CompactClassification | undefined {
 	const rawPath = strArg(args?.path);
 	if (!rawPath) return undefined;
@@ -250,7 +294,7 @@ function getCompactClassification(args: any, cwd: string): CompactClassification
 	return undefined;
 }
 
-/** pi 的 `formatReadLineRange()`：`:62-116`（warning 色），offset/limit 都没给就返回 ""。 */
+/** pi's `formatReadLineRange()`: `:62-116` (warning color); no offset/limit → "". */
 function formatReadLineRange(args: any, theme: any): string {
 	if (args?.offset === undefined && args?.limit === undefined) return "";
 	const startLine = args.offset ?? 1;
@@ -259,9 +303,11 @@ function formatReadLineRange(args: any, theme: any): string {
 }
 
 /**
- * 按 grapheme 从**右**往左取，取到装满预算为止。
- * 用于极窄终端下连最后一级目录都装不下的兜底 —— 按列硬切会把 emoji / 组合字符切成两半，
- * 宽字符（CJK 等，2 列）装不进剩下的 1 列时就在它前面停（留 1 列空白），一个 grapheme 不可分。
+ * Take graphemes from the **right** until the budget is full.
+ * The fallback for an extremely narrow terminal where even the last dir level does not
+ * fit — hard-clipping by column would split emoji / combining chars in half; when a wide
+ * char (CJK etc., 2 cols) cannot fit the remaining 1 column, stop before it (leaving 1
+ * blank) — a grapheme is indivisible.
  */
 function tailGraphemes(text: string, budget: number): string {
 	if (budget <= 0) return "";
@@ -277,16 +323,18 @@ function tailGraphemes(text: string, budget: number): string {
 }
 
 /**
- * 路径压缩：装得下就原样返回；装不下就从**尾部**往前一级一级加目录，前面补 `…`。
+ * Path compression: fits → verbatim; does not → add directory levels backwards **from
+ * the tail** and prepend `…`.
  *
- * 刻意保留尽量多的尾部层级而不是只留文件名：同样的列预算，
- * `…core/extensions/loader.js` 比 `…loader.js` 更能说明读的是哪个文件（同名文件很常见）。
+ * Deliberately keeps as many tail levels as fit rather than only the filename: at the
+ * same column budget, `…core/extensions/loader.js` says which file was read better than
+ * `…loader.js` (same-named files are common).
  */
 function compressTail(text: string, budget: number): string {
 	const width = Math.max(1, Math.floor(budget));
 	if (visibleWidth(text) <= width) return text;
 	const ellipsisWidth = visibleWidth(ELLIPSIS);
-	// macOS / Linux 是 `/`；Windows 的 `~C:\...` 也照办（pi 的 shortenPath 不改分隔符）
+	// `/` on macOS / Linux; Windows `~C:\...` handled the same way (pi's shortenPath does not change separators)
 	const separator = text.includes("/") ? "/" : "\\";
 	const segments = text.split(separator);
 	let tail = "";
@@ -296,16 +344,18 @@ function compressTail(text: string, budget: number): string {
 		tail = candidate;
 	}
 	if (!tail) {
-		// 连最后一级目录都装不下：按 grapheme 从右往左硬截
+		// even the last dir level does not fit: hard-clip graphemes from the right
 		return ELLIPSIS + tailGraphemes(segments[segments.length - 1] ?? "", width - ellipsisWidth);
 	}
 	return ELLIPSIS + tail;
 }
 
 /**
- * 探测 pi 有没有启用 OSC 8 超链接：看它渲出来的标题串里有没有 `\x1b]8;;`。
- * 理由见文件头 —— 不能读副本自己的 `getCapabilities()`。
- * `inner.text` 是 `Text` 的私有字段（TS 层面 private，运行时可读）；拿不到就退回渲染行。
+ * Detect whether pi has OSC 8 hyperlinks on: look for `\x1b]8;;` in the title string it
+ * rendered.
+ * The reason is in the file header — our own copy's `getCapabilities()` cannot be read.
+ * `inner.text` is `Text`'s private field (TS-private, readable at runtime); absent it,
+ * fall back to the rendered lines.
  */
 function piTitleUsesHyperlink(inner: any, lines: string[]): boolean {
 	const raw = typeof inner?.text === "string" ? inner.text : lines.join("\n");
@@ -313,22 +363,26 @@ function piTitleUsesHyperlink(inner: any, lines: string[]): boolean {
 }
 
 /**
- * 前景色重置序列 —— `theme.fg()` 的每个色段都以它收尾，所以行内第一个它标着**动词段的结束**。
+ * The foreground-reset sequence — every `theme.fg()` color segment ends with one, so the
+ * first one in a row marks **the verb segment's end**.
  */
 const FG_RESET = "\x1b[39m";
 
-/** SGR 序列（`theme.fg()` / `theme.bold()` 发出的那些），只用于量可见文本。 */
+/** The SGR sequences (`theme.fg()` / `theme.bold()`'s output), only for measuring visible text. */
 const SGR_SEQUENCE = /\x1b\[[0-9;]*m/g;
 
 /**
- * 把标题行里的动词 `read` 换成大写的 `Read`（详见文件头「工具名首字母大写」一节）。
+ * Swap the title row's verb `read` for a capitalized `Read` (see the file header's
+ * "capitalized tool name" section).
  *
- * 只在**动词段**（行首到第一个 `\x1b[39m`，与 `recolorToolPath` 同一套定位）里动手，并在
- * 剥掉 SGR 后要求这段可见文本恰好是 `read` 或以 `read ` 开头：
- *   - `read <路径>` / `read docs <标签>` / `read resource <标签>` 命中；
- *   - `[skill] <目录名>` 的动词段是 `[skill]`，不含这个词，原样返回；
- *   - 颜色被关掉（没有 ANSI）时动词段退化成整行，同一条件仍能把 `readme.md` 这类
- *     以 `read` 开头却没有空格的续行排除在外；命中时行内第一个 `read` 必然是动词本身。
+ * Only touches the **verb segment** (line start to the first `\x1b[39m`, located the same
+ * way as `recolorToolPath`), and requires the segment's visible text — SGR stripped — to
+ * be exactly `read` or start with `read `:
+ *   - `read <path>` / `read docs <label>` / `read resource <label>` hit;
+ *   - `[skill] <dirname>`'s verb segment is `[skill]` — no verb, returned verbatim;
+ *   - with colors off (no ANSI) the verb segment degenerates to the whole line, and the
+ *     same condition still excludes `readme.md`-style wrap-continuation lines that start
+ *     with `read` but no space; on a hit the first `read` in the line is the verb itself.
  */
 function capitalizeReadVerb(line: string): string {
 	const verbEnd = line.indexOf(FG_RESET);
@@ -340,8 +394,9 @@ function capitalizeReadVerb(line: string): string {
 }
 
 /**
- * 标题行数组的入口：**只动第一行**。动词只可能出现在第一行；续行全是路径 / 标签，
- * 那里以 `read ` 开头的片段（带空格的目录名 / 文件名被折到行首）不能被误改成大写。
+ * The entry over a title's line array: **first line only**. The verb can only appear on
+ * the first line; continuation rows are all path / label, and a `read ` fragment there
+ * (a dir/file name with a space wrapped to a line start) must not be miscapitalized.
  */
 function capitalizeReadTitle(lines: string[]): string[] {
 	if (lines.length === 0) return lines;
@@ -350,21 +405,26 @@ function capitalizeReadTitle(lines: string[]): string[] {
 }
 
 /**
- * 把 pi 渲染出来的标题行里的**路径**颜色从 `accent` 换成 `text`。
+ * Swap the **path** color inside pi's rendered title row from `accent` to `text`.
  *
- * 为什么是**替换 SGR** 而不是自己重建整行：这一支（装得下的短路径）刻意保留 pi 的原生
- * 渲染 —— 折行、OSC 8 超链接、`[skill]` / `read docs` / `read resource` 紧凑形态、
- * `(ctrl+o to expand)` 提示全都由 pi 自己决定，本扩展只改一个颜色。pi 的 read 标题里
- * `accent` 只用在路径上（`renderToolPath()`）或紧凑形态的标签上（`formatCompactReadCall`
- * 的 docs / resource 分支），`skill` 形态的标签走 `customMessageText`，不受影响。
+ * Why **replace the SGR** rather than rebuild the row: this branch (fitting short paths)
+ * deliberately keeps pi's native render — wrapping, OSC 8 hyperlinks, `[skill]` /
+ * `read docs` / `read resource` compact shapes, `(ctrl+o to expand)` hints are all pi's
+ * own decisions; this extension only changes one color. In pi's read title, `accent` is
+ * used only on the path (`renderToolPath()`) or a compact shape's label
+ * (`formatCompactReadCall`'s docs / resource branches); a `skill` label goes through
+ * `customMessageText` and is unaffected.
  *
- * **只换动词之后那一段**：动词（`read`）是整行的第一个色段，第一个 `\x1b[39m` 就是它的
- * 结尾；后面的 `accent` 才是路径。这一步不是耍小聪明 —— 皮肤把 `accent` 与 `toolTitle` 设成
- * 同一个调色板色时（上游 catppuccin 的 mauve 就是）整行直接替换会把动词一起换成 `text`，
- * 两段仍旧同色，正好就是本扩展要消掉的那个症状。
+ * **Only the segment after the verb is swapped**: the verb (`read`) is the row's first
+ * color segment and the first `\x1b[39m` is its end; the `accent` after it is the path.
+ * This is not cleverness for its own sake — when a skin sets `accent` and `toolTitle` to
+ * the same palette color (upstream catppuccin's mauve does), a whole-row replacement
+ * would recolor the verb to `text` too — both segments still identical — exactly the
+ * symptom this extension exists to remove.
  *
- * 两个色相同时（皮肤把 `accent` 和 `text` 设成同一个色）直接原样返回，不做无谓改写 ——
- * `getFgAnsi` 拿到的就是 pi 自己会发的那个序列（truecolor / 256 色两种模式都对得上）。
+ * When the two colors are the same (a skin setting `accent` = `text`), return verbatim
+ * — no pointless rewriting; `getFgAnsi` returns the very sequence pi itself emits
+ * (right in both truecolor and 256-color modes).
  */
 function recolorToolPath(line: string, theme: any): string {
 	const accent = theme.getFgAnsi("accent");
@@ -376,12 +436,12 @@ function recolorToolPath(line: string, theme: any): string {
 	return line.slice(0, cut) + line.slice(cut).split(accent).join(text);
 }
 
-/** 压缩后的完整路径形态：`read …<尾部路径>:<行号>`。 */
+/** The compressed full-path shape: `read …<tail path>:<lines>`. */
 function compressedPathTitle(args: any, theme: any, cwd: string, budget: number, hyperlinksEnabled: boolean): string {
 	const prefix = `${theme.fg("toolTitle", theme.bold("Read"))} `;
 	const range = formatReadLineRange(args, theme);
 	const rawPath = strArg(args?.path);
-	// 与 pi 的 renderToolPath 对齐：null → `[invalid arg]`，空串 → `...`（toolOutput 色）
+	// aligned with pi's renderToolPath: null → `[invalid arg]`, empty → `...` (toolOutput color)
 	if (rawPath === null) return `${prefix}${theme.fg("error", "[invalid arg]")}${range}`;
 	if (!rawPath) return `${prefix}${theme.fg("toolOutput", "...")}${range}`;
 	const styled = theme.fg("text", compressTail(shortenPath(rawPath), budget - visibleWidth(prefix) - visibleWidth(range)));
@@ -389,7 +449,7 @@ function compressedPathTitle(args: any, theme: any, cwd: string, budget: number,
 	return prefix + display + range;
 }
 
-/** 压缩后的紧凑形态：`[skill] …<标签>` / `read docs …<标签>` / `read resource …<标签>`。 */
+/** The compressed compact shapes: `[skill] …<label>` / `read docs …<label>` / `read resource …<label>`. */
 function compressedCompactTitle(
 	classification: CompactClassification,
 	args: any,
@@ -404,7 +464,7 @@ function compressedCompactTitle(
 	const prefix = isSkill
 		? theme.fg("customMessageLabel", "\x1b[1m[skill]\x1b[22m ")
 		: `${theme.fg("toolTitle", theme.bold(`Read ${classification.kind}`))} `;
-	// 先带提示算预算；窄到给标签留不出 MIN_LABEL_WIDTH 列就丢掉提示再算一遍
+	// budget with the hint first; too narrow to leave MIN_LABEL_WIDTH for the label → drop the hint and recompute
 	let suffix = hint;
 	let labelBudget = budget - visibleWidth(prefix) - visibleWidth(range) - visibleWidth(hint);
 	if (labelBudget < MIN_LABEL_WIDTH) {
@@ -412,7 +472,7 @@ function compressedCompactTitle(
 		labelBudget = budget - visibleWidth(prefix) - visibleWidth(range);
 	}
 	const styled = theme.fg(isSkill ? "customMessageText" : "text", compressTail(classification.label, labelBudget));
-	// docs / resource 的标签是包内路径，同样给超链接（skill 的标签是目录名，不是路径，不给）
+	// docs / resource labels are package paths — they get hyperlinks too (a skill label is a dirname, not a path — none)
 	const display =
 		hyperlinksEnabled && !isSkill
 			? hyperlink(styled, pathToFileURL(resolveAgainstCwd(classification.label, cwd)).href)
@@ -421,29 +481,35 @@ function compressedCompactTitle(
 }
 
 /**
- * 左边距总列数：**圆点 / 空格那一列 + 一格间距**（用户 2026-09-21 定：正文整体右移一格）。
+ * The left margin's total columns: **the dot / space column + one spacing column**
+ * (decided by the user 2026-09-21: body shifted right one column).
  *
- * 首行是 `•` + 空格，其余行是两个空格；正文（标题与结果）都跟在它后面。与
- * `bash-command-collapse.ts` 的 `INDENT_WIDTH`（gutter 之外多让出的那一列）是同一个观感：
- * 两块左边缘对齐。**改这里必须同时改 bash 那边**，否则两个工具的块会错开一列。
+ * The first row is `•` + a space; the rest are two spaces. Body (title and result)
+ * follows it. Same look as `bash-command-collapse.ts`'s `INDENT_WIDTH` (the extra column
+ * beyond the gutter): both blocks' left edges align. **Changing this must change the bash
+ * side too** — or the two tools' blocks slide one column apart.
  */
 const MARGIN_WIDTH = 2;
 /**
- * 正文右侧留白列数 —— 与 bash 块同一条约定：正文不顶着终端右边缘，末尾留 1 列。
- * 所以孩子的正文预算是 `width - MARGIN_WIDTH - RIGHT_PAD`，挂上左边距后仍差 1 列到底。
+ * The body's right-side blank columns — the same convention as the bash block: body
+ * never touches the terminal's right edge, one blank column trails.
+ * So the child's body budget is `width - MARGIN_WIDTH - RIGHT_PAD` — with the left
+ * margin attached it still lands 1 column short of the edge.
  */
 const RIGHT_PAD = 1;
-/** 非首行的左边距（全空格）。 */
+/** The left margin for non-first rows (all spaces). */
 const MARGIN_BLANK = " ".repeat(MARGIN_WIDTH);
 
 /**
- * 状态圆点 `•`（U+2022，1 列宽）+ 前景复位。
+ * The status dot `•` (U+2022, 1 column) + a foreground reset.
  *
- * 三个槽 pi 的 theme schema 都必需（`dim` / `toolDiffAdded` / `toolDiffRemoved`），取的是
- * **前景** ANSI；末尾那个 `\x1b[39m` 保证颜色不会洇到后面的 `Read` 上 —— 与
- * `bash-command-collapse.ts` 的 `stateBarAnsi` 完全同源（字形也一样是 `•`）。
+ * All three slots are required by pi's theme schema (`dim` / `toolDiffAdded` /
+ * `toolDiffRemoved`), and their **foreground** ANSI is taken; the trailing `\x1b[39m`
+ * keeps the color from bleeding into the `Read` that follows — same origin as
+ * `bash-command-collapse.ts`'s `stateBarAnsi` (same glyph `•` too).
  *
- * 「读的时候」= pending：`tool_execution_start` 之后、结果还没回来（pi 给的 partial 状态）。
+ * "While reading" = pending: after `tool_execution_start`, before the result (pi's
+ * partial state).
  */
 function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string {
 	const slot: ThemeColor = isPartial ? "dim" : isError ? "toolDiffRemoved" : "toolDiffAdded";
@@ -451,21 +517,23 @@ function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string 
 }
 
 /**
- * 给**首行**挂 `• `、其余行补两格空格 —— 与 `bash-command-collapse.ts` 的 `withHeadBar`
- * 同一套（那边画在命令的首行上，这里画在 `Read <路径>` 那一行上）。
+ * Hang `• ` on the **first row** and pad the rest with two spaces — same approach as
+ * `bash-command-collapse.ts`'s `withHeadBar` (that side paints it on the command's first
+ * row; here it goes on the `Read <path>` row).
  */
 function withHeadBar(lines: string[], bar: string): string[] {
 	return lines.map((line, index) => (index === 0 ? `${bar} ${line}` : MARGIN_BLANK + line));
 }
 
 /**
- * 结果正文的每一行补两格左边距 —— 与标题行同一个左边距，于是 `Read <路径>` 里的路径列与
- * 结果正文的列对齐。
+ * Pad every result-body line with the two-column margin — the same margin as the title
+ * row, so the path column inside `Read <path>` aligns with the result body's columns.
  *
- * **前导空行一并剥掉**（`stripLeadingBlanks`）：pi 的 read 结果正文是
- * `new Text("\n" + …)` 那段，那个 `\n` 会在标题与正文之间画出一整行空行。bash 侧同一个
- * 前导空行是刻意剥掉的（那边不做就会变成三条空行），这里保持一致 —— 整块是「标题 + 紧贴的
- * 正文」，没有上下边界空行，中间也不掺空行（用户 2026-09-21 定的观感）。
+ * **Leading blank lines are stripped too** (`stripLeadingBlanks`): pi's read result body
+ * is `new Text("\n" + …)`, and that `\n` would paint a whole blank row between title and
+ * body. The bash side strips the same leading blank deliberately (three blank rows
+ * otherwise); consistent here — the block is "title + tightly-following body": no
+ * border blanks above/below, no blank line inside either (the user's 2026-09-21 look).
  */
 function withBodyIndent(lines: string[]): string[] {
 	const out = lines.slice();
@@ -474,11 +542,12 @@ function withBodyIndent(lines: string[]): string[] {
 }
 
 /**
- * 把那块（标题 / 结果）包进**不带底色**的 `Box(0, 0)`。
+ * Wrap a block (title / result) in a `Box(0, 0)` **with no background**.
  *
- * `Box` 只负责「整宽铺满 + 左右两列的右边界留白」，底色与上下空行都不给 —— 这就是用户要的
- * 「read 块没有底色、没有上下边界空行」（见文件头「整块的壳」）。孩子自己画左边缘（2 列），
- * 所以调用方传进来的 `render` 必须按 `width - 2` 渲染。
+ * The `Box` only does "fill the full width + leave the right-edge blank" — no
+ * background, no border rows: exactly the user's "read block has no background, no
+ * top/bottom blank rows" (see the file header's "block shell"). The child draws its own
+ * left edge (2 columns), so the `render` passed in must render at `width - 2`.
  */
 function shellFor(render: (width: number) => string[]) {
 	const box = new Box(0, 0);
@@ -492,8 +561,10 @@ function shellFor(render: (width: number) => string[]) {
 }
 
 /**
- * 包一层组件：pi 渲出来 ≤ 1 行就原样返回，> 1 行才换成压缩标题。
- * 压缩结果按宽度缓存 —— `render(width)` 每帧都调，终端 resize 时自动重算。
+ * The component wrapper: pi-rendered ≤ 1 line → verbatim; > 1 line → the compressed
+ * title.
+ * The compressed result caches by width — `render(width)` is called every frame and a
+ * terminal resize recomputes automatically.
  */
 function createCollapsedCallComponent(
 	inner: any,
@@ -503,24 +574,24 @@ function createCollapsedCallComponent(
 		cwd: string;
 		expanded: boolean;
 		isEnabled: () => boolean;
-		/** 命令还在跑（`tool_execution_start` 之后、结果回来之前）→ 圆点用 `dim`。 */
+		/** The command still running (after `tool_execution_start`, before the result) → the dot is `dim`. */
 		isPartial: boolean;
-		/** 这块结果是错的（`context.isError`）→ 圆点用 `toolDiffRemoved`。 */
+		/** This result is an error (`context.isError`) → the dot is `toolDiffRemoved`. */
 		isError: boolean;
 	},
 ) {
-	// 缓存只存**未上左边距/未上色**的正文行，左边距（含颜色）每次 render 现拼 ——
-	// 缓存键里再带一个状态会容易忘记失效，而拼两格前缀的开销可以忽略。
+	// the cache stores **un-margined, uncolored** body rows; the margin (incl. color) is re-joined per render —
+	// another state in the cache key would be easy to forget invalidating, and joining a two-column prefix is cheap.
 	const cache = new Map<number, string[]>();
-	// 左边距那两列由盒子的孩子自己画（`Box(0, 0)` 不扣），所以这里的 width 已经是
-	// 「扣掉左边距 + 一列右边界」之后的正文预算（见 `shellFor`）。
+	// the margin's two columns are drawn by the box's child itself (`Box(0, 0)` does not subtract them), so `width` here is already
+	// the body budget after margin + right-edge blank (see `shellFor`).
 	return {
 		render(width: number): string[] {
 			const lines: string[] = inner.render(width);
 			const body = (out: string[]) => withHeadBar(out, stateBarAnsi(options.theme, options.isPartial, options.isError));
-			// 关闭开关 → 回到 pi 的原生渲染（含路径颜色，见 `PI_READ_COLLAPSE=off`）；工具名照旧大写
+			// the switch off → back to pi's native render (incl. path color, see `PI_READ_COLLAPSE=off`); the tool name still capitalizes
 			if (!options.isEnabled()) return body(capitalizeReadTitle(lines));
-			// 没超宽（短路径，绝大多数 read）→ 只把路径的颜色换成 `text`，其余原样交给 pi
+			// not overlong (a short path — most reads) → only the path's color swaps to `text`; everything else stays pi's
 			if (lines.length <= 1) return body(capitalizeReadTitle(lines.map((line) => recolorToolPath(line, options.theme))));
 			const fixedWidth = visibleWidth(`${options.theme.fg("toolTitle", options.theme.bold("Read"))} `) + visibleWidth(ELLIPSIS);
 			if (width - fixedWidth < 1) return body(capitalizeReadTitle(lines));
@@ -531,10 +602,10 @@ function createCollapsedCallComponent(
 			const line = classification
 				? compressedCompactTitle(classification, options.args, options.theme, width, hyperlinksEnabled, options.cwd)
 				: compressedPathTitle(options.args, options.theme, options.cwd, width, hyperlinksEnabled);
-			// 极窄终端兜底：固定部分（前缀 + 行号区间，或紧凑形态的提示行）本身就比整行还宽时，
-			// 压缩后的标题仍然会超宽 —— 那时 pi 自己的折行渲染同样难看，没有更好的选择，直接交回去。
+			// extreme-narrow fallback: when the fixed parts (prefix + line range, or the compact hint) are already wider than the row,
+			// the compressed title still overflows — pi's own wrapped render looks no worse then; hand it back.
 			if (visibleWidth(line) > width) return body(capitalizeReadTitle(lines));
-			// 缓存的是**未挂左边距**的正文行，左边距（含状态色）在 `body` 里现拼
+			// the cache stores **marginless** body rows; the margin (incl. status color) is re-joined inside `body`
 			cache.set(width, [line]);
 			return body([line]);
 		},
@@ -548,23 +619,23 @@ function createCollapsedCallComponent(
 export default function (pi: ExtensionAPI) {
 	const enabled = process.env.PI_READ_COLLAPSE?.trim().toLowerCase() !== "off";
 
-	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd），
-	// renderCall 也用 context.cwd，不读这里这个值。
+	// cwd is only a fallback: the built-in execute uses ctx.cwd (the session cwd of each call),
+	// and renderCall uses context.cwd — this value is not read.
 	const base = createReadToolDefinition(process.cwd());
 
 	pi.registerTool({
-		// 用展开而不是逐字段抄：`description` / `parameters` / `promptSnippet` /
-		// `promptGuidelines` / `constrainedSampling` / `execute` 全部原样继承
-		// （prompt 元数据不会自动继承，必须显式带上）。
+		// spread rather than field-copy: `description` / `parameters` / `promptSnippet` /
+		// `promptGuidelines` / `constrainedSampling` / `execute` all inherit verbatim
+		// (prompt metadata does not inherit automatically — it must be carried explicitly).
 		...base,
-		// `renderShell: "self"`：让 pi 不再套 `contentBox` —— 于是 read 块**没有底色**、
-		// 也没有默认壳那两条上下边界空行（见文件头「整块的壳」）。自己的左边距自己画
-		// （`withHeadBar`），与 bash 块同一套观感。**只影响 read**：其他工具仍走 pi 的默认壳。
+		// `renderShell: "self"`: pi stops wrapping in `contentBox` — so the read block has **no background**
+		// and none of the default shell's two border rows (see the file header's "block shell"). The left margin is self-drawn
+		// (`withHeadBar`) — same look as the bash block. **Only read is affected**: the other tools keep pi's default shell.
 		renderShell: "self",
 		renderCall(args, theme, context) {
 			const state = context.state;
-			// 关键：传给内置实现的 lastComponent 必须是**内层** Text 而不是我们的 wrapper，
-			// 否则内置 `setText()` 抛异常、pi 静默退回只剩 `read` 的 fallback（见文件头）。
+			// critical: the lastComponent handed to the built-in must be the **inner** Text, never our wrapper,
+			// or the built-in's `setText()` throws and pi silently falls back to a bare `read` title (see the file header).
 			const inner = base.renderCall?.(args, theme, { ...context, lastComponent: state.innerText }) ?? new Text("", 0, 0);
 			state.innerText = inner;
 			return shellFor(
@@ -575,14 +646,14 @@ export default function (pi: ExtensionAPI) {
 						cwd: context.cwd,
 						expanded: context.expanded,
 						isEnabled: () => enabled,
-						// 「读的时候」= partial（`tool_execution_start` 之后、结果回来之前）
+						// "while reading" = partial (after `tool_execution_start`, before the result)
 						isPartial: context.isPartial === true,
 						isError: context.isError === true,
 					}).render(logicalWidth),
 			);
 		},
-		// 结果侧同样进这个壳：``\n` + 正文` 的每一行补两格缩进，于是它与标题行的左边距一致；
-		// 底色 / 上下边界空行同样没有。`context.lastComponent` 也要传**内层** Text（同一处坑）。
+		// the result side goes into the same shell: every line of ``\n` + body` gets the two-space indent so it aligns with the title's margin;
+		// no background / border rows either. `context.lastComponent` likewise gets the **inner** Text (same trap).
 		renderResult(result, options, theme, context) {
 			const state = context.state;
 			const inner =

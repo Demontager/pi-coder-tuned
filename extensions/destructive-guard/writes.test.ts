@@ -1,10 +1,11 @@
 /**
- * Tests for writes.ts — 写入内容里的危险删除形态。
+ * Tests for writes.ts — dangerous deletion shapes inside written content.
  *
  * Run with:  node --test clients/pi/extensions/destructive-guard/writes.test.ts
  *
- * 核心用例是 2026-09-23 事故的那一行原文。它在 bash 判定的视野之外（运行那一步只是
- * `node verify-a.mjs`），只有检查**写入内容**才能发现。
+ * The core case is the 2026-09-23 incident's own line verbatim. It sits outside the bash
+ * judgment's view (the run step is just `node verify-a.mjs`) — only checking the **written
+ * content** can find it.
  */
 
 import assert from "node:assert/strict";
@@ -12,31 +13,31 @@ import { describe, it } from "node:test";
 
 import { firstStringArg, inspectWrittenContent } from "./writes.ts";
 
-/** 命中的规则名列表。 */
+/** The list of matched rule names. */
 function rules(content: string): string[] {
 	return inspectWrittenContent(content).map((finding) => finding.rule);
 }
 
-describe("事故原文", () => {
-	it("认得 fs.rmSync(path.dirname(x ?? \"/tmp\")) 这一行", () => {
+describe("the incident verbatim", () => {
+	it("recognizes the fs.rmSync(path.dirname(x ?? \"/tmp\")) line", () => {
 		const content = 'fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true });';
 		const findings = inspectWrittenContent(content);
-		assert.ok(findings.length > 0, "事故那一行必须命中");
+		assert.ok(findings.length > 0, "the incident's own line must hit");
 		assert.equal(findings[0]!.line, 1);
 	});
 
-	it("兜底值优先于路径运算报告（它是根因）", () => {
+	it("the fallback value is reported before the path arithmetic (it is the root cause)", () => {
 		const content = 'fs.rmSync(path.dirname(s.log[0]?.x ?? "/tmp"), { recursive: true, force: true });';
 		assert.equal(rules(content)[0], "fallback-in-delete");
 	});
 
-	it("只有路径运算、没有兜底值时也命中", () => {
+	it("path arithmetic without a fallback still hits", () => {
 		assert.deepEqual(rules("fs.rmSync(path.dirname(target), { recursive: true });"), ["derived-delete-target"]);
 	});
 });
 
-describe("其他删除形态", () => {
-	it("裸根", () => {
+describe("other deletion shapes", () => {
+	it("bare root", () => {
 		assert.ok(rules('fs.rmSync("/", { recursive: true, force: true });').includes("root-or-parent-delete"));
 	});
 
@@ -48,44 +49,44 @@ describe("其他删除形态", () => {
 		assert.ok(rules("Remove-Item -Recurse -Force $Path").length > 0);
 	});
 
-	it("shell 变量目标（`rm -rf $UNSET/*` 形态）", () => {
+	it("a shell variable target (the `rm -rf $UNSET/*` shape)", () => {
 		assert.deepEqual(rules("rm -rf $UNSET/*"), ["shell-variable-target"]);
 	});
 
-	it("shell 带花括号的变量", () => {
+	it("a shell variable with braces", () => {
 		assert.deepEqual(rules("rm -rf ${DIR:-/}"), ["shell-variable-target"]);
 	});
 
-	it(".. 上跳", () => {
+	it("a .. climb", () => {
 		assert.ok(rules('fs.rmSync("../..", { recursive: true });').length > 0);
 	});
 });
 
-describe("不误伤", () => {
-	it("字面目标放行", () => {
+describe("no false hits", () => {
+	it("literal targets pass", () => {
 		assert.deepEqual(rules('fs.rmSync("/tmp/va-abc123", { recursive: true, force: true });'), []);
 		assert.deepEqual(rules('rm -rf ./dist'), []);
 		assert.deepEqual(rules('rm -rf /Users/bachi/jaylli/x/node_modules'), []);
 	});
 
-	it("读操作放行", () => {
+	it("read operations pass", () => {
 		assert.deepEqual(rules("const text = fs.readFileSync(p, 'utf8');"), []);
 		assert.deepEqual(rules("path.join(a, b)"), []);
 		assert.deepEqual(rules("await fs.promises.mkdtemp(dir)"), []);
 	});
 
-	it("注释与文档行不算", () => {
+	it("comment and doc lines do not count", () => {
 		assert.deepEqual(rules("// fs.rmSync(path.dirname(x ?? '/tmp'))"), []);
 		assert.deepEqual(rules("# shutil.rmtree(os.path.dirname(y))"), []);
 		assert.deepEqual(rules(" * fs.rmSync(dirname(z))"), []);
 	});
 
-	it("空内容", () => {
+	it("empty content", () => {
 		assert.deepEqual(rules(""), []);
 		assert.deepEqual(rules("\n\n"), []);
 	});
 
-	it("多行时行号正确", () => {
+	it("line numbers stay correct across multiple lines", () => {
 		const content = ["const a = 1;", "const b = 2;", 'fs.rmSync(path.dirname(t), {});'].join("\n");
 		const findings = inspectWrittenContent(content);
 		assert.equal(findings[0]!.line, 3);
@@ -93,11 +94,11 @@ describe("不误伤", () => {
 });
 
 describe("firstStringArg", () => {
-	it("抽字面目标", () => {
+	it("extract the literal target", () => {
 		assert.equal(firstStringArg('fs.rmSync("/tmp/x", {})', "rmSync"), "/tmp/x");
 	});
 
-	it("非字面目标返回 undefined", () => {
+	it("a non-literal target returns undefined", () => {
 		assert.equal(firstStringArg("fs.rmSync(someVar, {})", "rmSync"), undefined);
 	});
 });

@@ -1,34 +1,39 @@
 /**
- * types.ts — ask_user_question 的纯数据模型与常量（单一事实来源）。
+ * types.ts — ask_user_question's pure data model and constants (single source
+ * of truth).
  *
- * 刻意不 import typebox / pi / pi-tui：validate.ts / answers.ts / dialog.ts /
- * model.ts 只依赖本文件，所以 `node --test` 能直接跑它们的单测（Node 的类型擦除
- * 只擦标注、不解析运行时依赖）。TypeBox schema 单独放 schema.ts，只在 pi 运行时
- * 被 index.ts 加载。
+ * Deliberately imports no typebox / pi / pi-tui: validate.ts / answers.ts /
+ * dialog.ts / model.ts only depend on this file, so `node --test` runs their
+ * unit tests directly (Node's type erasure strips annotations only — no
+ * runtime deps are resolved). The TypeBox schema lives alone in schema.ts,
+ * loaded by index.ts only inside pi's runtime.
  *
- * 形状对齐 Claude Code 的 AskUserQuestion（1-4 个问题、每题 2-4 个带说明的选项、
- * 可选 multiSelect），刻意砍掉参考实现（npm:@juicesharp/rpiv-ask-user-question）
- * 里的 preview 侧栏、逐题 note、全局 note 与 i18n —— 自由文本由每题自动追加的
- * "Type something." 哨兵行承担，够用且 UI 简单一个量级。
+ * The shape matches Claude Code's AskUserQuestion (1-4 questions, 2-4
+ * described options each, optional multiSelect) while dropping the reference
+ * implementation's (npm:@juicesharp/rpiv-ask-user-question) preview sidebar,
+ * per-question note, global note, and i18n — free text is handled by each
+ * question's auto-appended "Type something." sentinel row: sufficient, and
+ * an order of magnitude simpler.
  */
 
-/** 一次调用最多问几个问题。 */
+/** How many questions one call may ask. */
 export const MAX_QUESTIONS = 4;
-/** 每题最少选项数。 */
+/** The fewest options per question. */
 export const MIN_OPTIONS = 2;
-/** 每题最多选项数（不含自动追加的哨兵行）。 */
+/** The most options per question (not counting the auto-appended sentinel row). */
 export const MAX_OPTIONS = 4;
-/** 问题 chip 标签的显示上限；超长在运行时截断（不报错）。 */
+/** The question chip label's display cap; overflow truncates at runtime (no error). */
 export const MAX_HEADER_LENGTH = 16;
-/** 选项 label 的显示上限；超长在运行时截断（不报错）。 */
+/** An option label's display cap; overflow truncates at runtime (no error). */
 export const MAX_LABEL_LENGTH = 60;
 
-/** 每题自动追加的自由输入行。模型不许自己写这个 label（reserved_label 拒绝）。 */
+/** The free-input row auto-appended to every question. The model may not write this label itself (reserved_label rejects it). */
 export const CUSTOM_ANSWER_LABEL = "Type something.";
 
 /**
- * 保留 label："Other" 是因为模型被 Claude Code 条件化、总想自己写一个 Other 选项，
- * 而这里哨兵行是唯一来源；CUSTOM_ANSWER_LABEL 是哨兵行本身。
+ * Reserved labels: "Other" because a model conditioned by Claude Code keeps
+ * trying to write its own Other option — and here the sentinel row is the
+ * single source of that; CUSTOM_ANSWER_LABEL is the sentinel itself.
  */
 export const RESERVED_LABELS: readonly string[] = ["Other", CUSTOM_ANSWER_LABEL];
 
@@ -49,10 +54,14 @@ export interface AskParams {
 }
 
 /**
- * 单题答案意图（判别联合，`kind` 是唯一判别子）：
- * - `option`：单选，选中模型给的选项；`answer` = 选项 label
- * - `custom`：用户在 "Type something." 行自由输入；`answer` = 输入文本
- * - `multi`：多选提交；`selected` = 选中的 label 列表，`answer` 恒为 null
+ * One question's answer intent (a discriminated union — `kind` is the sole
+ * discriminant):
+ * - `option`: single-select, picked a model-given option; `answer` = the
+ *   option's label
+ * - `custom`: the user typed on the "Type something." row; `answer` = the
+ *   typed text
+ * - `multi`: a multi-select submit; `selected` = the picked labels, `answer`
+ *   always null
  */
 export type AskAnswerKind = "option" | "custom" | "multi";
 
@@ -65,8 +74,9 @@ export interface AskAnswer {
 }
 
 /**
- * 失败码。`no_ui` / `no_dialog_ui` 依赖宿主能力、在执行路径上判定；
- * 其余由 validateQuestionnaire 产出。
+ * The failure codes. `no_ui` / `no_dialog_ui` depend on host capabilities and
+ * are judged on the execution path; the rest are produced by
+ * validateQuestionnaire.
  */
 export type AskErrorCode =
 	| "no_ui"

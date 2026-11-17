@@ -70,8 +70,6 @@
     "toolDiffAdded": "green",
     "toolDiffRemoved": "red",
     "toolDiffContext": "subtext1",
-    "toolDiffAddedBg": "diffAddedBg",
-    "toolDiffRemovedBg": "diffRemovedBg",
     "syntaxComment": "subtext0",
     "syntaxKeyword": "mauve",
     "syntaxFunction": "sky",

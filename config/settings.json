@@ -11,10 +11,13 @@
     "pnpm",
     "--config.node-linker=hoisted"
   ],
-  "extensions": [],
+  "extensions": ["-builtin:codemode"],
   "tuiMode": "regular",
   "packages": [
-    "npm:pi-web-access",
+    {
+      "source": "npm:pi-web-access",
+      "extensions": []
+    },
     "npm:pi-subagents"
   ],
   "steeringMode": "one-at-a-time",

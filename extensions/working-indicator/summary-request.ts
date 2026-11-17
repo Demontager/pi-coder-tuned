@@ -1,119 +1,137 @@
 /**
- * summary-request.ts — 「提示词太长时请模型压成一句话」的纯逻辑：触发决策、请求提示词、回复清洗。
+ * summary-request.ts — pure logic for "when the prompt is too long, ask the model to compress it
+ * into one line": trigger decision, request prompt, reply cleanup.
  *
- * 背景见 `working-summary.ts` 头注释：spinner 行尾那一格只能放几十列，长提示词按可见宽度
- * 截断后只剩开头几个字（「帮我看看…」），信息量几乎为零。所以 `working-indicator.ts` 在
- * `input` 事件里除了压平/缓存提示词，还会**异步**发一次模型请求，让它用一句话说清这段
- * 提示词要干什么。请求和主回合并行，互不阻塞；回来了就换上摘要，没回来/失败就一直显示
- * 截断后的原文 —— 摘要永远是增强。
+ * Background is in `working-summary.ts`'s header comment: the spinner line's tail cell only fits
+ * a few dozen columns, and a long prompt truncated by visible width keeps only its first few
+ * characters ("help me look…") — nearly zero information. So `working-indicator.ts` does more
+ * than flatten/cache the prompt on `input`: it **asynchronously** sends one model request asking
+ * it to state what this prompt does in a single line. The request runs parallel to the main
+ * round and blocks nothing; when it comes back the summary replaces the text, and on
+ * failure/absence the truncated original keeps showing — the summary is strictly an enhancement.
  *
- * ## 触发条件（`planSummaryRequest`）
+ * ## Trigger conditions (`planSummaryRequest`)
  *
- * 只要原文放不下就值得花一次请求。两档（默认倍数 1）：
+ * Worth one request whenever the original does not fit. Two cases (default ratio 1):
  *
- *   原文宽度 ≤ 可用宽度   → 整段放得下，`layoutPromptSummary` 全量展示，不请求
- *   原文宽度 > 可用宽度   → 请求摘要（哪怕只超一列 —— 截断丢的是尾巴，而尾巴往往
- *                          正是「要改什么/改成什么样」，压成一句话比截断信息量大）
+ *   prompt width ≤ available width → the whole thing fits; `layoutPromptSummary` shows it in full, no request
+ *   prompt width > available width → request a summary (even one column over — truncation loses the
+ *                                    tail, and the tail is usually "what to change / change into
+ *                                    what", which is more informative squeezed into one line)
  *
- * 倍数是 `triggerRatio`（`PI_WORKING_SUMMARY_TRIGGER`，默认 1）：1 = 只要放不下就压；
- * 调到 1.2 / 2 是留给「不想每条放不下的提示词都花一次带 thinking 的请求」这类偏好 ——
- * 1.2 ≈ 截断丢掉近两成原文才压，2 = 丢掉一半以上才压。宽度一律是**可见列数**
- * （调用方用 pi-tui 的 `visibleWidth` 量好传进来），不是字符数 —— 一个汉字占 2 列，
- * 用字符数判断会把中文提示词全判成「还好」。
+ * The ratio is `triggerRatio` (`PI_WORKING_SUMMARY_TRIGGER`, default 1): 1 = compress whenever it
+ * does not fit; 1.2 / 2 serves "do not want to spend a thinking request on every over-long
+ * prompt" — 1.2 ≈ compress only when truncation would lose nearly a fifth of the original, 2 =
+ * only when more than half is lost. Widths are always **visible columns** (the caller measures
+ * with pi-tui's `visibleWidth` and passes them in), not char counts — a Han character is 2
+ * columns, so char-count checks would call every Chinese prompt "fine".
  *
- * ## 目标长度（`targetWidth`）
+ * ## Target length (`targetWidth`)
  *
- * 可用宽度（`availableSummaryTextWidth`，与渲染共用同一份数学）乘 `TARGET_WIDTH_RATIO`
- * 得到要求模型输出的列数，并告诉它口径（汉字 2 列 / ASCII 1 列）。留出那一成余量是给
- * 「模型数不准」的：宁可短一点、整句完整显示，也不要卡在边界上被切掉半句。可用宽度太窄
- * （`MIN_REQUEST_BUDGET` 列以下）时干脆不请求 —— 一句话压到十列以内已经没有信息量，
- * 截断原文和它一样难读。
+ * The available width (`availableSummaryTextWidth`, the same math the render uses) multiplied by
+ * `TARGET_WIDTH_RATIO` yields the column count demanded of the model, along with the accounting
+ * rule (Han 2 columns / ASCII 1). The ten-percent headroom covers "the model cannot count
+ * exactly": better slightly short and fully displayed than clipped mid-sentence at the edge.
+ * Below `MIN_REQUEST_BUDGET` available columns, no request at all — a line squeezed under ten
+ * columns carries no information, just as unreadable as the truncated original.
  *
- * **超长不追问（调用方保证，不是这里的逻辑）**：模型回来的摘要超长也**不重试**，由
- * `layoutPromptSummary` 按可见宽度截断补 `…`。再要一次只会让这一格的内容来回跳，而且第二次
- * 大概率还是长 —— 需求原文即「不要再第二次请求了，正常做截断处理就好」。（失败后的重试是
- * 另一回事，由 `index.ts` 负责：那是「没拿到结果」，不是「结果太长」。）
+ * **No follow-up when overlong (the caller's guarantee, not this file's logic)**: a summary that
+ * comes back too long is **not** retried — `layoutPromptSummary` truncates it by visible width
+ * with a trailing `…`. Asking again would only make this cell's content jump back and forth, and
+ * the second answer would likely still be long — the requirement verbatim: "do not request a
+ * second time; just truncate normally". (Retrying after failure is a separate matter, owned by
+ * `index.ts`: that is "got no result", not "result too long".)
  *
- * ## 清洗（`cleanSummaryText`）
+ * ## Cleanup (`cleanSummaryText`)
  *
- * 模型输出是不可信文本：可能多给几行、加个「摘要：」标签、整体包一层引号或 `**`，也可能
- * 跑飞写成几百字。清洗只做展示层面的最小加工：
+ * Model output is untrusted text: it may emit extra lines, add a "Summary:" label, wrap the
+ * whole thing in quotes or `**`, or ramble to hundreds of characters. Cleanup does only the
+ * minimal display-level work:
  *
- *   - **只取第一行有效内容**。模型偶尔先写一句「摘要：」再换行写正文，所以逐行清洗、跳过
- *     清洗后为空的行（标签行、代码围栏标记行），取第一行非空的结果。刻意不是整段拼接 ——
- *     模型多给一段解释时，拼接会把解说词也顶进那一格里。
- *   - 逐行过 `flattenPrompt`（复用压平那套：剥 ANSI / 零宽字符、折叠空白、剥列表符号与
- *     标题标记），所以模型加 `- ` 前缀或引号都不会带进显示。
- *   - 去掉整体包裹的引号（ASCII 与中文成对符号）与 `**粗体**` 包裹，去掉「摘要：」这类
- *     标签前缀。最多迭代三轮，`**"摘要：xx"**` 这种叠着的装饰也能剥干净。
- *   - 字符数硬上限 `MAX_SUMMARY_TEXT_CHARS`（按码点切，不切半个代理对）。显示层还会按
- *     可见宽度截一次，这里只是防「模型返回十万字」把内存和宽度计算拖着走。
+ *   - **Take only the first usable line**. The model sometimes writes a "Summary:" label then
+ *     the body on the next line, so each line is cleaned, lines that clean to empty are skipped
+ *     (label lines, code-fence markers), and the first non-empty result wins. Deliberately not a
+ *     whole-text join — when the model adds a second paragraph of explanation, a join would
+ *     squeeze the commentary into the cell too.
+ *   - Each line goes through `flattenPrompt` (reusing the flattening: strip ANSI / zero-width
+ *     chars, collapse whitespace, strip list bullets and heading marks), so a model's `- ` prefix
+ *     or quotes never reach the display.
+ *   - Strip whole-text wrapping quotes (ASCII and CJK paired marks), `**bold**` wrappers, and
+ *     "Summary:"-style label prefixes. At most three rounds, so stacked decorations like
+ *     `**"Summary: xx"**` still come clean.
+ *   - Hard char cap `MAX_SUMMARY_TEXT_CHARS` (cut on code points, never half a surrogate pair).
+ *     The display layer truncates again by visible width; this only keeps a "model returned a
+ *     hundred thousand chars" from dragging memory and width computation.
  *
- * 本文件不 import pi / pi-tui（宽度是调用方量好的列数），所以 `node --test` 直跑
- * （用例见 `summary-request.test.ts`）。
+ * This file imports no pi / pi-tui (widths arrive pre-measured by the caller), so `node --test`
+ * runs it directly (see `summary-request.test.ts`).
  */
 
 import { flattenPrompt } from "./working-summary.ts";
 
 /**
- * 触发倍数：原文宽度超过可用宽度的这个倍数才请求摘要。默认 1 = 只要放不下（哪怕只多一列）
- * 就请求 —— 口径是「超过可显示区域就要摘要」，没有「略微超出先用截断凑合」这一档。
- * 调大是留给「不想每条放不下的提示词都花一次带 thinking 的请求」的偏好：1.2 ≈ 截断丢掉
- * 近两成原文才压，2 = 丢掉一半以上才压。
+ * Trigger ratio: request a summary only when the prompt width exceeds the available width times
+ * this ratio. Default 1 = request whenever it does not fit (even one column over) — the policy
+ * is "more than the display area means summarize", with no "slightly over, make do with
+ * truncation" tier. Larger values serve the "do not want to spend a thinking request on every
+ * over-long prompt" preference: 1.2 ≈ compress only when truncation loses nearly a fifth, 2 =
+ * only when more than half is lost.
  */
 export const DEFAULT_TRIGGER_RATIO = 1;
 
-/** 目标宽度占可用宽度的比例：留一成余量，模型略微超一点也不会被截掉半句。 */
+/** Target width as a fraction of available width: one-tenth headroom so a slightly over-long model answer is not clipped mid-sentence. */
 export const TARGET_WIDTH_RATIO = 0.9;
 
-/** 可用宽度低于这个列数就不值得请求：一句话压到十列以内没有信息量，跟截断原文一样难读。 */
+/** Available width below this many columns is not worth a request: a line under ten columns carries no information, as unreadable as the truncated original. */
 export const MIN_REQUEST_BUDGET = 10;
 
 /**
- * 喂给模型的提示词上限（字符）。压平后的原文最长 `MAX_PROMPT_SCAN_CHARS`（4000），
- * 再截一道：模型只需要开头那段的语义，后面的细节对「一句话说清干什么」没有增量，
- * 而请求体越大越慢。
+ * Prompt length cap fed to the model (chars). The flattened original is already capped at
+ * `MAX_PROMPT_SCAN_CHARS` (4000); this trims once more: the model only needs the semantics of
+ * the leading stretch, later detail adds nothing to "say what it does in one line", and a
+ * larger request body is slower.
  */
 export const MAX_REQUEST_INPUT_CHARS = 2000;
 
-/** 清洗后摘要的字符数上限（按码点计）。显示层另有可见宽度截断，这里只防模型跑飞。 */
+/** Char cap on the cleaned summary (in code points). The display layer truncates by visible width separately; this only guards against a runaway model. */
 export const MAX_SUMMARY_TEXT_CHARS = 200;
 
 export interface SummaryRequestPlan {
-	/** 值不值得为这段提示词发一次模型请求。 */
+	/** Whether this prompt is worth one model request. */
 	needed: boolean;
-	/** 要求模型输出的目标宽度（可见列数）；`needed` 为 false 时无意义。 */
+	/** The target width (visible columns) demanded of the model; meaningless when `needed` is false. */
 	targetWidth: number;
 }
 
 export interface SummaryRequestPlanOptions {
-	/** 压平后的提示词宽度（可见列数，调用方用 `visibleWidth` 量）。 */
+	/** The flattened prompt's width (visible columns, measured by the caller with `visibleWidth`). */
 	promptWidth: number;
-	/** 摘要正文的可用宽度（可见列数，来自 `availableSummaryTextWidth`）。 */
+	/** The available width for the summary body (visible columns, from `availableSummaryTextWidth`). */
 	budgetWidth: number;
-	/** 触发倍数，默认 `DEFAULT_TRIGGER_RATIO`。 */
+	/** Trigger ratio, default `DEFAULT_TRIGGER_RATIO`. */
 	triggerRatio?: number;
-	/** 可用宽度下限，默认 `MIN_REQUEST_BUDGET`。 */
+	/** Available-width floor, default `MIN_REQUEST_BUDGET`. */
 	minBudget?: number;
 }
 
 /**
- * 决定「要不要请求」与「要求模型写多长」。纯函数：传进来的都是量好的列数，不做任何测量。
- * 条件用严格大于（`promptWidth > budget * ratio`）：正好等于阈值时不请求，与「放得下就不
- * 请求」的边界保持同一套开闭方向。
+ * Decide "whether to request" and "how long the model should write". Pure function: every input
+ * is a pre-measured column count, nothing is measured here.
+ * The condition is strict greater-than (`promptWidth > budget * ratio`): at exactly the
+ * threshold no request is made — the same open/closed direction as "fits → no request".
  */
 export function planSummaryRequest(opts: SummaryRequestPlanOptions): SummaryRequestPlan {
 	const budget = Math.floor(opts.budgetWidth);
 	const minBudget = opts.minBudget ?? MIN_REQUEST_BUDGET;
 	const triggerRatio = opts.triggerRatio ?? DEFAULT_TRIGGER_RATIO;
-	// 目标宽度只是「可用宽度的一成余量版」：`budget < minBudget` 的窄格子已经被下面挡掉，
-	// 所以不需要再单独设一个目标下限（两个阈值只会有一个真正生效）。
+	// the target width is just "available width minus a tenth": narrow cells where `budget < minBudget` are already blocked below,
+	// so no separate target floor is needed (only one of the two thresholds ever takes effect).
 	const targetWidth = Math.max(1, Math.floor(budget * TARGET_WIDTH_RATIO));
 	if (budget < minBudget) return { needed: false, targetWidth };
 	return { needed: opts.promptWidth > budget * triggerRatio, targetWidth };
 }
 
-/** 按码点截断（不切半个代理对）：超长时末尾补 `…` 表示「被截了」。 */
+/** Truncate by code points (never half a surrogate pair): when too long, append `…` to show "clipped". */
 function clipToPoints(text: string, maxPoints: number): string {
 	const points = [...text];
 	if (points.length <= maxPoints) return text;
@@ -121,13 +139,15 @@ function clipToPoints(text: string, maxPoints: number): string {
 }
 
 /**
- * 组装请求提示词（单条 user 消息的文本）。要求模型：
- *   1. 一行、无换行、无引号、无 markdown、无「摘要：」标签、无解释；
- *   2. 不超过 `targetWidth` 个显示列（并给出汉字 2 列 / ASCII 1 列的口径）、宁短勿长；
- *   3. 保留「做什么 + 对象」，丢掉寒暄 / 背景 / 示例 / 重复；
- *   4. 用与原文相同的语言。
+ * Assemble the request prompt (the text of a single user message). The model is asked to:
+ *   1. emit one line, no newlines, no quotes, no markdown, no "Summary:" label, no explanation;
+ *   2. stay under `targetWidth` display columns (with the Han 2 / ASCII 1 accounting given),
+ *      preferring short over long;
+ *   3. keep "what to do + the object", dropping greetings / background / examples / repetition;
+ *   4. answer in the same language as the original.
  *
- * 第 4 条不指定中文：提示词是英文时给出中文摘要反而别扭，让模型跟随原文更自然。
+ * Rule 4 does not hard-code Chinese: giving a Chinese summary for an English prompt reads
+ * awkward, so letting the model follow the original is more natural.
  */
 export function buildSummaryRequestPrompt(prompt: string, targetWidth: number): string {
 	const input = clipToPoints(prompt, MAX_REQUEST_INPUT_CHARS);
@@ -145,22 +165,23 @@ export function buildSummaryRequestPrompt(prompt: string, targetWidth: number): 
 	].join("\n");
 }
 
-/** 「摘要」这类标签词本身。 */
+/** The label words themselves ("Summary" and friends). */
 const LABEL_TEXT = "(?:summary|prompt summary|recap|title|label|摘要|总结|概括|简述|一句话摘要)";
 
 /**
- * 标签前缀：`摘要：` / `Summary:`，并容忍两种粗体包裹（`**摘要：**` 与 `**摘要**：`）——
- * 分隔符后面那截粗体收尾也一并吃掉，否则会剩下一串 `**` 混进摘要正文。
+ * Label prefix: `Summary:` — tolerant of both bold wrappings (`**Summary:**` and `**Summary**:`)
+ * — the trailing bold run after the separator is consumed too, or a stray `**` leaks into the
+ * summary body.
  */
 const LABEL_PREFIX_RE = new RegExp(
 	`^(?:\\*\\*|__)?${LABEL_TEXT}(?:\\*\\*|__)?\\s*[:：]\\s*(?:\\*\\*|__)?\\s*`,
 	"i",
 );
 
-/** 整行只有标签本身（`摘要` / `**Summary**`）：不是摘要内容，该行跳过。 */
+/** A whole line that is only the label (`Summary` / `**Summary**`): not summary content, skip the line. */
 const LABEL_ONLY_RE = new RegExp(`^(?:\\*\\*|__)?${LABEL_TEXT}(?:\\*\\*|__)?\\s*[:：]?$`, "i");
 
-/** 成对包裹的引号 / 书名号（ASCII 直引号与中文成对符号）。 */
+/** Paired wrapping quotes / book-title marks (ASCII straight quotes and CJK paired marks). */
 const WRAPPING_QUOTES: ReadonlyArray<readonly [string, string]> = [
 	["\"", "\""],
 	["'", "'"],
@@ -172,7 +193,7 @@ const WRAPPING_QUOTES: ReadonlyArray<readonly [string, string]> = [
 	["`", "`"],
 ];
 
-/** 剥一层装饰：标签前缀 → 整体包裹的引号 → 整体包裹的 `**`/`__`。 */
+/** Strip one layer of decoration: label prefix → wrapping quotes → wrapping `**`/`__`. */
 function stripDecoration(text: string): string {
 	let out = text.replace(LABEL_PREFIX_RE, "").trim();
 	for (const [open, close] of WRAPPING_QUOTES) {
@@ -188,16 +209,17 @@ function stripDecoration(text: string): string {
 }
 
 /**
- * 清洗模型回复（规则见文件头）。返回空串表示这次请求没有可用结果 —— 调用方按「不显示摘要」
- * 处理（继续显示截断后的原文），不重试、不报错。
+ * Clean a model reply (rules in the file header). An empty return means the request produced no
+ * usable result — the caller treats that as "show no summary" (the truncated original keeps
+ * showing); no retry, no error.
  */
 export function cleanSummaryText(raw: string): string {
-	// 逐行取第一个「清洗后非空」的行：标签行（「摘要：」）、代码围栏标记行会被清洗成空串，
-	// 于是自然落到下一行；模型把正文分成了多行时只取第一行，后面的解说词不进来。
+	// take the first line that cleans to non-empty: label lines ("Summary:"), code-fence marker lines clean to empty
+	// and fall through naturally; when the model splits the body across lines only the first is taken — commentary stays out.
 	for (const line of raw.split(/\r\n|[\n\r\u0085\u000b\u000c\u2028\u2029]/)) {
 		let text = flattenPrompt(line);
 		if (text === "") continue;
-		// 装饰可能叠着（`**"摘要：xx"**`）：迭代到不再变化为止，上限四轮兜底。
+		// decorations can stack (`**"Summary: xx"**`): iterate until stable, capped at four rounds as a fallback.
 		for (let round = 0; round < 4; round++) {
 			const next = stripDecoration(text);
 			if (next === text) break;

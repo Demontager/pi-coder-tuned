@@ -1,41 +1,44 @@
 /**
- * plan-mode 的 keybinding 改绑逻辑（纯函数）。
+ * plan-mode's keybinding-rebind logic (pure functions).
  *
- * 单独成文件的原因有两个：一是 `index.ts` 要 import pi-tui（`visibleWidth`），
- * 在仓库里没有 node_modules 的情况下无法被测试直接 import；二是「不该覆盖用户配置」
- * 这条规则值得单独钉死 —— 一个扩展悄悄改掉别人的键位而不加护栏，是很讨厌的行为。
+ * Two reasons it lives in its own file: `index.ts` imports pi-tui (`visibleWidth`) and cannot
+ * be imported by tests without node_modules in the repo; and the rule "never overwrite the
+ * user's own config" deserves a place of its own to be nailed down — an extension silently
+ * rebinding someone else's keys without guardrails is obnoxious behavior.
  *
- * ## 背景
+ * ## Background
  *
- * shift+tab 被 pi 内置的 `app.thinking.cycle` 占着。plan mode 要它，于是本扩展
- * 在按键到达编辑器之前拦下并 consume，同时把思考等级循环**改绑到 ctrl+shift+t**，
- * 让用户的功能一个不丢。
+ * shift+tab is owned by pi's built-in `app.thinking.cycle`. Plan mode wants it, so this
+ * extension intercepts and consumes the key before it reaches the editor, while rebinding the
+ * thinking-level cycle **to ctrl+shift+t** — the user loses no functionality.
  *
- * 改绑的边界：只在 `app.thinking.cycle` **没有任何显式配置**时写入（也就是它还在
- * 吃 pi 的默认值 shift+tab）。用户自己配过（不管是这个键还是别的键），一律不动 ——
- * 他自己的配置显然比扩展的偏好重要。
+ * Rebinding boundary: the write happens only when `app.thinking.cycle` has **no explicit
+ * config at all** (i.e. it is still on pi's default shift+tab). Anything the user configured
+ * themselves — this key or another — is left untouched: their own config clearly outranks the
+ * extension's preference.
  */
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** 思考等级循环的新绑定位（shift+tab 让给 plan mode）。 */
+/** The thinking-level cycle's new binding (shift+tab yielded to plan mode). */
 export const THINKING_FALLBACK_KEY = "ctrl+shift+t";
 
-/** 被抢占的键位说明（提示文案里用，测试也引用它）。 */
+/** The description of the occupied binding (used in the notice text; tests reference it too). */
 export const THINKING_KEYBINDING_ID = "app.thinking.cycle";
 
 export interface RebindOutcome {
-	/** 是否需要写文件。 */
+	/** Whether a file write is needed. */
 	changed: boolean;
 	path: string;
-	/** 没改动时的原因（给用户看的提示）；改动时为空。 */
+	/** Why nothing was changed (user-facing notice); empty when changed. */
 	reason?: string;
 	/**
-	 * 需要用户手动处理吗（配置坏了、不敢改）？
-	 * 与 `reason` 分开：`reason` 是给日志/排查看的，`needsAttention` 决定要不要提示用户。
-	 * 「已有绑定」属于后者 —— 那正是我们想要的状态，提示只会变成噪音。
-	 */
+ * Does the user need to handle it manually (broken config we dare not touch)?
+ * Kept separate from `reason`: `reason` is for logs/triage, `needsAttention` decides whether
+ * to notify the user. "Already bound" belongs to the latter — it is exactly the state we want,
+ * and notifying would only be noise.
+ */
 	needsAttention?: boolean;
 }
 
@@ -45,12 +48,14 @@ export function keybindingsPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * 给定 keybindings.json 的原文，返回「应该写成什么」+「为什么」。
+ * Given keybindings.json's raw text, return "what should be written" + "why".
  *
- * - 文件不存在 / 空：生成只含这一项的新配置
- * - 合法 JSON 对象且没有 `app.thinking.cycle`：补上，其余键原样保留
- * - 已经有 `app.thinking.cycle`（用户自己配的，或本扩展上次改的）：**一个字都不动**
- * - 不是合法 JSON / 不是对象：不动（宁可不改，也不要破坏用户的配置文件）
+ * - file missing / empty: generate a new config containing only this entry
+ * - valid JSON object without `app.thinking.cycle`: add it, all other keys kept verbatim
+ * - `app.thinking.cycle` already present (user's own config, or this extension's previous
+ *   write): **touch nothing**
+ * - not valid JSON / not an object: leave it alone (better to not change than to break the
+ *   user's config file)
  */
 export function rebindThinkingKey(raw: string, path = keybindingsPath()): { value: string; outcome: RebindOutcome } {
 	let config: Record<string, unknown> = {};
@@ -72,8 +77,8 @@ export function rebindThinkingKey(raw: string, path = keybindingsPath()): { valu
 	}
 
 	if (config[THINKING_KEYBINDING_ID] !== undefined) {
-		// 已经绑过了 —— 无论是本扩展上次写的还是用户自己配的，这正是我们想要的状态：
-		// 不写文件、也不提示（每次启动都提醒会变成噪音）。
+		// already bound — whether by this extension's earlier write or the user's own config, this is exactly the state we want:
+		// no file write, no notice (reminding on every startup would become noise).
 		return {
 			value: raw,
 			outcome: { changed: false, path, reason: `${THINKING_KEYBINDING_ID} already has a binding; unchanged` },

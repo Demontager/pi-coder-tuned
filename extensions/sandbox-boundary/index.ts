@@ -1,52 +1,67 @@
 /**
- * Sandbox Boundary —— 给**不走 shell 的文件工具**补上 bash 沙箱管不到的那部分：删除。
+ * Sandbox Boundary — covers the one thing the bash sandbox cannot reach for the
+ * **non-shell file tools**: deletion.
  *
- * ## 为什么需要它
+ * ## Why it exists
  *
- * bash 命令已经被 seatbelt 沙箱包住了（见 `bash-command-collapse/sandbox.ts`），但 pi 的
- * `write` / `edit` 工具**不走 shell** —— 它们是扩展进程里的直接 `fs` 调用，沙箱管不到。
- * 沙箱那边收回的能力只有一项（边界外的 `file-write-unlink`），所以这里也只需要补同一项：
- * **删除**边界外的文件才问，写入不问。
+ * Bash commands are already wrapped by the seatbelt sandbox (see
+ * `bash-command-collapse/sandbox.ts`), but pi's `write` / `edit` tools **do not go through a
+ * shell** — they are direct `fs` calls inside the extension process, invisible to the
+ * sandbox. The capability the sandbox withholds is exactly one (out-of-boundary
+ * `file-write-unlink`), so only the same one needs covering here: **deleting** files outside
+ * the boundary asks; writing does not.
  *
- * ## 口径（用户 2026-09-24 定）
+ * ## The rule (decided by the user 2026-09-24)
  *
- * > 写入目标在可写边界之外，不需要弹框提醒；只有删除的文件在沙箱之外才提醒。
+ * > A write target outside the writable boundary does not prompt; only deleting a file
+ * > outside the sandbox prompts.
  *
- * 于是：
+ * Therefore:
  *
- * - `write` / `edit` / `multiedit` —— 一律放行，不看边界。它们只会创建或覆盖内容，
- *   不会让任何 inode 消失；覆盖前的旧内容属于「可逆性」范畴，由 git 与 AGENTS.md
- *   的 `## Destructive actions` 纪律负责，不是这道闸的职责。
- * - `apply_patch` —— 只检查 `*** Delete File: <path>` 行里的路径。`Update File` /
- *   `Add File` 是写入，放行。
+ * - `write` / `edit` / `multiedit` — always pass, boundary unchecked. They only create or
+ *   overwrite content; no inode disappears. The overwritten old content belongs to
+ *   "reversibility", owned by git and the AGENTS.md `## Destructive actions` discipline —
+ *   not this gate's job.
+ * - `apply_patch` — only the paths on `*** Delete File: <path>` lines are checked.
+ *   `Update File` / `Add File` are writes and pass.
  *
- * ## 三档授权（与 bash 沙箱同一套，用户 2026-09-24 定，同日新增「永不删除」档）
+ * ## The three authorization tiers (same set as the bash sandbox; decided by the user
+ * 2026-09-24, the "never delete" tier added that day)
  *
- * 边界外的删除按目标路径分三档，判定核心是 `sandbox.ts` 的 `classifyOutsidePaths`，
- * 记忆落在 `allowlist.ts` 的同一个 globalThis 单例上 —— 所以 bash 侧记住的目录，
- * 这里立刻生效，反之亦然，两边口径不会漂移：
+ * Out-of-boundary deletions are judged in three tiers by target path. The judgment core is
+ * `sandbox.ts`'s `classifyOutsidePaths`, and memory lands on the same globalThis singleton
+ * in `allowlist.ts` — so a directory remembered on the bash side takes effect here
+ * instantly and vice versa; the two sides cannot drift:
  *
- * - **永不删除**（身份 / 凭据 / 手写配置：`~/.zshrc`、`~/.ssh`、`~/.gnupg`…）：
- *   **不弹框、无任何放行选项**，直接 fail-closed。白名单 / 会话豁免 /
- *   `PI_SANDBOX_EXTRA_WRITE` 都压不过。整份 patch 一起拒。
- *   用户 2026-09-25 把 `~/.config`、`~/.pi`、`~/.claude`、`~/.codex` 移出本档 ——
- *   它们是工具状态目录（含 lock / 缓存 / 会话日志），走下面的普通档。
- * - **危险路径**（系统根 / bin / 应用安装目录 / `~/Library` / 含 `.git`）：每次都问，
- *   只支持会话级豁免（`Allow for this session`），重启 pi 后恢复。
- * - **普通路径**：问一次，`Allow for this session（并记住该目录）` 后把目录范围写进持久白名单，
- *   以后（含 headless）不再问。
+ * - **never delete** (identity / credentials / handwritten config: `~/.zshrc`, `~/.ssh`,
+ *   `~/.gnupg`…): **no dialog, no allow option** — fail-closed outright. Allowlists, session
+ *   exemptions, and `PI_SANDBOX_EXTRA_WRITE` cannot override. The whole patch is rejected
+ *   together.
+ *   On 2026-09-25 the user moved `~/.config`, `~/.pi`, `~/.claude`, `~/.codex` out of this
+ *   tier — they are tool-state dirs (locks / caches / session logs) and follow the ordinary
+ *   tier below.
+ * - **dangerous paths** (system roots / bin / app install dirs / `~/Library` / anything
+ *   containing `.git`): asked every time; only session-level exemption
+ *   (`Allow for this session`), reset on restart.
+ * - **ordinary paths**: asked once; `Allow for this session (and remember the directory)`
+ *   writes the directory scope into the persistent allowlist — never asked again (incl.
+ *   headless).
  *
- * 与 bash 侧的一个区别：`apply_patch` 是 `tool_call` 钩子，**执行前**就能拦，且它知道
- * 全部目标路径（不像 bash 要先失败再从 stderr 里抽）。所以这里没有「命令重跑一次」的代价，
- * `Allow once` 就是单纯放行这一次、不记忆。
+ * One difference from the bash side: `apply_patch` is a `tool_call` hook — it can block
+ * **before** execution and already knows every target path (bash must fail first and scrape
+ * stderr). So there is no "re-run the command" cost here and `Allow once` simply passes this
+ * once, remembered nowhere.
  *
- * ## 体验
+ * ## The experience
  *
- * 写入**一次都不弹窗**，边界内（含可再生缓存 `~/.cache`、`~/Library/Caches` 等）的删除
- * 也不弹 —— 这是绝大多数操作。只有删边界外的文件才问。
- * 命中持久白名单时静默放行，但补一行 `notify`（否则会疑惑「怎么不问了」）。
- * 非交互环境（`pi -p`、subagent）：持久白名单**生效**（授权本来就是交互时给的），
- * 危险目录与未授权的普通目录 fail-closed 直接拒 —— 没有人在屏幕前，"默认同意"等于没有边界。
+ * Writes **never prompt**, and neither do deletions inside the boundary (incl. regenerable
+ * caches like `~/.cache`, `~/Library/Caches`) — that is the vast majority of operations.
+ * Only out-of-boundary deletes ask.
+ * Hits on the persistent allowlist pass silently but get a `notify` line (otherwise the user
+ * wonders "why did it stop asking").
+ * Non-interactive environments (`pi -p`, subagents): the persistent allowlist **applies**
+ * (the authorization was given interactively); dangerous dirs and unauthorized ordinary dirs
+ * fail-closed — with nobody at the screen, "default yes" is no boundary at all.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -69,20 +84,21 @@ import {
 import { getAllowlistStore, getSessionScopes } from "../bash-command-collapse/allowlist.ts";
 
 /**
- * 可能携带删除意图的工具。
+ * Tools that can carry deletion intent.
  *
- * `write` / `edit` / `multiedit` 刻意**不在**这个集合里 —— 它们只写不删（见文件头口径）。
- * `apply_patch` 的 `*** Delete File:` 是唯一一个「非 shell 工具也能删文件」的形状。
+ * `write` / `edit` / `multiedit` are deliberately **not** in this set — they write, never
+ * delete (see the file-header rule). `apply_patch`'s `*** Delete File:` is the only
+ * "a non-shell tool can delete files" shape.
  */
 const GUARDED_TOOLS = new Set(["apply_patch"]);
 
 /**
- * 从工具入参里取出**要删除**的路径。
+ * Take the paths **to be deleted** from the tool input.
  *
- * `apply_patch` 的形状是 `patch` 文本，路径在 `*** Delete File: <path>` 行里。
- * `Update File` / `Add File` 是写入，按口径放行，所以这里不提取。
- * 认不出来就交给"无目标 → 放行"：bash 沙箱与 AGENTS.md 纪律仍在，
- * 不该为了一个形状猜错而拦住正常写入。
+ * `apply_patch`'s shape is the `patch` text; paths sit on `*** Delete File: <path>` lines.
+ * `Update File` / `Add File` are writes and pass per the rule, so they are not extracted.
+ * Unrecognized input falls through to "no targets → pass": the bash sandbox and the
+ * AGENTS.md discipline still apply — a guessed-wrong shape must not block a normal write.
  */
 function deleteTargetPaths(input: unknown): string[] {
 	if (!input || typeof input !== "object") return [];
@@ -96,7 +112,7 @@ function deleteTargetPaths(input: unknown): string[] {
 		}
 	}
 
-	// 少数实现把删除目标单独放在字段里，一并认。
+	// a few implementations put delete targets in dedicated fields — recognize those too.
 	for (const key of ["deletePaths", "deletedPaths"]) {
 		const value = obj[key];
 		if (Array.isArray(value)) {
@@ -110,12 +126,12 @@ function deleteTargetPaths(input: unknown): string[] {
 }
 
 export default function (pi: ExtensionAPI) {
-	// 与 bash 沙箱共用同一个开关：PI_SANDBOX=off 时两边一起关，不会出现
-	// "bash 有边界、apply_patch 没边界"这种半开状态。
+	// shares the bash sandbox's switch: PI_SANDBOX=off disables both together — no
+	// "bash bounded, apply_patch unbounded" half-open state.
 	const enabled = isSandboxEnabled();
 	const allowlistPath = process.env.PI_SANDBOX_ALLOWLIST?.trim() || join(getAgentDir(), "sandbox-allowlist.json");
 	const sessionScopes = getSessionScopes();
-	// 路径分类需要的 IO（realpath / isDirectory）由这里注入，sandbox.ts 保持纯逻辑。
+	// the IO the path classification needs (realpath / isDirectory) is injected here; sandbox.ts stays pure logic.
 	const pathEnv: PathEnv = {
 		home: homedir(),
 		realpath: (p) => {
@@ -141,8 +157,8 @@ export default function (pi: ExtensionAPI) {
 		if (!GUARDED_TOOLS.has(event.toolName)) return undefined;
 
 		const paths = deleteTargetPaths(event.input);
-		// 认不出删除目标就放行：这不是"漏网"，而是这个工具形状没有删除动作可判。
-		// 真正的兜底是 bash 沙箱（删除最终都要落到某个路径上）。
+		// unrecognizable delete targets → pass: this is not "slipping through" — the tool shape simply has no deletable target to judge.
+		// the real backstop is the bash sandbox (a deletion must land on some path in the end).
 		if (paths.length === 0) return undefined;
 
 		const boundary: WriteBoundary = boundaryFromEnv(ctx.cwd ?? process.cwd());
@@ -156,9 +172,9 @@ export default function (pi: ExtensionAPI) {
 
 		const pending = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
 
-		// 永不删除档：不弹框、无任何放行选项，直接 fail-closed。
-		// 整份 patch 一起拒（与「全部命中才放行」同一口径）—— 否则一份 patch 里
-		// 混一个 `*** Delete File: ~/.ssh/id_rsa` 会被其余合法操作带着放行。
+		// the never-delete tier: no dialog, no allow option — fail-closed outright.
+		// the whole patch is rejected together (same rule as "allow only when everything is covered") — otherwise
+		// a `*** Delete File: ~/.ssh/id_rsa` mixed into a patch would ride through on the legit ops.
 		if (classification.blocked.length > 0) {
 			stats.blocked += classification.blocked.length;
 			return {
@@ -166,25 +182,25 @@ export default function (pi: ExtensionAPI) {
 				reason:
 					`These identity, credential, or manually maintained configuration paths cannot be deleted regardless of authorization:
 ` +
-					classification.blocked.map((d) => `  ${d.path}（${d.reason}）`).join("\n") +
+					classification.blocked.map((d) => `  ${d.path} (${d.reason})`).join("\n") +
 					`
 If deletion is necessary, perform it yourself in a terminal (or disable this layer with PI_SANDBOX=off).`,
 			};
 		}
 
 		if (pending.length === 0) {
-			// 全部命中边界内 / 持久白名单 / 会话豁免。命中白名单时补一行 notify，
-			// 否则用户会疑惑「怎么不问了」。（边界内的删除不 notify —— 那是绝大多数操作。）
+			// everything landed inside the boundary / persistent allowlist / session exemptions. On an allowlist hit,
+			// add one notify line or the user wonders "why did it stop asking". (In-boundary deletes do not notify — that is most operations.)
 			if (classification.covered.length > 0 && ctx.hasUI) {
-				ctx.ui.notify(`Deletion targets already allowlisted; allowed: ${classification.covered.join("、")}`, "info");
+				ctx.ui.notify(`Deletion targets already allowlisted; allowed: ${classification.covered.join(", ")}`, "info");
 			}
 			return undefined;
 		}
 
-		const roots = writableRoots(boundary).join("、");
+		const roots = writableRoots(boundary).join(", ");
 
-		// 非交互环境：持久白名单已在上面 classify 时生效（命中的进了 covered），
-		// 能走到这里说明没命中 → fail-closed。
+		// non-interactive: the persistent allowlist already applied during classify above (hits landed in covered) —
+		// reaching here means no coverage → fail-closed.
 		if (!ctx.hasUI) {
 			stats.blocked += pending.length;
 			return {
@@ -192,7 +208,7 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				reason:
 					`Deletion targets are outside the boundary and unauthorized; denied in non-interactive mode.
 ` +
-					`Target: ${pending.join("、")}
+					`Target: ${pending.join(", ")}
 Deletion boundary: ${roots}\n` +
 					`Persistent allowlist: ${allowlist().roots().length} entries (pre-authorize with /sandbox-boundary allow <directory> in an interactive session)`,
 			};
@@ -213,13 +229,13 @@ Deletion boundary: ${roots}\n` +
 				"⚠️ Deletion targets outside the boundary (high-risk directories)",
 				"",
 				"High-risk paths (confirmation on each deletion; session-only exemptions):",
-				foldPaths(classification.dangerous.map((d) => `${d.path}（${d.reason}）`)),
+				foldPaths(classification.dangerous.map((d) => `${d.path} (${d.reason})`)),
 			];
 			if (classification.ordinary.length > 0) {
 				lines.push("", "Also includes ordinary out-of-boundary paths (approve this time only; not remembered):", foldPaths(classification.ordinary));
 			}
 			lines.push("", `Deletion boundary: ${roots}`, "", "Choose Deny to leave everything untouched.");
-			// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
+			// pi's select only takes (title, options): the body must be spliced into the title (same approach as destructive-guard).
 			choice = await ctx.ui.select(lines.join("\n"), ["Deny", "Allow once", "Allow for this session"]);
 		} else {
 			const lines = [
@@ -229,7 +245,7 @@ Deletion boundary: ${roots}\n` +
 				foldPaths(classification.ordinary),
 				"",
 				ordinaryScopes.length > 0
-					? `Remember these paths: ${ordinaryScopes.join("、")} (future deletions within these directories will not prompt)`
+					? `Remember these paths: ${ordinaryScopes.join(", ")} (future deletions within these directories will not prompt)`
 					: "No safe persistent scope can be determined for these paths; approve each request individually.",
 				"",
 				`Deletion boundary: ${roots}`,
@@ -247,7 +263,7 @@ Deletion boundary: ${roots}\n` +
 			stats.blocked += pending.length;
 			return {
 				block: true,
-				reason: `The user denied deletion outside the boundary: ${pending.join("、")} (deletion boundary: ${roots}）`,
+				reason: `The user denied deletion outside the boundary: ${pending.join(", ")} (deletion boundary: ${roots})`,
 			};
 		}
 
@@ -260,10 +276,10 @@ Deletion boundary: ${roots}\n` +
 					"info",
 				);
 		} else if (choice === "Allow for this session") {
-			// 危险分支的会话级豁免：不落盘，重启 pi 即失效。
+			// the dangerous branch's session-level exemption: nothing written to disk, dies on restart.
 			sessionScopes.add(dangerousScopes);
 		}
-		// `Allow once`：什么都不记，直接放行这一次。
+		// `Allow once`: remember nothing; just let this one through.
 
 		stats.confirmed += pending.length;
 		return undefined;
@@ -322,13 +338,13 @@ Deletion boundary: ${roots}\n` +
 
 			const entries = store.entries();
 			const lines = [
-				`Deletion boundary: ${writableRoots(boundary).join("、")}`,
+				`Deletion boundary: ${writableRoots(boundary).join(", ")}`,
 				`Session counts: checked ${stats.checked}, remembered ${stats.remembered}, confirmed ${stats.confirmed}, denied ${stats.blocked}`,
 				"",
-				`Persistent allowlist (${store.filePath}）：${entries.length} entries`,
-				...(entries.length > 0 ? entries.map((e) => `  ${e.path}（${e.source}，${e.addedAt.slice(0, 10)}）`) : ["  (none)"]),
+				`Persistent allowlist (${store.filePath}): ${entries.length} entries`,
+				...(entries.length > 0 ? entries.map((e) => `  ${e.path} (${e.source}, ${e.addedAt.slice(0, 10)})`) : ["  (none)"]),
 				"",
-				`Session exemptions (expire on restart): ${sessionScopes.roots().length ? sessionScopes.roots().join("、") : "(none)"}`,
+				`Session exemptions (expire on restart): ${sessionScopes.roots().length ? sessionScopes.roots().join(", ") : "(none)"}`,
 				"",
 				"High-risk directories (system roots / bin / application directories / ~/Library / paths containing .git) prompt on every deletion and only allow session exemptions.",
 				"Protected identity, credential, or manually maintained configurations (~/.zshrc, ~/.ssh, ~/.gnupg, etc.) are denied without approval options.",

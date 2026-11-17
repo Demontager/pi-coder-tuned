@@ -1,21 +1,23 @@
 /**
- * widget.ts — 清单渲染，样式参照 @tintinweb/pi-tasks。
+ * widget.ts — the list rendering, styled after @tintinweb/pi-tasks.
  *
- * 照搬的样式要素（pi-tasks `src/ui/task-widget.ts`）：
- *   - 头部一行：`● N tasks (X done, Y in progress, Z open)`，整体 accent 色
- *   - 任务行两空格缩进，格式 `  <符号> <dim 的 #id> <正文>`
- *   - 已完成：success 色符号 + dim 且带删除线的正文
- *   - 进行中：accent 色星形 spinner 帧 + accent 色正文 + 省略号（表示仍在跑）
- *   - 待办：无色符号（◻）+ 普通正文
- *   - 溢出：`    … and N more`，dim
- *   - 整行按终端宽度截断，截断标记用 "..."（三个 ASCII 点）而非 "…" ——
- *     这是 pi-tasks 的 `truncation` 默认值，注释里说明它是 pi-tui 自己的默认。
+ * The style elements copied over (pi-tasks `src/ui/task-widget.ts`):
+ *   - one header row: `● N tasks (X done, Y in progress, Z open)`, all accent
+ *   - task rows indented two spaces, format `  <glyph> <dim #id> <text>`
+ *   - done: success-colored glyph + dim strikethrough text
+ *   - in progress: accent star-spinner frame + accent text + ellipsis (still running)
+ *   - pending: uncolored glyph (◻) + plain text
+ *   - overflow: `    … and N more`, dim
+ *   - each line truncates to the terminal width with "..." (three ASCII dots), not
+ *     "…" — pi-tasks's `truncation` default, whose comment says it is pi-tui's own
+ *     default.
  *
- * 颜色**全部走 theme.fg()**，一处硬编码颜色都没有 —— 所以跟着 pi 主题走，
- * 换主题就换配色，不需要改这里。
+ * **All colors go through theme.fg()** — not one hardcoded color, so the palette
+ * follows the pi theme; a theme change needs nothing here.
  *
- * 2026-09-24 之前头部在含 plan-mode 镜像条目时不画（那套镜像已随 plan-mode 的
- * execute 态一起删除，头部恢复为永远画）。
+ * Before 2026-09-24 the header was not drawn while plan-mode mirrored entries
+ * existed (that mirroring was removed together with plan-mode's execute state — the
+ * header is always drawn again).
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -31,11 +33,11 @@ export const GLYPHS = {
 	truncation: "...",
 } as const;
 
-/** pi-tasks 的星形 spinner 帧序列，原样沿用。 */
-// 刻意去掉了 pi-tasks 原序列末尾的 ✽ —— 它比前面几帧粗重，转起来会突兀。
+/** pi-tasks's star-spinner frame sequence, used verbatim. */
+// the final ✽ of pi-tasks's original sequence was deliberately dropped — it is heavier than the frames before it and looks abrupt mid-spin.
 export const SPINNER = ["+", "✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼"] as const;
 
-/** pi-tasks 的 DEFAULT_MAX_VISIBLE_TASKS。超出部分折叠成 "… and N more"。 */
+/** pi-tasks's DEFAULT_MAX_VISIBLE_TASKS. Beyond it folds into "… and N more". */
 export const MAX_VISIBLE = 10;
 
 export function buildWidgetLines(state: State, frame: number, theme: Theme, width: number): string[] {
@@ -53,8 +55,8 @@ export function buildWidgetLines(state: State, frame: number, theme: Theme, widt
 	const noun = tasks.length === 1 ? "task" : "tasks";
 	const statusText = `${tasks.length} ${noun} (${parts.join(", ")})`;
 
-	// 头部永远画：它是这一块唯一的总量行。（2026-09-24 之前含 plan-mode 镜像条目时
-	// 不画头部，那套镜像已随 plan-mode 的 execute 态一起删除。）
+	// the header is always drawn: it is the only totals row of the block. (Before 2026-09-24 it was hidden
+	// while plan-mode mirrored entries existed — that mirroring was removed with plan-mode's execute state.)
 	const lines: string[] = [truncate(`${theme.fg("accent", GLYPHS.header)} ${theme.fg("accent", statusText)}`)];
 
 	const visible = tasks.slice(0, MAX_VISIBLE);
@@ -64,14 +66,14 @@ export function buildWidgetLines(state: State, frame: number, theme: Theme, widt
 		const dimId = theme.fg("dim", `#${task.id}`);
 
 		if (task.status === "done") {
-			// 完成项：success 符号 + dim 删除线正文（id 与正文一起划掉）
+			// a done task: success glyph + dim strikethrough text (id and text struck through together)
 			const glyph = theme.fg("success", GLYPHS.done);
 			lines.push(truncate(`  ${glyph} ${theme.fg("dim", theme.strikethrough(`#${task.id} ${task.text}`))}`));
 			continue;
 		}
 
 		if (task.status === "in_progress") {
-			// 进行中：星形帧随 frame 转动，正文 accent + 省略号表示还没结束
+			// in progress: the star frame turns with `frame`; accent text + ellipsis means not finished
 			const glyph = theme.fg("accent", SPINNER[frame % SPINNER.length]);
 			lines.push(truncate(`  ${glyph} ${dimId} ${theme.fg("accent", task.text + GLYPHS.overflow)}`));
 			continue;

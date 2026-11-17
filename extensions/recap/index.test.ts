@@ -35,17 +35,21 @@ import { SUBAGENT_RPC_REPLY_PREFIX, SUBAGENT_RPC_REQUEST } from "./subagents.ts"
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 
 /**
- * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态，两个都能加载扩展。
+ * pi's library entry (not the CLI): bundle is the shape `pi` actually runs, dist is
+ * the node build shape — both can load extensions.
  *
- * 先从 `pi` 可执行文件反查**真正的安装位置**（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 后者是**扩展包的安装根**，`pi update --extensions` 会用
- * `--config.auto-install-peers=false` 把自动装进去的 `@earendil-works/pi-*` 同伴包剪掉，
- * 于是那份副本只剩空壳（文件都在、import 报 `ERR_MODULE_NOT_FOUND`；2026-09 升
- * pi-subagents 0.68.0 时实测踩到）。
+ * First back-trace the `pi` executable to the **real install location** (pnpm/npm shim
+ * scripts carry a `# cmd-shim-target=<abs path>` line; npm on Unix uses a symlink —
+ * both are tried), then fall back to the `~/.pi/agent/npm` copy — the latter is the
+ * **extension-package install root**: `pi update --extensions` trims the auto-installed
+ * `@earendil-works/pi-*` sibling packages with
+ * `--config.auto-install-peers=false`, leaving that copy a hollow shell (files present,
+ * import fails with `ERR_MODULE_NOT_FOUND`; hit live while upgrading pi-subagents
+ * 0.68.0 in 2026-09).
  *
- * 判定方式是**能不能真 import**，不是路径存不存在 —— 只有真 import 一次才分得清空壳。
- * 全都不行就返回 undefined，调用方整体 skip（不假装通过）。
+ * The check is **whether it really imports**, not whether the path exists — only an
+ * actual import can tell a hollow shell apart. All failing → undefined; the caller
+ * skips wholesale (never fakes a pass).
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -55,17 +59,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 		if (!dir) continue;
 		const shimPath = path.join(dir, "pi");
 		try {
-			// npm 的 shim 是符号链接
+			// npm's shim is a symlink
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -78,14 +82,14 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
 }
 
 const piEntry = await findPiLibraryEntry();
-const skip = piEntry === undefined ? "找不到本机 pi 的库入口（装过 pi 才有）" : false;
+const skip = piEntry === undefined ? "could not find the local pi library entry (requires an installed pi)" : false;
 
 test("local /recap and idle recap display an excerpt with zero auth or inference calls", { skip, timeout: 15000 }, async () => {
 	const workspace = makeWorkspace();
@@ -130,15 +134,15 @@ interface WidgetComponent {
 type WidgetFactory = (tui: unknown, theme: unknown) => WidgetComponent;
 
 interface Recorder {
-	/** `modelRegistry.complete` 被调用的次数（摘要生成 = 一次）。 */
+	/** How many times `modelRegistry.complete` was called (one recap generation = one). */
 	completeCalls: number;
-	/** 每次 `setWidget(key, <factory>)` 记一个；undefined 不入列。 */
+	/** One entry per `setWidget(key, <factory>)`; undefined is not recorded. */
 	widgets: WidgetFactory[];
-	/** `ui.notify` 收到的文案（成功是一条 `✦ Recap: …`，失败是「没能生成 recap…」）。 */
+	/** The texts `ui.notify` received (a `✦ Recap: …` on success, a "could not generate recap…" on failure). */
 	notifies: string[];
 }
 
-/** 假 ctx：只提供 recap 这条路径上真正用到的东西。 */
+/** The fake ctx: only what recap's path really uses. */
 function createContext(recorder: Recorder, branch?: unknown[]): unknown {
 	return {
 		mode: "tui",
@@ -147,15 +151,15 @@ function createContext(recorder: Recorder, branch?: unknown[]): unknown {
 		sessionManager: {
 			getBranch: () =>
 				branch ?? [
-					{ type: "message", message: { role: "user", content: "把 recap 的定时改成等子代理结束" } },
-					{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "改完了，正在等子代理的结果。" }] } },
+					{ type: "message", message: { role: "user", content: "reschedule recap to wait for the subagent" } },
+					{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "done, waiting on the subagent's result." }] } },
 				],
 		},
 		modelRegistry: {
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
 			complete: async () => {
 				recorder.completeCalls += 1;
-				return { content: [{ type: "text", text: "已把 recap 定时改成等子代理结束" }] };
+				return { content: [{ type: "text", text: "rescheduled recap to wait for the subagent" }] };
 			},
 		},
 		ui: {
@@ -186,20 +190,20 @@ function createTestBus(): TestBus {
 			};
 		},
 		emit(channel, data) {
-			// 复制一份：真实 EventEmitter 也是同步派发给订阅者。
+			// a copy: the real EventEmitter also dispatches synchronously to subscribers.
 			for (const handler of [...(handlers.get(channel) ?? [])]) handler(data);
 		},
 	};
 }
 
-/** 等谓词成立；超时就把「在等什么」一并报出来。 */
+/** Wait until the predicate holds; on timeout report what was being waited for. */
 async function waitFor(predicate: () => boolean, timeoutMs: number, what: string): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
-	throw new Error(`等不到：${what}（超时 ${timeoutMs}ms）`);
+	throw new Error(`timed out waiting for: ${what} (timeout ${timeoutMs}ms)`);
 }
 
 function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () => void } {
@@ -215,11 +219,11 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 	};
 }
 
-test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时再生成", { skip, timeout: 180_000 }, async () => {
+test("no recap is generated while a subagent runs; once it ends, a fresh 10s timer generates", { skip, timeout: 180_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = createTestBus();
-		/** 假 pi-subagents：`active` 就是它 `status` 回包里的 `fleet.totalActive`。 */
+		/** The fake pi-subagents: `active` is its `status` reply's `fleet.totalActive`. */
 		const bridge = { active: true, requests: [] as Array<Record<string, unknown>> };
 		bus.on(SUBAGENT_RPC_REQUEST, (data) => {
 			const request = data as Record<string, unknown>;
@@ -231,7 +235,7 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 				success: true,
 				data: { text: "…", fleet: { version: 1, entries: [], totalActive: bridge.active ? 1 : 0, omitted: 0 } },
 			};
-			// 真实 RPC 的回复是异步的（handler 里 await 过）。
+			// a real RPC reply is async (the handler awaits).
 			setTimeout(() => bus.emit(`${SUBAGENT_RPC_REPLY_PREFIX}${String(request.requestId)}`, reply), 0);
 		});
 
@@ -247,50 +251,50 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 			}>;
 		};
 		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, bus);
-		assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错（`./subagents.ts` 的 import 也在这里被验证）");
+		assert.deepEqual(loaded.errors, [], "pi's extension loader must not error (the `./subagents.ts` import is verified here too)");
 		assert.equal(loaded.extensions.length, 1);
 		const extension = loaded.extensions[0];
 		assert.ok(extension);
 
-		// 注册面：这里挂了计时器（agent_settled / agent_start）与清理（session_*），命令面有 /recap。
+		// the registration surface: the timers (agent_settled / agent_start) and cleanup (session_*) hang here, the command surface has /recap.
 		const settled = extension.handlers.get("agent_settled")?.[0];
 		const shutdown = extension.handlers.get("session_shutdown")?.[0];
-		assert.ok(settled, "应该注册了 agent_settled");
-		assert.ok(extension.handlers.get("agent_start")?.length, "应该注册了 agent_start");
-		assert.ok(extension.handlers.get("input")?.length, "应该注册了 input");
-		assert.ok(shutdown, "应该注册了 session_shutdown");
-		assert.ok(extension.commands.has("recap"), "应该注册了 /recap 命令");
+		assert.ok(settled, "agent_settled should be registered");
+		assert.ok(extension.handlers.get("agent_start")?.length, "agent_start should be registered");
+		assert.ok(extension.handlers.get("input")?.length, "input should be registered");
+		assert.ok(shutdown, "session_shutdown should be registered");
+		assert.ok(extension.commands.has("recap"), "the /recap command should be registered");
 
 		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
 		const ctx = createContext(recorder);
 
-		// 回合结束：起 10s 空闲表（此刻不会有任何输出）。
+		// the turn ends: arm the 10s idle timer (no output at this point).
 		await settled({}, ctx);
 		assert.equal(recorder.completeCalls, 0);
 		assert.equal(recorder.widgets.length, 0);
 
-		// ~10s 后第一次探测：假舰队里有 1 个活跃子代理 → 只重查，不生成。
-		await waitFor(() => bridge.requests.length >= 1, 45_000, "空闲 10s 后的第一次子代理探测");
+		// ~10s later the first probe: the fake fleet has 1 active subagent → re-check only, no generation.
+		await waitFor(() => bridge.requests.length >= 1, 45_000, "the first subagent probe after 10 idle seconds");
 		assert.equal(bridge.requests[0]?.method, "status");
-		assert.equal(recorder.completeCalls, 0, "有子代理在跑时绝不能生成摘要");
-		assert.equal(recorder.widgets.length, 0, "有子代理在跑时不能出现 recap widget");
+		assert.equal(recorder.completeCalls, 0, "a recap must never be generated while a subagent runs");
+		assert.equal(recorder.widgets.length, 0, "no recap widget may appear while a subagent runs");
 
-		// 子代理结束：等下一次重查（10s 一轮）确认「没活了」——但这时也不生成，
-		// 而是重新起一轮 10s 定时（结果刚回来、被唤醒的回合正要跑，现在总结是半截的）。
+		// the subagent ends: the next re-check (10s per round) confirms "nothing left" — but no generation either,
+		// instead a fresh 10s timer arms (the result just arrived, the woken turn is about to run — a recap now is half-done).
 		bridge.active = false;
-		await waitFor(() => bridge.requests.length >= 2, 15_000, "waiting 模式下的 10s 重查");
-		assert.equal(recorder.completeCalls, 0, "刚查到没活时应重新起 10s 定时，而不是立刻生成");
+		await waitFor(() => bridge.requests.length >= 2, 15_000, "the 10s re-check in waiting mode");
+		assert.equal(recorder.completeCalls, 0, "finding no work should re-arm a 10s timer, not generate right away");
 
-		// 重新起表后 10s：生成并显示摘要。
-		await waitFor(() => recorder.completeCalls >= 1, 45_000, "重新起表 10s 后的摘要生成");
-		assert.equal(recorder.widgets.length, 1, "摘要应该已经挂上 widget");
+		// after the re-armed 10s: generate and show the recap.
+		await waitFor(() => recorder.completeCalls >= 1, 45_000, "the recap generation 10s after the re-armed timer");
+		assert.equal(recorder.widgets.length, 1, "the recap should be on a widget already");
 
-		// widget 渲染的是清洗后的摘要文本（`✦ Recap:` 前缀 + 下方空行）。
+		// the widget renders the cleaned recap text (`✦ Recap:` prefix + a trailing blank row).
 		const component = recorder.widgets[0]?.(undefined, { fg: (_color: string, text: string) => text });
 		assert.ok(component);
 		const rendered = component.render(80).join("\n");
 		assert.match(rendered, /✦ Recap:/);
-		assert.match(rendered, /已把 recap 定时改成等子代理结束/);
+		assert.match(rendered, /rescheduled recap to wait for the subagent/);
 
 		await shutdown?.({}, ctx);
 	} finally {
@@ -298,7 +302,7 @@ test("有子代理在跑时不生成摘要；等它结束后重新起 10s 定时
 	}
 });
 
-test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容加一行、邻居已带空行不重复、重入不死循环", { skip, timeout: 30_000 }, async () => {
+test("the gap is decided by inspecting neighbours at render: no neighbour → none, a content neighbour → one row, a blank-tailed neighbour → none again, re-entry → no infinite recursion", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = createTestBus();
@@ -318,57 +322,57 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		const loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], workspace.projectDir, workspace.agentDir, bus);
 		assert.deepEqual(loaded.errors, []);
 		const command = loaded.extensions[0]?.commands.get("recap");
-		assert.ok(command, "应该注册了 /recap 命令");
+		assert.ok(command, "the /recap command should be registered");
 
-		// /recap 是 force=true 的那条路（不走 10s 闲置闸门），拿到的 widget 工厂就是渲染现场。
+		// /recap takes the force=true path (skipping the 10s idle gate); the captured widget factory is the render site.
 		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
 		await command.handler("", createContext(recorder));
-		assert.equal(recorder.widgets.length, 1, "/recap 应该挂上 widget");
+		assert.equal(recorder.widgets.length, 1, "/recap should mount a widget");
 
 		const theme = { fg: (_color: string, text: string) => text };
-		/** 每个场景都要一个新组件：重入标记在闭包里，不能复用。 */
+		/** Every scenario needs a fresh component: the re-entry flag lives in the closure — no reuse. */
 		const newComponent = (tui: unknown): WidgetComponent =>
 			(recorder.widgets[0] as WidgetFactory)(tui, theme);
-		/** pi 的「编辑器上方」容器长这样：先一个全空的 Spacer，再按注册顺序放各扩展的 widget。 */
+		/** pi's "above the editor" container looks like this: an all-blank Spacer first, then each extension's widget in registration order. */
 		const container = (...neighbours: unknown[]): { children: unknown[] } => {
 			const tui = { children: [{ render: (): string[] => [""] }] as unknown[] };
 			for (const neighbour of neighbours) tui.children.push(neighbour);
 			return tui;
 		};
 
-		// 1) 容器里只有自己（上面的 Spacer 是全空行）→ 不加前导空行。
+		// 1) only ourselves in the container (the Spacer above is an empty row) → no leading blank.
 		const alone = newComponent(undefined);
 		const aloneLines = alone.render(80);
-		assert.equal(aloneLines.length, 2, "单独显示 = 摘要一行 + 下方空行");
+		assert.equal(aloneLines.length, 2, "alone = the recap row + one blank row below");
 		assert.match(aloneLines[0] ?? "", /✦ Recap:/);
-		assert.equal(aloneLines[1], "", "摘要下方固定补一个空行");
+		assert.equal(aloneLines[1], "", "one blank row below the recap, always");
 
-		// 2) 上方邻居有可见内容（任务清单 / pi-subagents 的 `async subagent` 块）→ 补前导空行。
-		const withNeighbour = container({ render: (): string[] => [" ● 3 tasks", "  ◻ #1 甲"], invalidate() {} });
+		// 2) the neighbour above has visible content (the task list / pi-subagents's `async subagent` block) → a leading blank is added.
+		const withNeighbour = container({ render: (): string[] => [" ● 3 tasks", "  ◻ #1 task-a"], invalidate() {} });
 		const spaced = newComponent(withNeighbour);
 		withNeighbour.children.push(spaced);
 		const spacedLines = spaced.render(80);
-		assert.equal(spacedLines.length, 3, "邻居有内容 → 恰好一个前导空行");
+		assert.equal(spacedLines.length, 3, "a content neighbour → exactly one leading blank");
 		assert.equal(spacedLines[0], "");
 		assert.match(spacedLines[1] ?? "", /✦ Recap:/);
-		assert.equal(spacedLines[2], "", "下方空行不受影响");
+		assert.equal(spacedLines[2], "", "the trailing blank is unaffected");
 
-		// 3) 上方邻居自己就以空行收尾（间隔已经有了）→ 不再补，否则会多出一行。
+		// 3) the neighbour itself ends in a blank row (a gap already exists) → nothing added — or there would be two.
 		const blankTailed = container({ render: (): string[] => [" ● 3 tasks", ""], invalidate() {} });
 		const quiet = newComponent(blankTailed);
 		blankTailed.children.push(quiet);
 		const quietLines = quiet.render(80);
-		assert.equal(quietLines.length, 2, "邻居已带空行 → 不重复补");
+		assert.equal(quietLines.length, 2, "a blank-tailed neighbour → no second pad");
 		assert.match(quietLines[0] ?? "", /✦ Recap:/);
 
-		// 4) 邻居的 render 反过来再渲染 recap（simple-task 的 gap.ts 就是这样看邻居的）→
-		//    有重入保护：只重入一次，且那次不带前导空行；间隔由外层那次 walk 统一决定。
+		// 4) the neighbour's render re-renders recap in turn (that is how simple-task's gap.ts inspects neighbours) →
+		//    the re-entry guard holds: exactly one re-entry, and that one carries no leading blank; the gap is decided by the outer walk.
 		const nested: string[][] = [];
 		let cyclic: WidgetComponent | undefined;
 		const cyclicNeighbour = {
 			render: (): string[] => {
 				nested.push(cyclic?.render(80) ?? []);
-				return [" ● 3 tasks", "  ◻ #1 甲"];
+				return [" ● 3 tasks", "  ◻ #1 task-a"];
 			},
 			invalidate() {},
 		};
@@ -376,10 +380,10 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 		cyclic = newComponent(cyclicContainer);
 		cyclicContainer.children.push(cyclic);
 		const outerLines = cyclic.render(80);
-		assert.equal(nested.length, 1, "重入只发生一次（没有重入保护会一直递归到栈溢出）");
-		assert.equal(nested[0]?.length, 2, "重入的那次只输出内容行");
+		assert.equal(nested.length, 1, "the re-entry happens exactly once (without the guard it recurses to stack overflow)");
+		assert.equal(nested[0]?.length, 2, "the re-entered render emits only content rows");
 		assert.match(nested[0]?.[0] ?? "", /✦ Recap:/);
-		assert.equal(outerLines.length, 3, "外层那次 walk 看到邻居有内容 → 补前导空行");
+		assert.equal(outerLines.length, 3, "the outer walk sees content → a leading blank is added");
 		assert.equal(outerLines[0], "");
 		assert.match(outerLines[1] ?? "", /✦ Recap:/);
 	} finally {
@@ -388,13 +392,17 @@ test("间隔由渲染时探测邻居决定：无邻居不加、邻居有内容�
 });
 
 /**
- * `/recap` 的重复执行闸门：同一轮对话已经生成过摘要、且它还挂在屏幕上时，再执行不重跑
- * 模型、不重挂 widget、也不发通知 —— 那次生成一旦返回空，失败提示就会把刚生成的摘要顶掉。
- * 判据是「摘要存在 **且** 指纹（最后一轮 user+assistant+model）与上次生成时相同」，
- * 所以新对话一来闸门就放开：正常路径下 `input` 事件已经先把状态清了（这里也顺带覆盖），
- * 非交互来源的新消息则会因为指纹不同而放开。
+ * `/recap`'s repeat-run gate: when the current turn already has a recap still on
+ * screen, re-running neither re-calls the model nor re-mounts the widget nor sends a
+ * notification — a generation that comes back empty would let the failure notice push
+ * the fresh recap off.
+ * The rule is "a recap exists **and** its fingerprint (last user+assistant+model)
+ * matches the one it was generated with", so the gate opens the moment new
+ * conversation arrives: on the normal path the `input` event has already cleared the
+ * state (covered here too), and a non-interactive new message opens it via the
+ * different fingerprint.
  */
-test("/recap 重复执行不重跑模型、不发提示；有新对话后才重新生成", { skip, timeout: 30_000 }, async () => {
+test("/recap run twice neither re-calls the model nor notifies; it regenerates only after new conversation", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const bus = createTestBus();
@@ -416,46 +424,46 @@ test("/recap 重复执行不重跑模型、不发提示；有新对话后才重�
 		assert.deepEqual(loaded.errors, []);
 		const command = loaded.extensions[0]?.commands.get("recap");
 		const onInput = loaded.extensions[0]?.handlers.get("input")?.[0];
-		assert.ok(command, "应该注册了 /recap 命令");
-		assert.ok(onInput, "应该注册了 input");
+		assert.ok(command, "the /recap command should be registered");
+		assert.ok(onInput, "input should be registered");
 
-		/** 可变的对话分支：push 一对新消息就等于又聊了一轮。 */
+		/** The mutable conversation branch: pushing a message pair is one more exchange. */
 		const branch: unknown[] = [
-			{ type: "message", message: { role: "user", content: "甲" } },
-			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "乙" }] } },
+			{ type: "message", message: { role: "user", content: "a" } },
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "b" }] } },
 		];
 		const recorder: Recorder = { completeCalls: 0, widgets: [], notifies: [] };
 		const ctx = createContext(recorder, branch);
 
-		// 第一次：正常生成 + 通知。
+		// the first run: normal generation + notification.
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 1, "第一次 /recap 应该生成");
+		assert.equal(recorder.completeCalls, 1, "the first /recap should generate");
 		assert.equal(recorder.widgets.length, 1);
-		assert.deepEqual(recorder.notifies, ["✦ Recap: 已把 recap 定时改成等子代理结束"]);
+		assert.deepEqual(recorder.notifies, ["✦ Recap: rescheduled recap to wait for the subagent"]);
 
-		// 第二次（没有新对话）：闸门命中，什么都不做。
+		// the second run (no new conversation): the gate hits — nothing happens.
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 1, "同一轮对话不该第二次调模型");
-		assert.equal(recorder.widgets.length, 1, "不该重挂 widget");
-		assert.equal(recorder.notifies.length, 1, "不该再发通知（失败提示会把摘要顶掉）");
+		assert.equal(recorder.completeCalls, 1, "the same turn must not call the model twice");
+		assert.equal(recorder.widgets.length, 1, "the widget must not be remounted");
+		assert.equal(recorder.notifies.length, 1, "no second notification (a failure notice would push the recap off)");
 
-		// 新对话 + 交互输入：`input` 先把摘要与状态清掉，再执行就该重新生成。
-		branch.push({ type: "message", message: { role: "user", content: "丙" } });
-		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "丁" }] } });
+		// new conversation + interactive input: `input` clears the recap and state first — running it should regenerate.
+		branch.push({ type: "message", message: { role: "user", content: "c" } });
+		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "d" }] } });
 		await onInput({ source: "interactive" }, ctx);
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 2, "input 清过状态后应该重新生成");
+		assert.equal(recorder.completeCalls, 2, "after input cleared the state it should regenerate");
 		assert.equal(recorder.notifies.length, 2);
 
-		// 紧接着再按一次：又成了同一轮，不再重复。
+		// pressing it again right after: same turn again — no repeat.
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 2, "同一轮仍不重复");
+		assert.equal(recorder.completeCalls, 2, "the same turn still does not repeat");
 
-		// 新对话但没人发过 `input`（非交互来源的消息，清不到状态）→ 指纹不同，闸门同样放开。
-		branch.push({ type: "message", message: { role: "user", content: "戊" } });
-		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "己" }] } });
+		// new conversation with no `input` sent (a non-interactive message cannot clear the state) → the fingerprint differs and the gate opens anyway.
+		branch.push({ type: "message", message: { role: "user", content: "e" } });
+		branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "f" }] } });
 		await command.handler("", ctx);
-		assert.equal(recorder.completeCalls, 3, "指纹变了就该重新生成");
+		assert.equal(recorder.completeCalls, 3, "a changed fingerprint should regenerate");
 
 		await loaded.extensions[0]?.handlers.get("session_shutdown")?.[0]?.({}, ctx);
 	} finally {

@@ -1,18 +1,21 @@
 /**
- * 纯判定：这一轮要不要重新注入核心规则。
+ * Pure decision logic: does this turn need a core-rules re-injection.
  *
- * 语义照 Codex 的 `AgentsMdState::render_diff`（codex-rs/core/src/context/world_state/agents_md.rs）：
- * 拿当前快照和 baseline 比，不变就什么都不发，变了才发并带上「替换此前全部」的声明。
- * 独立成模块是为了让 `node --test` 不经过 pi 的 loader 也能直接测。
+ * The semantics mirror Codex's `AgentsMdState::render_diff`
+ * (codex-rs/core/src/context/world_state/agents_md.rs): compare the current
+ * snapshot against the baseline — unchanged → send nothing; changed → send
+ * with a "replaces all previous" notice.
+ * Its own module so `node --test` exercises it without pi's loader.
  */
 
-/** Codex 的 `REPLACEMENT_NOTICE` 同义句：重注入时告诉模型以最新这份为准。 */
+/** Codex's `REPLACEMENT_NOTICE` equivalent: tells the model the newest copy wins on re-injection. */
 export const REPLACEMENT_NOTICE = "These core rules replace all previously provided core rules.";
 
 /**
- * 投影里已有的 core-rules 消息的 hash，按出现顺序。
- * `undefined` 表示那条消息没带 hash（旧格式 / 手工编辑过）—— 对应 Codex 的
- * `PreviousSectionState::Unknown`：知道有前文，但不知道内容，保守地重注入。
+ * The hashes of core-rules messages already in the projection, in order.
+ * `undefined` marks a message carrying no hash (an old format / a hand edit)
+ * — Codex's `PreviousSectionState::Unknown`: prior content exists, contents
+ * unknown — conservatively re-inject.
  */
 export type PriorHashes = (string | undefined)[];
 
@@ -21,20 +24,22 @@ export type InjectionDecision =
 	| { action: "inject"; replacement: boolean };
 
 /**
- * @param currentHash 当前 `AGENTS.core.md` 内容的 hash；文件缺失或读不到时传 undefined
- * @param priorHashes 模型可见投影里已有的 core-rules 消息 hash（压缩后旧条目自动出投影）
+ * @param currentHash the hash of the current `AGENTS.core.md` contents;
+ *                    undefined when the file is missing or unreadable
+ * @param priorHashes the core-rules message hashes in the model-visible
+ *                    projection (compaction drops old entries automatically)
  */
 export function decideInjection(currentHash: string | undefined, priorHashes: PriorHashes): InjectionDecision {
 	if (currentHash === undefined) return { action: "skip", reason: "no-rules-file" };
-	// 投影里没有 = 会话刚开始，或上一次注入已被压缩掉 —— 两种都是 Codex 的全量重注入时机。
+	// absent from the projection = session start, or the last injection was compacted away — both are Codex's full re-injection moments.
 	if (priorHashes.length === 0) return { action: "inject", replacement: false };
 	const last = priorHashes[priorHashes.length - 1];
 	if (last === currentHash) return { action: "skip", reason: "unchanged" };
-	// 内容变了，或前文 hash 不可知：重注入并声明替换。
+	// the content changed, or the prior hash is unknowable: re-inject and declare replacement.
 	return { action: "inject", replacement: true };
 }
 
-/** 把替换声明拼在规则正文前面（Codex 是 `format!("{REPLACEMENT_NOTICE}\n\n{}", text)`）。 */
+/** Prepend the replacement notice to the rules body (Codex does `format!("{REPLACEMENT_NOTICE}\n\n{}", text)`). */
 export function renderBody(rulesText: string, replacement: boolean): string {
 	return replacement ? `${REPLACEMENT_NOTICE}\n\n${rulesText}` : rulesText;
 }

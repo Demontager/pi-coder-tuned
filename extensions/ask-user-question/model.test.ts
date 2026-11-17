@@ -1,11 +1,14 @@
 /**
- * Tests for model.ts — 问卷状态机（纯 reducer）。
+ * Tests for model.ts — the questionnaire state machine (a pure reducer).
  *
  * Run with:  node --test clients/pi/extensions/ask-user-question/model.test.ts
  *
- * 覆盖：单选提交即结束（单题无提交页）、数字键、多选勾选/提交、自由输入
- * （含空输入退回）、取消、多题推进与提交页闸门、Tab 环绕切换、重答恢复光标、
- * 哨兵行与边界（上下键 clamp、单选题 Space 无效、提交页数字键无效）。
+ * Covers: single-select submit ends it (a single question has no submit
+ * page), digit keys, multi-select toggling/submitting, free input (incl. an
+ * empty one backing out), cancel, multi-question advancing and the
+ * submit-page gate, Tab wrap-around, cursor restore on re-answer, the
+ * sentinel row, and boundaries (up/down clamping, Space inert on
+ * single-select, digit keys inert on the submit page).
  */
 
 import assert from "node:assert/strict";
@@ -62,7 +65,7 @@ function submitted(outcome: Outcome) {
 	return outcome.result;
 }
 
-test("单题没有提交页；行数 = 选项数 + 1（哨兵）", () => {
+test("a single question has no submit page; rows = options + 1 (the sentinel)", () => {
 	const state = createState(singleParams());
 	assert.equal(hasSubmitTab(state), false);
 	assert.equal(isSubmitTab(state), false);
@@ -71,7 +74,7 @@ test("单题没有提交页；行数 = 选项数 + 1（哨兵）", () => {
 	assert.deepEqual(unansweredHeaders(state), ["Lib"]);
 });
 
-test("单选：光标移到选项上 Enter → 直接提交（单题无提交页）", () => {
+test("single-select: Enter on an option → submits directly (a single question has no submit page)", () => {
 	const state = createState(singleParams());
 	reduce(state, { type: "down" }); // cursor = 1 → dayjs
 	const result = submitted(reduce(state, { type: "confirm" }));
@@ -81,13 +84,13 @@ test("单选：光标移到选项上 Enter → 直接提交（单题无提交页
 	]);
 });
 
-test("单选：数字键直接选中并提交", () => {
+test("single-select: a digit key picks and submits directly", () => {
 	const state = createState(singleParams());
 	const result = submitted(reduce(state, { type: "digit", digit: 3 }));
 	assert.equal(result.answers[0].answer, "luxon");
 });
 
-test("单选：数字键落在哨兵行 → 进自由输入", () => {
+test("single-select: a digit on the sentinel row → free input", () => {
 	const state = createState(singleParams());
 	const outcome = reduce(state, { type: "digit", digit: 4 });
 	assert.equal(outcome.status, "enterInput");
@@ -95,14 +98,14 @@ test("单选：数字键落在哨兵行 → 进自由输入", () => {
 	assert.equal(state.cursor, 3);
 });
 
-test("单选：越界数字键无效", () => {
+test("single-select: an out-of-range digit does nothing", () => {
 	const state = createState(singleParams());
 	const outcome = reduce(state, { type: "digit", digit: 9 });
 	assert.equal(outcome.status, "continue");
 	assert.equal(state.cursor, 0);
 });
 
-test("上下键 clamp 在 [0, rowCount-1]", () => {
+test("up/down keys clamp to [0, rowCount-1]", () => {
 	const state = createState(singleParams());
 	reduce(state, { type: "up" });
 	assert.equal(state.cursor, 0);
@@ -110,14 +113,14 @@ test("上下键 clamp 在 [0, rowCount-1]", () => {
 	assert.equal(state.cursor, 3);
 });
 
-test("单选题 Space 不产生勾选", () => {
+test("Space toggles nothing on single-select", () => {
 	const state = createState(singleParams());
 	const outcome = reduce(state, { type: "toggle" });
 	assert.equal(outcome.status, "continue");
 	assert.deepEqual(state.toggles[0], [false, false, false]);
 });
 
-test("多选：Space 勾选 + Enter 提交选中项", () => {
+test("multi-select: Space checks + Enter submits the picks", () => {
 	const state = createState(multiSelectParams());
 	reduce(state, { type: "toggle" }); // X
 	reduce(state, { type: "down" });
@@ -133,24 +136,24 @@ test("多选：Space 勾选 + Enter 提交选中项", () => {
 	});
 });
 
-test("多选：数字键切换勾选态并移动光标", () => {
+test("multi-select: a digit key flips the toggle and moves the cursor", () => {
 	const state = createState(multiSelectParams());
 	reduce(state, { type: "digit", digit: 2 });
 	assert.equal(state.cursor, 1);
 	assert.deepEqual(state.toggles[0], [false, true, false]);
-	reduce(state, { type: "digit", digit: 2 }); // 再按取消勾选
+	reduce(state, { type: "digit", digit: 2 }); // pressing again unchecks
 	assert.deepEqual(state.toggles[0], [false, false, false]);
 });
 
-test("多选：一个都不勾直接 Enter → selected 为空数组也算提交", () => {
+test("multi-select: Enter with nothing checked → an empty selected array still submits", () => {
 	const state = createState(multiSelectParams());
 	const result = submitted(reduce(state, { type: "confirm" }));
 	assert.deepEqual(result.answers[0].selected, []);
 });
 
-test("哨兵行 Enter → 进自由输入；输入文本提交为 custom", () => {
+test("Enter on the sentinel row → free input; typed text submits as custom", () => {
 	const state = createState(singleParams());
-	for (let i = 0; i < 3; i++) reduce(state, { type: "down" }); // 哨兵行
+	for (let i = 0; i < 3; i++) reduce(state, { type: "down" }); // the sentinel row
 	const enter = reduce(state, { type: "confirm" });
 	assert.equal(enter.status, "enterInput");
 	const result = submitted(reduce(state, { type: "inputSubmit", text: "  use luxon  " }));
@@ -163,7 +166,7 @@ test("哨兵行 Enter → 进自由输入；输入文本提交为 custom", () =>
 	assert.equal(state.inputMode, false);
 });
 
-test("自由输入为空 → 退回选项列表，不产生答案", () => {
+test("empty free input → back to the option list, no answer produced", () => {
 	const state = createState(singleParams());
 	for (let i = 0; i < 3; i++) reduce(state, { type: "down" });
 	reduce(state, { type: "confirm" }); // enterInput
@@ -173,7 +176,7 @@ test("自由输入为空 → 退回选项列表，不产生答案", () => {
 	assert.equal(state.answers[0], undefined);
 });
 
-test("inputCancel 退回选项列表", () => {
+test("inputCancel returns to the option list", () => {
 	const state = createState(singleParams());
 	for (let i = 0; i < 3; i++) reduce(state, { type: "down" });
 	reduce(state, { type: "confirm" });
@@ -182,9 +185,9 @@ test("inputCancel 退回选项列表", () => {
 	assert.equal(state.inputMode, false);
 });
 
-test("取消：已答部分随 cancel 结果带出", () => {
+test("cancel: the answered portion leaves with the cancel result", () => {
 	const state = createState(twoParams());
-	reduce(state, { type: "confirm" }); // 答了 Q1
+	reduce(state, { type: "confirm" }); // answered Q1
 	const outcome = reduce(state, { type: "cancel" });
 	assert.equal(outcome.status, "cancel");
 	if (outcome.status !== "cancel") throw new Error("unreachable");
@@ -193,7 +196,7 @@ test("取消：已答部分随 cancel 结果带出", () => {
 	assert.equal(outcome.result.answers[0].answer, "a");
 });
 
-test("多题：答完 Q1 自动到 Q2，答完 Q2 进提交页", () => {
+test("multi-question: answering Q1 goes to Q2, answering Q2 goes to the submit page", () => {
 	const state = createState(twoParams());
 	assert.equal(state.currentTab, 0);
 	const after1 = reduce(state, { type: "confirm" });
@@ -210,55 +213,55 @@ test("多题：答完 Q1 自动到 Q2，答完 Q2 进提交页", () => {
 	);
 });
 
-test("提交页闸门：有未答题时 Enter 不提交", () => {
+test("the submit-page gate: unanswered questions → Enter does not submit", () => {
 	const state = createState(twoParams());
 	reduce(state, { type: "confirm" }); // Q1
-	reduce(state, { type: "nextTab" }); // 跳过 Q2 到提交页
+	reduce(state, { type: "nextTab" }); // skip Q2 to the submit page
 	assert.equal(isSubmitTab(state), true);
 	assert.deepEqual(unansweredHeaders(state), ["Two"]);
 	const outcome = reduce(state, { type: "confirm" });
 	assert.equal(outcome.status, "continue");
 });
 
-test("Tab 环绕切换（含提交页），切页重置光标并按已有答案恢复", () => {
+test("Tab wraps (incl. the submit page); switching resets the cursor and restores it from the existing answer", () => {
 	const state = createState(twoParams());
-	reduce(state, { type: "down" }); // Q1 cursor=1（选项 b）
+	reduce(state, { type: "down" }); // Q1 cursor=1 (option b)
 	reduce(state, { type: "nextTab" });
 	assert.equal(state.currentTab, 1);
 	assert.equal(state.cursor, 0);
 	reduce(state, { type: "nextTab" });
 	assert.equal(isSubmitTab(state), true);
-	reduce(state, { type: "nextTab" }); // 环绕回 Q1
+	reduce(state, { type: "nextTab" }); // wraps back to Q1
 	assert.equal(state.currentTab, 0);
-	// Q1 尚无答案，光标回 0
+	// Q1 unanswered — the cursor returns to 0
 	assert.equal(state.cursor, 0);
 });
 
-test("重答已答过的单选题：光标恢复到原选项", () => {
+test("re-answering an answered single-select: the cursor returns to the old option", () => {
 	const state = createState(twoParams());
 	reduce(state, { type: "down" }); // cursor=1
-	reduce(state, { type: "confirm" }); // 答 b，进 Q2
-	reduce(state, { type: "prevTab" }); // 回 Q1
+	reduce(state, { type: "confirm" }); // answer b, on to Q2
+	reduce(state, { type: "prevTab" }); // back to Q1
 	assert.equal(state.currentTab, 0);
-	assert.equal(state.cursor, 1); // 停在 b 上
-	// 重答覆盖旧值
+	assert.equal(state.cursor, 1); // parked on b
+	// a re-answer overwrites the old value
 	const outcome = reduce(state, { type: "up" }); // cursor=0 → a
 	assert.equal(outcome.status, "continue");
 	reduce(state, { type: "confirm" });
 	assert.equal(state.answers[0]?.answer, "a");
 });
 
-test("重答 custom 答案：光标恢复到哨兵行", () => {
+test("re-answering a custom answer: the cursor returns to the sentinel row", () => {
 	const state = createState(twoParams());
 	reduce(state, { type: "down" });
-	reduce(state, { type: "down" }); // 哨兵行
+	reduce(state, { type: "down" }); // the sentinel row
 	reduce(state, { type: "confirm" }); // enterInput
-	reduce(state, { type: "inputSubmit", text: "custom" }); // 答完进 Q2
+	reduce(state, { type: "inputSubmit", text: "custom" }); // answer submitted, on to Q2
 	reduce(state, { type: "prevTab" });
-	assert.equal(state.cursor, 2); // Q1 的哨兵行 = options.length
+	assert.equal(state.cursor, 2); // Q1's sentinel row = options.length
 });
 
-test("提交页上数字键 / Space 无效", () => {
+test("digit keys / Space do nothing on the submit page", () => {
 	const state = createState(twoParams());
 	reduce(state, { type: "confirm" });
 	reduce(state, { type: "confirm" });
@@ -268,7 +271,7 @@ test("提交页上数字键 / Space 无效", () => {
 	assert.equal(reduce(state, { type: "up" }).status, "continue");
 });
 
-test("单题模式下 Tab 切换无效", () => {
+test("Tab does nothing in single-question mode", () => {
 	const state = createState(singleParams());
 	assert.equal(reduce(state, { type: "nextTab" }).status, "continue");
 	assert.equal(state.currentTab, 0);

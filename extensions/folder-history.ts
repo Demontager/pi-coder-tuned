@@ -1,32 +1,46 @@
 /**
- * Folder-based Command History（本地改版，源自 npm:pi-command-history@0.2.0）
+ * Folder-based Command History (local rework of npm:pi-command-history@0.2.0)
  *
- * 按工作目录持久化命令历史，跨会话复用。历史文件：~/.pi/folder-history/<path-with-dashes>.jsonl
+ * Persists command history per working directory, reused across sessions.
+ * History file: ~/.pi/folder-history/<path-with-dashes>.jsonl
  *
- * 与上游最大的差别：**不再注册任何快捷键**。
- * 上游用 ctrl+up / ctrl+down，在 macOS 上被系统 Mission Control 抢走（终端收不到），
- * 而且和 pi 内置的 tui.altScreen.previousPrompt / nextPrompt 撞键（启动时刷 conflict 警告）。
+ * The biggest difference from upstream: **no keybindings are registered at
+ * all**.
+ * Upstream used ctrl+up / ctrl+down, which macOS's Mission Control steals (the
+ * terminal never sees them), and which collided with pi's built-in
+ * tui.altScreen.previousPrompt / nextPrompt (a conflict warning at startup).
  *
- * 现在的做法是把跨 session 的历史注入编辑器自身的 history 列表，于是**原生 ↑ / ↓ 直接跨 session 翻历史**：
- *   - pi-tui Editor.history 里 history[0] = 最新，索引越大越旧；↑ 在第一视觉行时往旧翻，↓ 往新翻；
- *   - pi 启动时只把「当前会话」的用户消息灌进 history（renderInitialMessages → populateHistory），
- *     所以原生 ↑/↓ 原本只能翻当前会话；
- *   - 我们把旧 session 的记录**追加到 history 数组尾部**（尾部 = 更旧），顺序变成
- *     [当前会话最新…最旧, 上个会话最新…最旧, 更早…]，↑ 一路往旧翻，↓ 一路往新翻。
+ * Now the cross-session history is injected into the editor's own history
+ * list — **the native ↑ / ↓ browse across sessions**:
+ *   - in pi-tui's Editor.history, history[0] = newest, larger index = older;
+ *     ↑ at the first visual line goes older, ↓ goes newer;
+ *   - pi only seeds "this session's" user messages into history at startup
+ *     (renderInitialMessages → populateHistory), so native ↑/↓ used to reach
+ *     only the current session;
+ *   - we **append older sessions' records to the history array's tail** (tail
+ *     = older), giving [current newest…oldest, previous newest…oldest, even
+ *     earlier…] — ↑ walks older, ↓ walks newer.
  *
- * 为什么用「注入 history」而不是注册 up/down 快捷键：扩展快捷键在 CustomEditor.handleInput 的
- * 最前面被检查（onExtensionShortcut first），注册 "up" 会吃掉多行输入框的光标上移，
- * 以及所有选择器（模型选择、/resume 列表…）的 ↑/↓ 导航。注入 history 则完全保留原生语义：
- * 多行 prompt 里 ↑/↓ 照常移动光标，只有光标在第一视觉行（或正在翻历史）时才翻历史。
+ * Why "inject into history" rather than registering up/down keys: an
+ * extension's shortcut is checked first in CustomEditor.handleInput
+ * (onExtensionShortcut first), and registering "up" would eat the multiline
+ * input's cursor-up plus every picker's ↑/↓ navigation (model select,
+ * /resume's list…). History injection keeps the native semantics intact:
+ * inside a multiline prompt ↑/↓ still moves the cursor — history browsing
+ * only kicks in at the first visual line (or while already browsing).
  *
- * 实现要点：ctx.ui.getEditorComponent() 返回的是**工厂函数**（EditorFactory），不是编辑器实例，
- * 所以拿不到 history 数组 —— 只能包一层工厂，在实例化时注入。
- * 扩展按文件名顺序加载（folder-history.ts 排在 prompt-editor.ts 之前），prompt-editor 会在
- * session_start 里 setEditorComponent 覆盖掉我们的工厂，因此这里同步包一次 + setTimeout(0) 再包一次
- * （此时所有 session_start handler 都已跑完），并用 symbol 标记避免重复嵌套包装。
+ * The implementation point: ctx.ui.getEditorComponent() returns a **factory
+ * function** (EditorFactory), not the editor instance — so the history array
+ * is unreachable; the factory must be wrapped to inject at instantiation.
+ * Extensions load in filename order (folder-history.ts sorts before
+ * prompt-editor.ts), and prompt-editor's session_start setEditorComponent
+ * would overwrite our factory — so wrap once synchronously plus once more in
+ * setTimeout(0) (after every session_start handler has run), with a symbol
+ * marker preventing nested re-wrapping.
  *
- * 可调环境变量：
- *   PI_FOLDER_HISTORY_INJECT  注入编辑器 history 的最大条数，默认 100（= pi-tui 内置 history 上限）
+ * Tunable env var:
+ *   PI_FOLDER_HISTORY_INJECT  max entries injected into the editor history,
+ *                             default 100 (= pi-tui's built-in history cap)
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -36,9 +50,9 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const HISTORY_DIR = join(homedir(), ".pi", "folder-history");
-const MAX_HISTORY = 500; // 历史文件里保留的条数上限
-// 注入上限默认 100：pi-tui Editor.addToHistory 在 history 超过 100 条时会 pop 掉最旧的一条，
-// 注入更多只会在后续提交时被逐条裁掉，所以和内置上限保持一致。
+const MAX_HISTORY = 500; // how many entries the history file keeps
+// the injection cap defaults to 100: pi-tui's Editor.addToHistory pops the oldest once history exceeds 100,
+// so injecting more would only be trimmed entry by entry on later submits — matching the built-in cap.
 const MAX_INJECT = Number(process.env.PI_FOLDER_HISTORY_INJECT || 100);
 const WRAPPED = Symbol.for("pi.folder-history.wrapped");
 
@@ -47,7 +61,7 @@ function getHistoryFile(cwd: string): string {
 	return join(HISTORY_DIR, `${name}.jsonl`);
 }
 
-/** 返回 oldest-first 的去重历史（按文件里的写入顺序）。 */
+/** The oldest-first deduplicated history (in file write order). */
 function loadHistory(cwd: string): string[] {
 	const file = getHistoryFile(cwd);
 	if (!existsSync(file)) return [];
@@ -89,7 +103,7 @@ function appendHistory(cwd: string, text: string): void {
 	appendFileSync(file, entry + "\n", "utf-8");
 }
 
-/** 当前会话已有的用户输入（避免 resume 时把同一条记录重复注入成两份）。 */
+/** The user inputs already in the current session (avoids injecting the same entry twice on resume). */
 function collectSessionTexts(sessionManager: unknown): Set<string> {
 	const texts = new Set<string>();
 	try {
@@ -118,8 +132,8 @@ function collectSessionTexts(sessionManager: unknown): Set<string> {
 }
 
 /**
- * 注入到编辑器 history：history[0] = 最新，索引越大越旧，
- * 所以旧记录追加到**尾部**，且追加顺序必须是 newest-first。
+ * Inject into the editor's history: history[0] = newest, larger index = older —
+ * so old records append to the **tail**, in newest-first order.
  */
 function injectIntoEditor(
 	editor: unknown,
@@ -135,7 +149,7 @@ function injectIntoEditor(
 	if (injectOldestFirst.length === 0) return 0;
 
 	if (!Array.isArray(existing)) {
-		// 兜底：编辑器没有 history 数组时用公开 API 逐条加（oldest-first → 最新的落在 history[0]）
+		// fallback: without a history array, add entries via the public API (oldest-first → the newest lands at history[0])
 		const addToHistory = (editor as { addToHistory?: (t: string) => void }).addToHistory;
 		if (typeof addToHistory !== "function") return 0;
 		for (const text of injectOldestFirst) addToHistory.call(editor, text);
@@ -150,12 +164,12 @@ export default function (pi: ExtensionAPI) {
 	let currentCwd = "";
 	let sessionTexts = new Set<string>();
 
-	/** 包一层编辑器工厂，在实例化时注入跨 session 历史。 */
+	/** Wrap the editor factory once, injecting cross-session history at instantiation. */
 	function installEditorWrapper(ctx: any): boolean {
 		if (!ctx?.hasUI) return false;
 
 		const previous = ctx.ui.getEditorComponent();
-		if (previous && (previous as any)[WRAPPED]) return false; // 已经是我们的包装，别嵌套
+		if (previous && (previous as any)[WRAPPED]) return false; // already our wrapper — do not nest
 
 		ctx.ui.setEditorComponent((tui: any, theme: any, keybindings: any) => {
 			const editor = previous
@@ -174,19 +188,19 @@ export default function (pi: ExtensionAPI) {
 		currentCwd = ctx.cwd;
 		sessionTexts = collectSessionTexts((ctx as any).sessionManager);
 
-		// 同步包一次；如果别的扩展（如 prompt-editor）之后又覆盖了工厂，
-		// 下面的 macrotask 会在所有 session_start handler 跑完后再包一次。
+		// wrap once synchronously; if another extension (e.g. prompt-editor) overwrites the factory afterwards,
+		// the macrotask below wraps once more after every session_start handler has run.
 		installEditorWrapper(ctx);
 		setTimeout(() => {
 			try {
 				installEditorWrapper(ctx);
 			} catch {
-				// ctx 可能已经因为 reload / 换 session 失效
+				// the ctx may already be dead from a reload / session swap
 			}
 		}, 0);
 	});
 
-	// 只负责持久化：编辑器 history 由 pi 自己在提交时 addToHistory，不要重复加
+	// persistence only: pi itself addToHistory's on submit — do not add twice
 	pi.on("input", (event, _ctx) => {
 		const text = event.text?.trim();
 		if (!text || !currentCwd) return;

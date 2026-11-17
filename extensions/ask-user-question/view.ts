@@ -1,15 +1,19 @@
 /**
- * view.ts — 问卷的 TUI 外壳：按键解码 + 渲染。状态语义全在 model.ts（纯），
- * 这里只做两件事：把 pi-tui 的按键序列映射成 Intent、把 state 画成行。
+ * view.ts — the questionnaire's TUI shell: key decoding + rendering. All
+ * state semantics live in model.ts (pure); this file does exactly two
+ * things: map pi-tui key sequences to Intents, and draw the state into rows.
  *
- * 用 `ctx.ui.custom()` 装载（非 overlay）：custom 组件临时接管编辑器区，
- * 返回 `{ render, invalidate, handleInput }` 的普通对象即满足 pi-tui 的
- * Component 结构（examples/extensions/question.ts 同款做法，不依赖 pi-tui
- * 组件类）。自由输入行复用 pi-tui 的 Editor（多行、Shift+Enter 换行、
- * 粘贴折叠），Enter 提交、Esc 退回选项列表。
+ * Hosted via `ctx.ui.custom()` (not an overlay): a custom component
+ * temporarily takes over the editor area, and a plain object returning
+ * `{ render, invalidate, handleInput }` satisfies pi-tui's Component shape
+ * (the examples/extensions/question.ts approach — no pi-tui component
+ * classes needed). The free-input row reuses pi-tui's Editor (multiline,
+ * Shift+Enter for a newline, paste folding); Enter submits, Esc returns to
+ * the option list.
  *
- * 本文件不进 `node --test`（真 TUI 无法无头构建，仓库约定）；可单测的逻辑
- * 都在 model.ts / validate.ts / answers.ts / dialog.ts。
+ * This file does not enter `node --test` (a real TUI cannot be built
+ * headlessly — repo convention); everything testable lives in model.ts /
+ * validate.ts / answers.ts / dialog.ts.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -35,7 +39,7 @@ import {
 	unansweredHeaders,
 } from "./model.ts";
 
-/** 数字键 1-9 直接跳到对应行（含哨兵行）。 */
+/** Digit keys 1-9 jump straight to the matching row (incl. the sentinel). */
 const DIGIT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
 
 export function createQuestionnaireView(
@@ -72,7 +76,7 @@ export function createQuestionnaireView(
 				done(outcome.result);
 				return;
 			case "enterInput": {
-				// 重答时把上次打的字放回编辑器（切走再切回来不丢草稿）。
+				// a re-answer loads the previous draft back into the editor (switching away and back loses nothing).
 				const previous = state.answers[state.currentTab];
 				editor.setText(previous?.kind === "custom" ? (previous.answer ?? "") : "");
 				refresh();

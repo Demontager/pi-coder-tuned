@@ -1,16 +1,22 @@
 /**
- * validate.ts — 参数归一化 + 运行时校验（纯函数，不 import pi / pi-tui / typebox）。
+ * validate.ts — params normalization + runtime validation (pure functions,
+ * no pi / pi-tui / typebox imports).
  *
- * 归一化在 execute 入口跑一次、校验之前，所以下游所有消费者（校验器、TUI、
- * 对话框回退、答案封装）看到的都是同一份干净文本：
- * - 行终止符：`\r\n` → `\n`、落单 `\r` 删除（CR 是光标控制字节不是文本，
- *   直接进渲染会把行首指针冲掉；与 pi 自己的显示归一化口径一致）
- * - header / label / description 是单行 chip / 列表行，空白串（含换行）折叠成
- *   一个空格再截断；question 保留换行（渲染端逐行折行）
- * - 截断补 `…`，上限见 types.ts（刻意不在 schema 里设 maxLength，理由见 schema.ts）
+ * Normalization runs once at execute's entrance, before validation — every
+ * downstream consumer (the validator, the TUI, the dialog fallback, the
+ * answer envelope) sees one clean copy:
+ * - line terminators: `\r\n` → `\n`, a lone `\r` deleted (CR is a cursor
+ *   control byte, not text — left in, it breaks the row's head pointer; the
+ *   same normalization pi's own display does)
+ * - header / label / description are single-line chips / list rows:
+ *   whitespace runs (incl. newlines) collapse to one space, then clip;
+ *   question keeps newlines (the renderer wraps row by row)
+ * - clipping appends `…`; the caps are in types.ts (deliberately no
+ *   maxLength in the schema — the reason is in schema.ts)
  *
- * 校验覆盖数量与重复/保留 label；`reserved_label` 必须短路在
- * `duplicate_option_label` 之前（两个 "Other" 首先是保留字问题）。
+ * Validation covers counts plus duplicate/reserved labels; `reserved_label`
+ * must short-circuit before `duplicate_option_label` (two "Other"s are
+ * first a reserved-word problem).
  */
 
 import {
@@ -36,25 +42,27 @@ const RESERVED_LABEL_SET: ReadonlySet<string> = new Set(RESERVED_LABELS);
 
 export type ValidationResult = { ok: true } | { ok: false; error: AskErrorCode; message: string };
 
-/** `\r\n` → `\n`，落单 `\r` 删除（不是空格：会在词中间留幻影间隙）。 */
+/** `\r\n` → `\n`, a lone `\r` deleted (not a space — it would leave phantom gaps mid-word). */
 export function normalizeLineTerminators(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "");
 }
 
-/** 单行化：行终止符归一 + 空白串折叠成一个空格 + 去首尾。 */
+/** Single-line: line terminators normalized + whitespace runs collapsed to one space + trimmed. */
 function toSingleLine(text: string): string {
 	return normalizeLineTerminators(text).replace(/\s+/g, " ").trim();
 }
 
-/** 按**字符数**截断到 max，超长补 `…`（max ≥ 2 才有意义）。 */
+/** Clip to max by **character count**, appending `…` on overflow (only meaningful for max ≥ 2). */
 function clip(text: string, max: number): string {
 	if (text.length <= max) return text;
 	return `${text.slice(0, max - 1)}…`;
 }
 
 /**
- * 返回参数副本：所有展示字符串归一化，header/label 截断。纯函数，不改入参。
- * 保留 label 的**比较**发生在归一化之后（`"Other\r"` 不能溜过 reserved_label）。
+ * Returns a params copy: all display strings normalized, header/label
+ * clipped. Pure — never mutates the input.
+ * The reserved-label **comparison** happens after normalization (an
+ * `"Other\r"` must not slip past reserved_label).
  */
 export function normalizeParams(params: AskParams): AskParams {
 	return {
@@ -70,7 +78,7 @@ export function normalizeParams(params: AskParams): AskParams {
 	};
 }
 
-/** 纯运行时校验器。no_ui / no_dialog_ui 依赖宿主能力，留在执行路径上判。 */
+/** The pure runtime validator. no_ui / no_dialog_ui depend on host capabilities — judged on the execution path. */
 export function validateQuestionnaire(params: AskParams): ValidationResult {
 	if (params.questions.length === 0) {
 		return { ok: false, error: "no_questions", message: ERROR_NO_QUESTIONS };

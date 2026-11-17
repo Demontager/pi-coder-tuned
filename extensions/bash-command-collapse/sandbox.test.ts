@@ -1,18 +1,20 @@
 /**
- * Tests for the seatbelt capability boundary (sandbox.ts) — 纯逻辑单测，不需要 pi。
+ * Tests for the seatbelt capability boundary (sandbox.ts) — pure-logic unit tests, no pi needed.
  *
  * Run with:  node --test clients/pi/extensions/bash-command-collapse/sandbox.test.ts
  *
- * 断言口径（用户 2026-09-24 定，同日收窄到「只管删除」）：
- *   - profile 以 `(deny default)` 打底（fail-closed 的来源）；
- *   - 写入全放行（`file-write*`），删除收窄：`file-write-unlink` 先全局 deny，
- *     再只对可删根 allow —— 可删根 = 项目目录 + /tmp + /private/tmp + /var/folders
- *     + /private/var/folders + /var/tmp + /private/var/tmp + 额外路径；
- *   - 读全放行（file-read*）、网络全放行（network*）；
- *   - isPathInWriteBoundary 是白名单判定：cwd 内/子目录、/tmp、$TMPDIR 在内；
- *     $HOME 下的全局文件、/usr/local 等一律在外；
- *   - 拒绝识别只认 EPERM / Operation not permitted，不认 Permission denied（EACCES）；
- *   - 包裹命令用 sandbox-exec -p，profile 与命令都单引号安全转义。
+ * What is asserted:
+ *   - profile shape: deny default as base, file-write* / network* / process etc. allowed,
+ *     file-write-unlink revoked globally then allowed only for the writable roots;
+ *   - boundary checks: cwd / temp roots / regenerable caches are inside; $HOME dotfiles and system
+ *     roots are outside;
+ *   - never-delete tier: identity / credentials / hand-written configs blocked, same-name files in
+ *     projects unaffected;
+ *   - dangerous tier: system roots / ~/Library / any-path-.git, ask every time, session-exemptable;
+ *   - ordinary outside tier: ask once, then rememberable;
+ *   - memoryScopeFor / sessionScopeFor scope computation and their safety gates;
+ *   - extractDeniedPaths: per-line exclusion + fallback scan over real failure shapes;
+ *   - classifyOutsidePaths: five mutually exclusive tiers, order matters (blocked before boundary).
  */
 
 import assert from "node:assert/strict";
@@ -52,46 +54,46 @@ import {
 const CWD = "/Users/someone/project";
 const HOME = os.homedir();
 
-test("profile 以 deny default 打底，且放行读写网络与进程能力", () => {
+test("profile is based on deny default, and allows read/write, network and process capabilities", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD));
 	const lines = profile.split("\n");
 	assert.equal(lines[0], "(version 1)");
-	assert.equal(lines[1], "(deny default)", "fail-closed：没被显式放行的一律拒");
-	assert.ok(profile.includes("(allow file-read*)"), "读不限制");
-	assert.ok(profile.includes("(allow network*)"), "网络全放行");
+	assert.equal(lines[1], "(deny default)", "fail-closed: anything not explicitly allowed is denied");
+	assert.ok(profile.includes("(allow file-read*)"), "reads unrestricted");
+	assert.ok(profile.includes("(allow network*)"), "network fully open");
 	assert.ok(profile.includes("(allow process-fork)"));
 	assert.ok(profile.includes("(allow process-exec)"));
 	assert.ok(profile.includes("(allow mach-lookup)"));
 });
 
-test("profile 写入全放行，删除只对可删根放行（全局 deny + 局部 allow）", () => {
+test("profile allows all writes; deletion allowed only for writable roots (global deny + local allow)", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD, ["/Users/someone/.pm2"]));
 	const lines = profile.split("\n");
-	assert.ok(lines.includes("(allow file-write*)"), "写入不限制（用户 2026-09-24 口径）");
-	assert.ok(lines.includes("(deny file-write-unlink)"), "删除先全局收回");
+	assert.ok(lines.includes("(allow file-write*)"), "writes unrestricted (user policy 2026-09-24)");
+	assert.ok(lines.includes("(deny file-write-unlink)"), "deletion revoked globally first");
 	const unlinkAllow = lines.find((l) => l.startsWith("(allow file-write-unlink "));
-	assert.ok(unlinkAllow, "删除再对可删根放行");
-	// 顺序：deny 必须在 allow 之前，seatbelt 后写的规则覆盖先写的
+	assert.ok(unlinkAllow, "deletion then allowed for writable roots");
+	// order: deny must come before allow — later seatbelt rules override earlier ones
 	assert.ok(
 		lines.indexOf("(deny file-write-unlink)") < lines.indexOf(unlinkAllow),
-		"deny 在前、allow 在后，否则全局 deny 会被覆盖失效",
+		"deny before allow, otherwise the global deny would be overridden and lost",
 	);
 	assert.ok(unlinkAllow.includes(`(subpath "${CWD}")`));
 	for (const root of TEMP_WRITE_ROOTS) {
-		assert.ok(unlinkAllow.includes(`(subpath "${root}")`), `缺少临时根 ${root}`);
+		assert.ok(unlinkAllow.includes(`(subpath "${root}")`), `missing temp root ${root}`);
 	}
-	assert.ok(unlinkAllow.includes('(subpath "/Users/someone/.pm2")'), "额外路径要进 unlink 放行名单");
+	assert.ok(unlinkAllow.includes('(subpath "/Users/someone/.pm2")'), "extra paths must enter the unlink allow list");
 });
 
-test("isPathInWriteBoundary：cwd 内与子目录在边界内", () => {
+test("isPathInWriteBoundary: inside cwd and its subdirectories is inside", () => {
 	const b = makeBoundary(CWD);
 	assert.equal(isPathInWriteBoundary(`${CWD}/src/x.ts`, b), true);
-	assert.equal(isPathInWriteBoundary(CWD, b), true, "cwd 本身可写");
-	assert.equal(isPathInWriteBoundary("src/x.ts", b), true, "相对路径按 cwd 解析");
-	assert.equal(isPathInWriteBoundary(`${CWD}/`, b), true, "尾斜杠不影响");
+	assert.equal(isPathInWriteBoundary(CWD, b), true, "cwd itself is writable");
+	assert.equal(isPathInWriteBoundary("src/x.ts", b), true, "relative paths resolve against cwd");
+	assert.equal(isPathInWriteBoundary(`${CWD}/`, b), true, "a trailing slash does not matter");
 });
 
-test("isPathInWriteBoundary：临时目录在边界内（含 realpath 形式）", () => {
+test("isPathInWriteBoundary: temp directories are inside (realpath forms included)", () => {
 	const b = makeBoundary(CWD);
 	assert.equal(isPathInWriteBoundary("/tmp/a", b), true);
 	assert.equal(isPathInWriteBoundary("/private/tmp/a", b), true);
@@ -99,92 +101,93 @@ test("isPathInWriteBoundary：临时目录在边界内（含 realpath 形式）"
 	assert.equal(isPathInWriteBoundary("/private/var/folders/x/y", b), true);
 });
 
-test("isPathInWriteBoundary：/var/tmp 在边界内（bash 3.2 heredoc 临时目录，编译期写死）", () => {
+test("isPathInWriteBoundary: /var/tmp is inside (bash 3.2 heredoc temp dir, hardcoded at compile time)", () => {
 	const b = makeBoundary(CWD);
 	assert.equal(isPathInWriteBoundary("/var/tmp/sh-thd-12345", b), true);
 	assert.equal(isPathInWriteBoundary("/private/var/tmp/sh-thd-12345", b), true);
-	assert.ok(TEMP_WRITE_ROOTS.includes("/var/tmp"), "缺 /var/tmp 则沙箱内任何 heredoc 都 100% 失败");
-	assert.ok(TEMP_WRITE_ROOTS.includes("/private/var/tmp"), "realpath 形式也要在表里");
+	assert.ok(TEMP_WRITE_ROOTS.includes("/var/tmp"), "without /var/tmp every heredoc in the sandbox fails 100%");
+	assert.ok(TEMP_WRITE_ROOTS.includes("/private/var/tmp"), "realpath forms must also be in the table");
 });
 
-test("isPathInWriteBoundary：$HOME 全局文件与系统目录在边界外", () => {
+test("isPathInWriteBoundary: $HOME global files and system directories are outside", () => {
 	const b = makeBoundary(CWD);
 	assert.equal(isPathInWriteBoundary(`${HOME}/.zshrc`, b), false);
 	assert.equal(isPathInWriteBoundary(`${HOME}/.gitconfig`, b), false);
 	assert.equal(isPathInWriteBoundary(`${HOME}/.pi/agent/sessions`, b), false);
 	assert.equal(isPathInWriteBoundary("/usr/local/bin/tsc", b), false);
-	assert.equal(isPathInWriteBoundary("/Users/someone-other/x", b), false, "同名前缀不算子树");
+	assert.equal(isPathInWriteBoundary("/Users/someone-other/x", b), false, "a same-named prefix is not a subtree");
 });
 
-test("isPathInWriteBoundary：前缀同名目录不算子树", () => {
+test("isPathInWriteBoundary: a prefix-named directory is not a subtree", () => {
 	const b = makeBoundary("/Users/someone/project");
 	assert.equal(isPathInWriteBoundary("/Users/someone/project-x/f", b), false);
 });
 
-test("额外写路径：展开 ~ 与相对路径", () => {
+test("extra write paths: ~ expansion and relative paths", () => {
 	const b = makeBoundary(CWD, ["~/.pm2", "../shared"]);
 	assert.equal(isPathInWriteBoundary(`${HOME}/.pm2/logs/out.log`, b), true);
 	assert.equal(isPathInWriteBoundary("/Users/someone/shared/f", b), true);
 });
 
-test("parseExtraWrites：冒号分隔、空项丢弃、~ 展开", () => {
+test("parseExtraWrites: colon-separated, empty items dropped, ~ expanded", () => {
 	const out = parseExtraWrites("~/.pm2::/opt/data:", CWD);
 	assert.deepEqual(out, [`${HOME}/.pm2`, "/opt/data"]);
 	assert.deepEqual(parseExtraWrites(undefined, CWD), []);
 	assert.deepEqual(parseExtraWrites("", CWD), []);
 });
 
-test("resolveAgainst：~ 与 ~/ 展开", () => {
+test("resolveAgainst: ~ and ~/ expansion", () => {
 	assert.equal(resolveAgainst("~", CWD), HOME);
 	assert.equal(resolveAgainst("~/x", CWD), `${HOME}/x`);
 	assert.equal(resolveAgainst("/abs", CWD), "/abs");
 	assert.equal(resolveAgainst("rel", CWD), `${CWD}/rel`);
 });
 
-test("looksLikeSandboxDenial：只认 EPERM 系，不认 EACCES", () => {
+test("looksLikeSandboxDenial: only EPERM family, not EACCES", () => {
 	assert.equal(looksLikeSandboxDenial("rm: /Users/x/.zshrc: Operation not permitted"), true);
 	assert.equal(looksLikeSandboxDenial("Error: EPERM: operation not permitted, open '/x'"), true);
-	assert.equal(looksLikeSandboxDenial("rm: /x: Permission denied"), false, "EACCES 不是沙箱拒绝");
+	assert.equal(looksLikeSandboxDenial("rm: /x: Permission denied"), false, "EACCES is not a sandbox denial");
 	assert.equal(looksLikeSandboxDenial("hello world"), false);
 	assert.equal(looksLikeSandboxDenial(""), false);
 });
 
-test("wrapWithSandbox：sandbox-exec -p 包裹，单引号安全转义", () => {
+test("wrapWithSandbox: sandbox-exec -p wrapping, single-quote safe escaping", () => {
 	const wrapped = wrapWithSandbox("echo 'hi'", "(version 1)", "/bin/bash");
-	assert.ok(wrapped.startsWith("sandbox-exec -p '"), "profile 单引号内联，不落盘");
+	assert.ok(wrapped.startsWith("sandbox-exec -p '"), "profile inlined single-quoted, never on disk");
 	assert.ok(wrapped.includes("/bin/bash' -c '"));
-	// 命令里的单引号必须被 '\'' 转义，不能裸着破坏外层引号
+	// a single quote in the command must be escaped as '\'', never left bare to break the outer quoting
 	assert.ok(wrapped.includes("echo '\\''hi'\\''"));
 });
 
-test("shellQuote：含单引号的字符串往返安全", () => {
+test("shellQuote: strings containing single quotes round-trip safely", () => {
 	const tricky = "a'b\"c$d`e";
 	assert.equal(shellQuote(tricky), `'a'\\''b"c$d`+"`"+`e'`);
 });
 
-test("isSandboxEnabled：PI_SANDBOX=off 关闭；非 darwin 关闭", () => {
+test("isSandboxEnabled: PI_SANDBOX=off disables; non-darwin disables", () => {
 	assert.equal(isSandboxEnabled({ PI_SANDBOX: "off" }, "darwin"), false);
 	assert.equal(isSandboxEnabled({ PI_SANDBOX: "OFF" }, "darwin"), false);
 	assert.equal(isSandboxEnabled({}, "darwin"), true);
-	assert.equal(isSandboxEnabled({}, "linux"), false, "没有 sandbox-exec 的平台不开");
+	assert.equal(isSandboxEnabled({}, "linux"), false, "platforms without sandbox-exec stay off");
 });
 
-test("boundaryFromEnv：从 PI_SANDBOX_EXTRA_WRITE 读额外路径", () => {
+test("boundaryFromEnv: extra paths read from PI_SANDBOX_EXTRA_WRITE", () => {
 	const b = boundaryFromEnv(CWD, { PI_SANDBOX_EXTRA_WRITE: "~/.pm2" });
 	assert.equal(isPathInWriteBoundary(`${HOME}/.pm2/x`, b), true);
 });
 
-test("ESCALATION_TITLE 是固定文案", () => {
+test("ESCALATION_TITLE is fixed text", () => {
 	assert.equal(ESCALATION_TITLE, "Sandbox blocked deletion outside the permitted boundary");
 });
 
 /* ------------------------------------------------------------------ *
- * 两层授权（用户 2026-09-24 定）：危险目录会话级必问 + 普通目录持久白名单
+ * Two authorization layers (user decision 2026-09-24): dangerous directories ask every time
+ * (session exemption only) + ordinary directories ask once then remember.
  * ------------------------------------------------------------------ */
 
 const env = { home: HOME };
 
-test("dangerousReasonFor：系统根、bin、应用安装目录、包管理器前缀都危险", () => {
+test("dangerousReasonFor: system roots, bin, app install dirs, package-manager prefixes are all dangerous", () => {
 	assert.ok(dangerousReasonFor("/usr/local/bin/tsc", env));
 	assert.ok(dangerousReasonFor("/opt/homebrew/bin/x", env));
 	assert.ok(dangerousReasonFor("/Applications/Foo.app", env));
@@ -192,255 +195,255 @@ test("dangerousReasonFor：系统根、bin、应用安装目录、包管理器�
 	assert.ok(dangerousReasonFor("/System/Library/x", env));
 	assert.ok(dangerousReasonFor("/private/etc/hosts", env));
 	assert.ok(dangerousReasonFor("/Volumes/Backup/x", env));
-	assert.ok(dangerousReasonFor("/", env), "根本身");
-	assert.ok(dangerousReasonFor("/Users", env), "Users 根");
+	assert.ok(dangerousReasonFor("/", env), "the root itself");
+	assert.ok(dangerousReasonFor("/Users", env), "Users root");
 });
 
-test("dangerousReasonFor：$HOME 本身与 ~/Library 危险，但普通子目录不危险", () => {
-	assert.ok(dangerousReasonFor(HOME, env), "$HOME 本身危险");
-	assert.ok(dangerousReasonFor(`${HOME}/Library/Preferences/x.plist`, env), "~/Library 是危险档（必问可豁免）");
-	assert.equal(dangerousReasonFor(`${HOME}/.ssh/id_rsa`, env), undefined, "凭据目录已升入永不删除档，不再是危险档");
-	assert.equal(dangerousReasonFor(`${HOME}/Downloads`, env), undefined, "普通目录不危险");
+test("dangerousReasonFor: $HOME itself and ~/Library are dangerous, but ordinary subdirectories are not", () => {
+	assert.ok(dangerousReasonFor(HOME, env), "$HOME itself is dangerous");
+	assert.ok(dangerousReasonFor(`${HOME}/Library/Preferences/x.plist`, env), "~/Library is the dangerous tier (always ask, exemptable)");
+	assert.equal(dangerousReasonFor(`${HOME}/.ssh/id_rsa`, env), undefined, "credential directories moved up to never-delete; no longer dangerous");
+	assert.equal(dangerousReasonFor(`${HOME}/Downloads`, env), undefined, "ordinary directories are not dangerous");
 	assert.equal(dangerousReasonFor(`${HOME}/projects/foo`, env), undefined);
 });
 
-test("neverDeleteReasonFor：身份/凭据/手写配置命中，项目里的同名文件不命中", () => {
-	assert.ok(neverDeleteReasonFor(`${HOME}/.zshrc`, env), "第二次事故删的就是它");
+test("neverDeleteReasonFor: identity/credentials/hand-written configs hit; same-name files in projects do not", () => {
+	assert.ok(neverDeleteReasonFor(`${HOME}/.zshrc`, env), "the second incident deleted exactly this");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.gitconfig`, env));
-	assert.ok(neverDeleteReasonFor(`${HOME}/.ssh/id_rsa`, env), "子树语义");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.ssh/id_rsa`, env), "subtree semantics");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.gnupg/secring`, env));
-	assert.equal(neverDeleteReasonFor(`${HOME}/.config/foo`, env), undefined, "用户 2026-09-25：~/.config 移出永不删除档");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.pi/agent/extensions`, env), undefined, "用户 2026-09-25：~/.pi 移出永不删除档（自保护降级为弹框）");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.claude/x`, env), undefined, "用户 2026-09-25：~/.claude 移出永不删除档");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.codex/y`, env), undefined, "用户 2026-09-25：~/.codex 移出永不删除档");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config/foo`, env), undefined, "user 2026-09-25: ~/.config left the never-delete tier");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.pi/agent/extensions`, env), undefined, "user 2026-09-25: ~/.pi left the never-delete tier (self-protection degraded to a prompt)");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.claude/x`, env), undefined, "user 2026-09-25: ~/.claude left the never-delete tier");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.codex/y`, env), undefined, "user 2026-09-25: ~/.codex left the never-delete tier");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.env`, env));
-	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.zshrc`, env), undefined, "项目里的 .zshrc 不是全局配置");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.zshrc.bak`, env), undefined, "精确名：.bak 后缀不在名单");
+	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.zshrc`, env), undefined, "a .zshrc in a project is not global config");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.zshrc.bak`, env), undefined, "exact name: the .bak suffix is not on the list");
 	assert.equal(neverDeleteReasonFor(`${HOME}/Downloads`, env), undefined);
-	assert.equal(neverDeleteReasonFor(`${HOME}/Library/Caches/x`, env), undefined, "缓存不在永不删除名单");
-	// 2026-09-25 补充的通用项（本机未必存在，名单是预防性的）
-	assert.ok(neverDeleteReasonFor(`${HOME}/.bash_history`, env), "shell 历史丢了补不回");
-	assert.ok(neverDeleteReasonFor(`${HOME}/.envrc`, env), "direnv 常含导出到环境的密钥");
+	assert.equal(neverDeleteReasonFor(`${HOME}/Library/Caches/x`, env), undefined, "caches are not on the never-delete list");
+	// generic entries added on 2026-09-25 (may not exist on this machine — the list is preventive)
+	assert.ok(neverDeleteReasonFor(`${HOME}/.bash_history`, env), "shell history is irreplaceable once lost");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.envrc`, env), "direnv often contains secrets exported into the environment");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.hgrc`, env));
-	assert.ok(neverDeleteReasonFor(`${HOME}/.gitignore`, env), "home 级全局 gitignore");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.gitignore`, env), "home-level global gitignore");
 	assert.ok(neverDeleteReasonFor(`${HOME}/.tool-versions`, env));
 	assert.ok(neverDeleteReasonFor(`${HOME}/.yarnrc`, env));
 	assert.ok(neverDeleteReasonFor(`${HOME}/.yarnrc.yml`, env));
 	assert.ok(neverDeleteReasonFor(`${HOME}/.bunfig.toml`, env));
-	assert.ok(neverDeleteReasonFor(`${HOME}/.boto`, env), "gsutil 凭据");
-	assert.ok(neverDeleteReasonFor(`${HOME}/.s3cfg`, env), "s3cmd 凭据");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.boto`, env), "gsutil credentials");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.s3cfg`, env), "s3cmd credentials");
 	for (const dir of [".azure", ".gcloud", ".terraform.d", ".helm", ".minikube", ".password-store"]) {
-		assert.ok(neverDeleteReasonFor(`${HOME}/${dir}/x`, env), `${dir} 子树语义`);
+		assert.ok(neverDeleteReasonFor(`${HOME}/${dir}/x`, env), `${dir} has subtree semantics`);
 	}
-	// 嵌套条目：凭据下沉到 ~/.config 两级的工具
-	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gh/hosts.yml`, env), "gh token 在 hosts.yml");
-	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gcloud/credentials.db`, env), "gcloud 凭据");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.config`, env), undefined, "嵌套条目不牵连 ~/.config 自身");
-	assert.equal(neverDeleteReasonFor(`${HOME}/.config/ghostty/config`, env), undefined, "~/.config 下其他工具仍是普通档");
-	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.envrc`, env), undefined, "项目里的 .envrc 不是全局配置");
-	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.gitignore`, env), undefined, "项目里的 .gitignore 是项目文件");
+	// nested entries: tools that sink credentials two levels under ~/.config
+	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gh/hosts.yml`, env), "gh token lives in hosts.yml");
+	assert.ok(neverDeleteReasonFor(`${HOME}/.config/gcloud/credentials.db`, env), "gcloud credentials");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config`, env), undefined, "nested entries do not drag in ~/.config itself");
+	assert.equal(neverDeleteReasonFor(`${HOME}/.config/ghostty/config`, env), undefined, "other tools under ~/.config remain ordinary tier");
+	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.envrc`, env), undefined, "an .envrc in a project is not global config");
+	assert.equal(neverDeleteReasonFor(`${HOME}/projects/.gitignore`, env), undefined, "a .gitignore in a project is a project file");
 });
 
-test("neverDeleteReasonFor：realpath 能看见符号链接逃逸", () => {
+test("neverDeleteReasonFor: realpath sees symlink escapes", () => {
 	const withRealpath = {
 		home: HOME,
 		realpath: (p: string) => (p === `${HOME}/link` || p.startsWith(`${HOME}/link/`) ? p.replace(`${HOME}/link`, `${HOME}/.ssh`) : undefined),
 	};
-	assert.ok(neverDeleteReasonFor(`${HOME}/link/id_rsa`, withRealpath), "链接指向 ~/.ssh 也拦");
-	assert.equal(neverDeleteReasonFor(`${HOME}/link/id_rsa`, env), undefined, "不给 realpath 只能词法判（已知缺口）");
+	assert.ok(neverDeleteReasonFor(`${HOME}/link/id_rsa`, withRealpath), "a link pointing at ~/.ssh is blocked too");
+	assert.equal(neverDeleteReasonFor(`${HOME}/link/id_rsa`, env), undefined, "without realpath only lexical checks run (known gap)");
 });
 
-test("dangerousReasonFor：路径里任何一级是 .git/.hg/.svn 都危险", () => {
+test("dangerousReasonFor: any path component being .git/.hg/.svn is dangerous", () => {
 	assert.ok(dangerousReasonFor(`${HOME}/projects/x/.git`, env));
 	assert.ok(dangerousReasonFor(`${HOME}/projects/x/.git/objects`, env));
-	assert.ok(dangerousReasonFor(`/tmp/whatever/.svn/entries`, env), "在临时目录里也算（形状规则优先）");
-	assert.equal(dangerousReasonFor(`${HOME}/projects/x/gitignore`, env), undefined, "名字相似但不是 VCS 目录");
+	assert.ok(dangerousReasonFor(`/tmp/whatever/.svn/entries`, env), "counts even inside a temp directory (the shape rule wins)");
+	assert.equal(dangerousReasonFor(`${HOME}/projects/x/gitignore`, env), undefined, "similar names that are not VCS directories");
 });
 
-test("dangerousReasonFor：realpath 能看见符号链接逃逸", () => {
-	// ~/link → /etc：词法形态在 home 下（不危险），realpath 形态是 /etc/passwd（危险）。
-	// 仿真实 realpathSync：整条路径的前缀被替换，而不是只认链接本身。
+test("dangerousReasonFor: realpath sees symlink escapes", () => {
+	// ~/link → /etc: the lexical form sits under home (not dangerous); the realpath form is /etc/passwd (dangerous).
+	// Simulates real realpathSync: a prefix of the whole path is replaced, not just the link itself.
 	const withRealpath = {
 		home: HOME,
 		realpath: (p: string) => (p === `${HOME}/link` || p.startsWith(`${HOME}/link/`) ? p.replace(`${HOME}/link`, "/etc") : undefined),
 	};
 	assert.ok(dangerousReasonFor(`${HOME}/link/passwd`, withRealpath));
-	assert.equal(dangerousReasonFor(`${HOME}/link/passwd`, env), undefined, "不给 realpath 就只能词法判（已知缺口）");
+	assert.equal(dangerousReasonFor(`${HOME}/link/passwd`, env), undefined, "without realpath only lexical checks run (known gap)");
 });
 
-test("dangerousRoots：分 subtree / exact 两档，$HOME 在 exact 档", () => {
+test("dangerousRoots: split into subtree / exact tiers; $HOME is in exact", () => {
 	const tables = dangerousRoots(env);
-	assert.ok(tables.exact.includes(HOME), "$HOME 仅自身危险（否则 ~/Downloads 也成危险，白名单就废了）");
+	assert.ok(tables.exact.includes(HOME), "$HOME is dangerous only by itself (otherwise ~/Downloads would be dangerous too and the allowlist dies)");
 	assert.ok(tables.exact.includes("/"));
 	assert.ok(tables.exact.includes("/Users"));
-	assert.ok(tables.subtree.includes(`${HOME}/Library`), "~/Library 留在危险档");
-	assert.ok(!tables.subtree.includes(`${HOME}/.ssh`), "凭据目录已升入永不删除档");
+	assert.ok(tables.subtree.includes(`${HOME}/Library`), "~/Library stays in the dangerous tier");
+	assert.ok(!tables.subtree.includes(`${HOME}/.ssh`), "credential directories moved up to never-delete");
 	assert.ok(tables.subtree.includes("/usr"));
-	assert.ok(!tables.subtree.includes(HOME), "$HOME 不在子树档");
+	assert.ok(!tables.subtree.includes(HOME), "$HOME is not in the subtree tier");
 });
 
-test("neverDeletePaths：home 一级文件 + 目录子树根 + 嵌套条目都解析成绝对路径", () => {
+test("neverDeletePaths: home level-1 files + directory subtree roots + nested entries all resolve to absolute paths", () => {
 	const paths = neverDeletePaths(HOME);
 	assert.ok(paths.includes(`${HOME}/.zshrc`));
 	assert.ok(paths.includes(`${HOME}/.ssh`));
-	assert.ok(paths.includes(`${HOME}/.bash_history`), "2026-09-25 补充的通用项");
-	assert.ok(paths.includes(`${HOME}/.password-store`), "密码库子树");
-	assert.ok(paths.includes(`${HOME}/.config/gh`), "嵌套条目：拼到 home 下再 resolvePath");
-	assert.ok(paths.includes(`${HOME}/.config/gcloud`), "嵌套条目");
-	assert.ok(!paths.includes(`${HOME}/.config`), "用户 2026-09-25：工具状态目录移出名单");
-	assert.ok(!paths.includes(`${HOME}/.pi`), "用户 2026-09-25：工具状态目录移出名单");
+	assert.ok(paths.includes(`${HOME}/.bash_history`), "generic entries added 2026-09-25");
+	assert.ok(paths.includes(`${HOME}/.password-store`), "password-store subtree");
+	assert.ok(paths.includes(`${HOME}/.config/gh`), "nested entries: joined under home then resolvePath");
+	assert.ok(paths.includes(`${HOME}/.config/gcloud`), "nested entries");
+	assert.ok(!paths.includes(`${HOME}/.config`), "user 2026-09-25: tool state directories left the list");
+	assert.ok(!paths.includes(`${HOME}/.pi`), "user 2026-09-25: tool state directories left the list");
 	assert.ok(paths.includes(`${HOME}/.env`));
-	assert.ok(!paths.includes(`${HOME}/.cache`), "缓存不在名单");
-	assert.ok(!paths.includes(`${HOME}/Library`), "Library 是危险档不是永不删除");
+	assert.ok(!paths.includes(`${HOME}/.cache`), "caches are not on the list");
+	assert.ok(!paths.includes(`${HOME}/Library`), "Library is the dangerous tier, not never-delete");
 });
 
-test("memoryScopeFor：文件记父目录，目录记自身", () => {
+test("memoryScopeFor: a file remembers its parent directory; a directory remembers itself", () => {
 	const withDir = { home: HOME, isDirectory: (p: string) => p === `${HOME}/Downloads` };
 	assert.equal(memoryScopeFor(`${HOME}/Downloads/old.zip`, withDir, CWD), `${HOME}/Downloads`);
-	assert.equal(memoryScopeFor(`${HOME}/Downloads`, withDir, CWD), `${HOME}/Downloads`, "目标是目录 → 记自身");
+	assert.equal(memoryScopeFor(`${HOME}/Downloads`, withDir, CWD), `${HOME}/Downloads`, "target is a directory → remember itself");
 });
 
-test("memoryScopeFor：父目录危险/太浅时降级为精确路径", () => {
-	// ~/.zshrc.bak 的父目录是 $HOME（危险根）→ 只能记这个文件本身
+test("memoryScopeFor: degrades to the exact path when the parent is dangerous/too shallow", () => {
+	// ~/.zshrc.bak's parent is $HOME (dangerous root) → only the file itself can be remembered
 	assert.equal(memoryScopeFor(`${HOME}/.zshrc.bak`, env, CWD), `${HOME}/.zshrc.bak`);
-	// /Users/x 的父目录是 /Users（危险根），自身又只有 2 层 → 什么都记不了（逐次批准）
+	// /Users/x's parent is /Users (dangerous root) and itself is only 2 levels → nothing can be remembered (approve each time)
 	assert.equal(memoryScopeFor("/Users/x", env, CWD), undefined);
-	// 目标本身是危险根 → 什么都记不了（只能走会话级豁免）
+	// target itself is a dangerous root → nothing can be remembered (only session-level exemption remains)
 	assert.equal(memoryScopeFor(`${HOME}/.ssh`, env, CWD), undefined);
 	assert.equal(memoryScopeFor("/", env, CWD), undefined);
 });
 
-test("memoryScopeFor：MIN_ALLOWLIST_DEPTH 挡住浅目录", () => {
+test("memoryScopeFor: MIN_ALLOWLIST_DEPTH blocks shallow directories", () => {
 	assert.equal(componentCount("/Users/bachi"), 2);
 	assert.equal(componentCount("/Users/bachi/Downloads"), 3);
-	assert.ok(MIN_ALLOWLIST_DEPTH >= 3, "卡 3 层：记父目录永远退不到 $HOME");
-	// /Users/bachi/Downloads 的父目录 /Users/bachi 只有 2 层 → 降级记精确路径
+	assert.ok(MIN_ALLOWLIST_DEPTH >= 3, "3-level cap: remembering a parent can never degrade into $HOME");
+	// /Users/bachi/Downloads's parent /Users/bachi is only 2 levels → degrade to remembering the exact path
 	assert.equal(memoryScopeFor("/Users/bachi/Downloads", env, CWD), "/Users/bachi/Downloads");
 });
 
-test("isSafeAllowlistRoot：拒 `/`、危险根、永不删除路径，以及危险根的祖先", () => {
+test("isSafeAllowlistRoot: rejects `/`, dangerous roots, never-delete paths, and ancestors of dangerous roots", () => {
 	assert.equal(isSafeAllowlistRoot("/", env), false);
-	assert.equal(isSafeAllowlistRoot(HOME, env), false, "$HOME 是危险根");
-	assert.equal(isSafeAllowlistRoot(`${HOME}/.ssh`, env), false, "永不删除路径不能入白名单");
-	assert.equal(isSafeAllowlistRoot(`${HOME}/.config/gh`, env), false, "嵌套的永不删除路径同样不能入白名单");
-	assert.equal(isSafeAllowlistRoot(`${HOME}/.config`, env), true, "用户 2026-09-25：~/.config 是普通目录，可记住（祖先闸不查永不删除档，否则嵌套条目会把它废掉）");
-	assert.equal(isSafeAllowlistRoot(`${HOME}/.pi/agent`, env), true, "用户 2026-09-25：~/.pi 子目录可记住");
+	assert.equal(isSafeAllowlistRoot(HOME, env), false, "$HOME is a dangerous root");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.ssh`, env), false, "never-delete paths cannot enter the allowlist");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.config/gh`, env), false, "nested never-delete paths cannot enter the allowlist either");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.config`, env), true, "user 2026-09-25: ~/.config is an ordinary directory, rememberable (the ancestor gate must not check never-delete, or nested entries would kill it)");
+	assert.equal(isSafeAllowlistRoot(`${HOME}/.pi/agent`, env), true, "user 2026-09-25: ~/.pi subdirectories are rememberable");
 	assert.equal(isSafeAllowlistRoot(`${HOME}/Downloads`, env), true);
-	assert.equal(isSafeAllowlistRoot("/Users", env), false, "组件数不够");
-	assert.equal(isSafeAllowlistRoot("/Users/bachi", env), false, "是 $HOME 危险根的祖先（且组件数不够）");
+	assert.equal(isSafeAllowlistRoot("/Users", env), false, "not enough components");
+	assert.equal(isSafeAllowlistRoot("/Users/bachi", env), false, "ancestor of the $HOME dangerous root (and not enough components)");
 });
 
-test("sessionScopeFor：危险根之下可以会话豁免，危险根 / 永不删除路径之下不行", () => {
-	// ~/Library/Foo/bar 的父目录 ~/Library/Foo 在危险根 ~/Library 之下但自身不是危险根 → 可以
+test("sessionScopeFor: under a dangerous root is exemptable; under a dangerous root / never-delete path itself is not", () => {
+	// ~/Library/Foo/bar's parent ~/Library/Foo sits under dangerous root ~/Library but is not itself one → allowed
 	assert.equal(sessionScopeFor(`${HOME}/Library/Foo/bar`, env, CWD), `${HOME}/Library/Foo`);
-	// ~/Library/x.plist 的父目录是 ~/Library（本身是危险根）→ 退回精确路径
+	// ~/Library/x.plist's parent is ~/Library (itself a dangerous root) → falls back to the exact path
 	assert.equal(sessionScopeFor(`${HOME}/Library/x.plist`, env, CWD), `${HOME}/Library/x.plist`);
-	// ~/.ssh 本身是永不删除路径 → 退回精确路径（blocked 档走不到这里，口径防御）
+	// ~/.ssh itself is a never-delete path → falls back to the exact path (the blocked tier never reaches this; defensive policy)
 	assert.equal(sessionScopeFor(`${HOME}/.ssh`, env, CWD), `${HOME}/.ssh`);
-	// 用户 2026-09-25：~/.config/foo 不再是永不删除子树 → 记父目录 ~/.config（深度 3 过闸）
+	// user 2026-09-25: ~/.config/foo is no longer a never-delete subtree → remember parent ~/.config (depth 3 passes the gate)
 	assert.equal(sessionScopeFor(`${HOME}/.config/foo`, env, CWD), `${HOME}/.config`);
 });
 
-test("extractDeniedPaths：BSD rm/rmdir 形状", () => {
+test("extractDeniedPaths: BSD rm/rmdir shapes", () => {
 	assert.deepEqual(extractDeniedPaths("rm: /Users/x/.sbx-probe: Operation not permitted"), ["/Users/x/.sbx-probe"]);
 	assert.deepEqual(extractDeniedPaths("rmdir: /Users/x/dir: Operation not permitted"), ["/Users/x/dir"]);
 	assert.deepEqual(extractDeniedPaths("node: /Users/x/a: Operation not permitted"), ["/Users/x/a"]);
 });
 
-test("extractDeniedPaths：GNU 引号形状", () => {
+test("extractDeniedPaths: GNU quoted shapes", () => {
 	assert.deepEqual(extractDeniedPaths("rm: cannot remove '/Users/x/a': Operation not permitted"), ["/Users/x/a"]);
 	assert.deepEqual(extractDeniedPaths("unlink: cannot unlink '/Users/x/a': Operation not permitted"), ["/Users/x/a"]);
 });
 
-test("extractDeniedPaths：rename 形状取源（mv / sed -i / git 落 ref）", () => {
+test("extractDeniedPaths: rename shape takes the source (mv / sed -i / git writing refs)", () => {
 	assert.deepEqual(extractDeniedPaths("mv: rename /Users/x/a to /Users/x/b: Operation not permitted"), ["/Users/x/a"]);
 	assert.deepEqual(extractDeniedPaths("sed: rename(/Users/x/.conf.sedXXXX to /Users/x/.conf): Operation not permitted"), ["/Users/x/.conf.sedXXXX"]);
 });
 
-test("extractDeniedPaths：排除 1 —— heredoc 临时文件失败不是删除", () => {
-	// bash 3.2 的 heredoc 必须先建 /var/tmp/sh-thd-* 再 unlink；它不是用户数据。
-	// 这三条是 2026-09-24 误报「要删 /bin/bash」弹危险目录框的原始输入。
+test("extractDeniedPaths: exclusion 1 — heredoc temp-file failure is not a deletion", () => {
+	// bash 3.2's heredoc must create /var/tmp/sh-thd-* and then unlink it; it is not user data.
+	// These three are the original inputs of the 2026-09-24 false positive that popped a dangerous-directory dialog for "deleting /bin/bash".
 	assert.deepEqual(
 		extractDeniedPaths("/bin/bash: cannot create temp file for here document: Operation not permitted"),
 		[],
-		"旧实现靠兜底扫描抽成 /bin/bash，于是弹了「危险路径 /bin」框",
+		"the old implementation's fallback scan extracted /bin/bash, popping the \"dangerous path /bin\" dialog",
 	);
 	assert.deepEqual(
 		extractDeniedPaths("/bin/bash: line 5: cannot create temp file for here document: Operation not permitted"),
 		[],
-		"带行号变体",
+		"line-numbered variant",
 	);
 	assert.deepEqual(
 		extractDeniedPaths("bash: /p: cannot create temp file for here document: Operation not permitted"),
 		[],
-		"旧实现 BSD 贪婪捕获抽成「/p: cannot create temp file for here document」这种脏路径",
+		"the old BSD greedy capture extracted dirty paths like \"/p: cannot create temp file for here document\"",
 	);
 });
 
-test("extractDeniedPaths：排除 2 —— shell / sandbox-exec 自身的 EPERM 是 exec 失败，不是 unlink", () => {
-	// /bin/ps、/usr/bin/top 是 setuid / platform binary，沙箱内 exec 直接 EPERM。
-	assert.deepEqual(extractDeniedPaths("bash: /bin/ps: Operation not permitted"), [], "旧实现抽成 /bin/ps → 弹危险框");
+test("extractDeniedPaths: exclusion 2 — EPERM reported by a shell / sandbox-exec itself is an exec failure, not an unlink", () => {
+	// /bin/ps and /usr/bin/top are setuid / platform binaries — exec inside the sandbox is EPERM directly.
+	assert.deepEqual(extractDeniedPaths("bash: /bin/ps: Operation not permitted"), [], "old implementation extracted /bin/ps → popped the dangerous dialog");
 	assert.deepEqual(extractDeniedPaths("bash: line 0: /usr/bin/top: Operation not permitted"), []);
-	assert.deepEqual(extractDeniedPaths("/bin/sh: /usr/bin/top: Operation not permitted"), [], "带路径前缀的 shell 同样认");
+	assert.deepEqual(extractDeniedPaths("/bin/sh: /usr/bin/top: Operation not permitted"), [], "shells with a path prefix are recognized too");
 	assert.deepEqual(extractDeniedPaths("zsh: /bin/ps: Operation not permitted"), []);
-	assert.deepEqual(extractDeniedPaths("sandbox-exec: sandbox_apply: Operation not permitted"), [], "嵌套沙箱不可用");
+	assert.deepEqual(extractDeniedPaths("sandbox-exec: sandbox_apply: Operation not permitted"), [], "nested sandbox unavailable");
 });
 
-test("extractDeniedPaths：排除是逐行的 —— 混合输出里真删除仍被抽出", () => {
-	// `cat <<EOF …; rm /边界外` 这种串联命令：heredoc 行跳过，rm 行照常弹框。
+test("extractDeniedPaths: exclusion is per-line — a real delete in mixed output is still extracted", () => {
+	// A `cat <<EOF …; rm /outside` style chained command: the heredoc line is skipped, the rm line still prompts.
 	const out = extractDeniedPaths(
 		[
 			"/bin/bash: cannot create temp file for here document: Operation not permitted",
 			"rm: /Users/x/outside/a: Operation not permitted",
 		].join("\n"),
 	);
-	assert.deepEqual(out, ["/Users/x/outside/a"], "全局闸会吞掉真删除，逐行不会");
+	assert.deepEqual(out, ["/Users/x/outside/a"], "a global gate would swallow the real delete; per-line does not");
 });
 
-test("extractDeniedPaths：兜底扫描保留 —— 白名单方案会丢的三类真实删除形状", () => {
-	// python3：路径在 EPERM **之后**且无 cannot，prog token 是 PermissionError 不是 python3，
-	// BSD / GNU 两条正则都够不着 —— 只有兜底抽得出。这是 2026-09-23 事故①的原型形状。
+test("extractDeniedPaths: fallback scan retained — the three real delete shapes an allowlist would drop", () => {
+	// python3: the path comes **after** the EPERM with no `cannot`, and the prog token is PermissionError, not python3 —
+	// neither the BSD nor the GNU regex can reach it — only the fallback extracts it. The prototype shape of incident ① on 2026-09-23.
 	assert.deepEqual(
 		extractDeniedPaths("PermissionError: [Errno 1] Operation not permitted: '/Users/x/outside/a'"),
 		["/Users/x/outside/a"],
 	);
 	// find -delete / -exec rm
 	assert.deepEqual(extractDeniedPaths("find: /Users/x/outside: Operation not permitted"), ["/Users/x/outside"]);
-	// ln -sf 覆盖 = unlink 目标
+	// ln -sf overwrite = unlink on the target
 	assert.deepEqual(extractDeniedPaths("ln: /Users/x/outside/link: Operation not permitted"), ["/Users/x/outside/link"]);
 });
 
-test("extractDeniedPaths：兜底扫描保留 —— rvm / apply2files / xargs 包装", () => {
+test("extractDeniedPaths: fallback scan retained — rvm / apply2files / xargs wrappings", () => {
 	assert.deepEqual(extractDeniedPaths("rvm: /Users/x/a -> errno=1 Operation not permitted"), ["/Users/x/a"]);
 	assert.deepEqual(extractDeniedPaths("ruby: Operation not permitted @ apply2files - /Users/x/a"), ["/Users/x/a"]);
 	assert.deepEqual(extractDeniedPaths("perl: Operation not permitted @ apply2files - /Users/x/a"), ["/Users/x/a"]);
 	assert.deepEqual(extractDeniedPaths("xargs: rm: /Users/x/outside/a: Operation not permitted"), ["/Users/x/outside/a"]);
 });
 
-test("extractDeniedPaths：兜底扫描新增覆盖 —— node / git 的真实多行格式", () => {
-	// 这两条旧实现反而抽不出（node 的没有冒号分隔、git 的尾引号没洗干净）。
+test("extractDeniedPaths: fallback scan covers more — node's / git's real multi-line formats", () => {
+	// The old implementation could not extract these two (node's has no colon separator; git's trailing quote was not cleaned).
 	assert.deepEqual(
 		extractDeniedPaths("Error: EPERM: operation not permitted, unlink '/Users/x/outside/a'"),
 		["/Users/x/outside/a"],
-		"node fs.unlinkSync 的真实报错形状",
+		"node fs.unlinkSync's real error shape",
 	);
 	assert.deepEqual(
 		extractDeniedPaths("warning: unable to unlink '/Users/x/repo/.git/config.lock': Operation not permitted"),
 		["/Users/x/repo/.git/config.lock"],
-		"git 落 ref 的真实形状；同时钉住 cleanExtractedPath 的尾引号修复（旧实现抽成 …lock'）",
+		"git's real ref-write shape; also pins cleanExtractedPath's trailing-quote fix (the old one extracted …lock')",
 	);
 });
 
-test("extractDeniedPaths：BSD 捕获只取单 token，抽不出就落兜底", () => {
-	// 旧的 (.+?) 会把中段一起吃进来，抽成脏路径。
+test("extractDeniedPaths: BSD capture takes a single token; on failure it falls to the fallback", () => {
+	// the old (.+?) would swallow the middle too, producing a dirty path.
 	assert.deepEqual(
 		extractDeniedPaths("find: /Users/x/outside/a: cannot unlink: Operation not permitted"),
 		["/Users/x/outside/a"],
-		"旧实现抽成「/Users/x/outside/a: cannot unlink」",
+		"old implementation extracted \"/Users/x/outside/a: cannot unlink\"",
 	);
 });
 
-test("extractDeniedPaths：多个目标、去重", () => {
+test("extractDeniedPaths: multiple targets, deduped", () => {
 	const out = extractDeniedPaths(
 		[
 			"rm: /Users/x/a: Operation not permitted",
@@ -448,29 +451,29 @@ test("extractDeniedPaths：多个目标、去重", () => {
 			"rm: /Users/x/a: Operation not permitted",
 		].join("\n"),
 	);
-	assert.deepEqual(out, ["/Users/x/a", "/Users/x/b"], "去重且保序");
+	assert.deepEqual(out, ["/Users/x/a", "/Users/x/b"], "deduped and order-preserved");
 	assert.deepEqual(extractDeniedPaths("hello world"), []);
 	assert.deepEqual(extractDeniedPaths(""), []);
-	// 含特征串但没有绝对路径 token 的行：兜底扫描也抽不出东西
-	assert.deepEqual(extractDeniedPaths("grep: Operation not permitted 只是普通文本"), []);
+	// a line with the signature string but no absolute-path token: even the fallback scan extracts nothing
+	assert.deepEqual(extractDeniedPaths("grep: Operation not permitted is just ordinary text"), []);
 });
 
-test("extractDeniedPaths：相对路径与无路径行返回空（调用方不弹框、原样报错）", () => {
-	assert.deepEqual(extractDeniedPaths("rm: foo.txt: Operation not permitted"), [], "相对路径不认（猜不出绝对目标）");
+test("extractDeniedPaths: relative paths and pathless lines return empty (caller shows no prompt and reports the error verbatim)", () => {
+	assert.deepEqual(extractDeniedPaths("rm: foo.txt: Operation not permitted"), [], "relative paths are not accepted (no absolute target can be guessed)");
 	assert.deepEqual(extractDeniedPaths("Operation not permitted"), []);
 });
 
-test("classifyOutsidePaths：永不删除 / 边界内 / 已授权 / 危险 / 普通五档互斥", () => {
+test("classifyOutsidePaths: five mutually exclusive tiers — never-delete / inside / authorized / dangerous / ordinary", () => {
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths(
 		[
-			`${CWD}/src/x.ts`, // 边界内
-			`${HOME}/Downloads/a.txt`, // 已授权（allowedRoots 里有 ~/Downloads）
-			`${HOME}/Downloads/b.txt`, // 已授权（同目录）
-			`${HOME}/.zshrc`, // 永不删除
-			`${HOME}/.ssh/id_rsa`, // 永不删除（子树）
-			`${HOME}/Library/Preferences/x`, // 危险（必问可豁免）
-			`${HOME}/projects/foo/y.txt`, // 普通
+			`${CWD}/src/x.ts`, // inside the boundary
+			`${HOME}/Downloads/a.txt`, // authorized (~/Downloads is in allowedRoots)
+			`${HOME}/Downloads/b.txt`, // authorized (same directory)
+			`${HOME}/.zshrc`, // never delete
+			`${HOME}/.ssh/id_rsa`, // never delete (subtree)
+			`${HOME}/Library/Preferences/x`, // dangerous (always ask, exemptable)
+			`${HOME}/projects/foo/y.txt`, // ordinary
 		],
 		{ boundary: b, allowedRoots: [`${HOME}/Downloads`], sessionRoots: [], env },
 	);
@@ -481,8 +484,8 @@ test("classifyOutsidePaths：永不删除 / 边界内 / 已授权 / 危险 / 普
 	assert.deepEqual(result.ordinary, [`${HOME}/projects/foo/y.txt`]);
 });
 
-test("classifyOutsidePaths：永不删除先于边界与授权 —— extraWrites / 白名单 / 会话豁免都压不过", () => {
-	// extraWrites 把 ~/.ssh 加进可删边界，仍然 blocked
+test("classifyOutsidePaths: never-delete beats boundary and authorization — extraWrites / allowlist / session exemption cannot override", () => {
+	// extraWrites put ~/.ssh inside the writable boundary — still blocked
 	const b = makeBoundary(CWD, [`${HOME}/.ssh`]);
 	const result = classifyOutsidePaths([`${HOME}/.ssh/id_rsa`], {
 		boundary: b,
@@ -490,13 +493,13 @@ test("classifyOutsidePaths：永不删除先于边界与授权 —— extraWrite
 		sessionRoots: [`${HOME}/.ssh`],
 		env,
 	});
-	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.ssh/id_rsa`], "凭据目录不给删");
-	assert.equal(result.inside.length, 0, "即使 extraWrites 放行了也不进边界档");
-	assert.equal(result.covered.length, 0, "白名单 / 会话豁免也压不过");
+	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.ssh/id_rsa`], "credential directories are not deletable");
+	assert.equal(result.inside.length, 0, "not in the boundary tier even when extraWrites allows it");
+	assert.equal(result.covered.length, 0, "allowlist / session exemption cannot override either");
 });
 
-test("classifyOutsidePaths：项目目录在永不删除路径之下时，删自己的文件不被 blocked", () => {
-	// 在 ~/.gnupg/proj/x 这种（假想的）位于永不删除目录里的项目干活：删项目自己的文件应当放行
+test("classifyOutsidePaths: when the project directory sits under a never-delete path, deleting its own files is not blocked", () => {
+	// working in a (hypothetical) project inside a never-delete directory like ~/.gnupg/proj/x: deleting the project's own files should pass
 	const projectDir = `${HOME}/.gnupg/proj/x`;
 	const b = makeBoundary(projectDir);
 	const result = classifyOutsidePaths([`${projectDir}/src/a.ts`, `${HOME}/.gnupg/private-keys-v1.d`], {
@@ -505,12 +508,12 @@ test("classifyOutsidePaths：项目目录在永不删除路径之下时，删自
 		sessionRoots: [],
 		env,
 	});
-	assert.deepEqual(result.inside, [`${projectDir}/src/a.ts`], "项目目录按定义在可删边界内");
-	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.gnupg/private-keys-v1.d`], "项目外的仍拦");
+	assert.deepEqual(result.inside, [`${projectDir}/src/a.ts`], "the project directory is inside the writable boundary by definition");
+	assert.deepEqual(result.blocked.map((d) => d.path), [`${HOME}/.gnupg/private-keys-v1.d`], "ones outside the project still blocked");
 });
 
-test("classifyOutsidePaths：~/.pi、~/.config、~/.claude、~/.codex 是普通边界外档 —— 弹框可记住", () => {
-	// 用户 2026-09-25：这四个工具状态目录移出永不删除档（pi 自己清理 stale lock 曾被内核拦死）
+test("classifyOutsidePaths: ~/.pi, ~/.config, ~/.claude, ~/.codex are ordinary outside tier — prompt once, rememberable", () => {
+	// user 2026-09-25: these four tool state directories left the never-delete tier (pi's own stale-lock cleanup was once kernel-blocked)
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths(
 		[`${HOME}/.pi/agent/trust.json.lock`, `${HOME}/.config/foo`, `${HOME}/.claude/x`, `${HOME}/.codex/y`],
@@ -522,17 +525,17 @@ test("classifyOutsidePaths：~/.pi、~/.config、~/.claude、~/.codex 是普通�
 	);
 	assert.equal(result.blocked.length, 0);
 	assert.equal(result.dangerous.length, 0);
-	// 白名单记住 ~/.pi/agent 后不再问
+	// after the allowlist remembers ~/.pi/agent, no more prompts
 	const covered = classifyOutsidePaths([`${HOME}/.pi/agent/trust.json.lock`], {
 		boundary: b,
 		allowedRoots: [`${HOME}/.pi/agent`],
 		sessionRoots: [],
 		env,
 	});
-	assert.deepEqual(covered.covered, [`${HOME}/.pi/agent/trust.json.lock`], "记住后静默放行");
+	assert.deepEqual(covered.covered, [`${HOME}/.pi/agent/trust.json.lock`], "after remembering, passes silently");
 });
 
-test("classifyOutsidePaths：会话豁免优先于危险判定", () => {
+test("classifyOutsidePaths: session exemption beats the dangerous check", () => {
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths([`${HOME}/Library/Foo/bar`], {
 		boundary: b,
@@ -540,11 +543,11 @@ test("classifyOutsidePaths：会话豁免优先于危险判定", () => {
 		sessionRoots: [`${HOME}/Library/Foo`],
 		env,
 	});
-	assert.deepEqual(result.covered, [`${HOME}/Library/Foo/bar`], "本会话豁免过就不再问");
+	assert.deepEqual(result.covered, [`${HOME}/Library/Foo/bar`], "once exempted this session, no more prompts");
 	assert.equal(result.dangerous.length, 0);
 });
 
-test("classifyOutsidePaths：可再生缓存在边界内 —— ~/.cache 与 ~/Library/Caches 静默放行", () => {
+test("classifyOutsidePaths: regenerable caches are inside — ~/.cache and ~/Library/Caches pass silently", () => {
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths([`${HOME}/.cache/foo`, `${HOME}/Library/Caches/x`, `${HOME}/.npm/_cacache/y`], {
 		boundary: b,
@@ -554,17 +557,17 @@ test("classifyOutsidePaths：可再生缓存在边界内 —— ~/.cache 与 ~/L
 	});
 	assert.deepEqual(result.inside, [`${HOME}/.cache/foo`, `${HOME}/Library/Caches/x`, `${HOME}/.npm/_cacache/y`]);
 	assert.equal(result.blocked.length, 0);
-	assert.equal(result.dangerous.length, 0, "~/Library/Caches 在边界内，走不到 ~/Library 的危险判定");
+	assert.equal(result.dangerous.length, 0, "~/Library/Caches is inside the boundary and never reaches the ~/Library dangerous check");
 });
 
-test("classifyOutsidePaths：边界内优先 —— /private/tmp 在 /private 下但不危险", () => {
+test("classifyOutsidePaths: boundary first — /private/tmp is under /private but not dangerous", () => {
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths(["/private/tmp/x"], { boundary: b, allowedRoots: [], sessionRoots: [], env });
-	assert.deepEqual(result.inside, ["/private/tmp/x"], "先判边界：临时根直接放行");
+	assert.deepEqual(result.inside, ["/private/tmp/x"], "boundary checked first: temp roots pass directly");
 	assert.equal(result.dangerous.length, 0);
 });
 
-test("classifyOutsidePaths：去重", () => {
+test("classifyOutsidePaths: deduplication", () => {
 	const b = makeBoundary(CWD);
 	const result = classifyOutsidePaths([`${HOME}/projects/a`, `${HOME}/projects/a/`, `${HOME}/projects/a`], {
 		boundary: b,
@@ -575,71 +578,71 @@ test("classifyOutsidePaths：去重", () => {
 	assert.deepEqual(result.ordinary, [`${HOME}/projects/a`]);
 });
 
-test("memoryScopesFor：一批目标折算出去重的范围", () => {
+test("memoryScopesFor: a batch of targets reduces to deduped scopes", () => {
 	assert.deepEqual(memoryScopesFor([`${HOME}/Downloads/a`, `${HOME}/Downloads/b`], env, CWD), [`${HOME}/Downloads`]);
 });
 
-test("writableRoots 至少含项目目录、全部临时根与可再生缓存根", () => {
+test("writableRoots contains at least the project directory, all temp roots, and regenerable cache roots", () => {
 	const roots = writableRoots(makeBoundary(CWD));
 	assert.ok(roots.includes(CWD));
 	for (const root of TEMP_WRITE_ROOTS) assert.ok(roots.includes(root));
-	for (const rel of SAFE_CACHE_HOME_DIRS) assert.ok(roots.includes(`${HOME}/${rel}`), `缓存根 ${rel} 在可删边界内`);
+	for (const rel of SAFE_CACHE_HOME_DIRS) assert.ok(roots.includes(`${HOME}/${rel}`), `cache root ${rel} is inside the writable boundary`);
 });
 
-test("buildSeatbeltProfile：永不删除 deny 行在 allow 行之后，含全部永不删除子树", () => {
+test("buildSeatbeltProfile: the never-delete deny line comes after the allow line and covers all never-delete subtrees", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD));
 	const lines = profile.split("\n");
 	const allowIdx = lines.findIndex((l) => l.startsWith("(allow file-write-unlink "));
 	const denyIdx = lines.findIndex((l) => l.startsWith("(deny file-write-unlink ("));
-	assert.ok(allowIdx >= 0, "allow 行存在");
-	assert.ok(denyIdx >= 0, "永不删除 deny 行存在");
-	assert.ok(denyIdx > allowIdx, "deny 在 allow 之后（seatbelt 后写覆盖先写 → 内核级拦死）");
+	assert.ok(allowIdx >= 0, "the allow line exists");
+	assert.ok(denyIdx >= 0, "the never-delete deny line exists");
+	assert.ok(denyIdx > allowIdx, "deny after allow (later seatbelt rules override earlier → kernel-level block)");
 	const denyLine = lines[denyIdx]!;
-	// 每项同时发 literal（钉死文件本身）与 subpath（覆盖目录子树）
-	assert.ok(denyLine.includes(`(literal "${HOME}/.zshrc")`), "配置文件有 literal");
-	assert.ok(denyLine.includes(`(subpath "${HOME}/.zshrc")`), "配置文件也有 subpath");
-	assert.ok(denyLine.includes(`(subpath "${HOME}/.ssh")`), "凭据目录在 deny 行");
-	assert.ok(denyLine.includes(`(subpath "${HOME}/.password-store")`), "2026-09-25 补充的密码库在 deny 行");
-	// 嵌套条目：两级绝对路径同样进 deny 行（literal + subpath）
-	assert.ok(denyLine.includes(`(literal "${HOME}/.config/gh")`), "嵌套条目有 literal");
-	assert.ok(denyLine.includes(`(subpath "${HOME}/.config/gcloud")`), "嵌套条目有 subpath");
-	assert.ok(!denyLine.includes(`"${HOME}/.cache"`), "缓存不在 deny 行");
-	// 缓存根在 allow 行
-	assert.ok(lines[allowIdx]!.includes(`(subpath "${HOME}/.cache")`), "缓存根在 allow 行");
+	// each entry emits both literal (pins the file itself) and subpath (covers the directory subtree)
+	assert.ok(denyLine.includes(`(literal "${HOME}/.zshrc")`), "config files get a literal");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.zshrc")`), "config files also get a subpath");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.ssh")`), "credential directories are in the deny line");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.password-store")`), "the password store added 2026-09-25 is in the deny line");
+	// nested entries: the two-level absolute path goes into the deny line too (literal + subpath)
+	assert.ok(denyLine.includes(`(literal "${HOME}/.config/gh")`), "nested entries get a literal");
+	assert.ok(denyLine.includes(`(subpath "${HOME}/.config/gcloud")`), "nested entries get a subpath");
+	assert.ok(!denyLine.includes(`"${HOME}/.cache"`), "caches are not in the deny line");
+	// cache roots are in the allow line
+	assert.ok(lines[allowIdx]!.includes(`(subpath "${HOME}/.cache")`), "cache roots are in the allow line");
 });
 
-test("buildSeatbeltProfile：项目目录在永不删除路径之下时，该路径不进 deny 行", () => {
+test("buildSeatbeltProfile: when the project directory sits under a never-delete path, that path is left out of the deny line", () => {
 	const projectDir = `${HOME}/.gnupg/proj/x`;
 	const profile = buildSeatbeltProfile(makeBoundary(projectDir));
 	const denyLine = profile.split("\n").find((l) => l.startsWith("(deny file-write-unlink ("));
-	assert.ok(denyLine, "deny 行仍存在");
-	assert.ok(!denyLine!.includes(`"${HOME}/.gnupg"`), "项目所在的永不删除根被挖掉，否则删自己的文件全被拦");
-	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "其余永不删除根仍在");
+	assert.ok(denyLine, "the deny line still exists");
+	assert.ok(!denyLine!.includes(`"${HOME}/.gnupg"`), "the never-delete root containing the project is carved out, or deleting the project's own files would all be blocked");
+	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "the other never-delete roots remain");
 });
 
-test("buildSeatbeltProfile：~/.pi、~/.config、~/.claude、~/.codex 不在 deny 行", () => {
-	// 用户 2026-09-25：工具状态目录移出永不删除档，内核不再拦它们的删除
+test("buildSeatbeltProfile: ~/.pi, ~/.config, ~/.claude, ~/.codex are not in the deny line", () => {
+	// user 2026-09-25: tool state directories left the never-delete tier — the kernel no longer blocks their deletion
 	const profile = buildSeatbeltProfile(makeBoundary(CWD));
 	const denyLine = profile.split("\n").find((l) => l.startsWith("(deny file-write-unlink ("));
 	assert.ok(denyLine);
 	for (const name of [".pi", ".config", ".claude", ".codex"]) {
-		assert.ok(!denyLine!.includes(`"${HOME}/${name}"`), `${name} 不在 deny 行`);
+		assert.ok(!denyLine!.includes(`"${HOME}/${name}"`), `${name} is not in the deny line`);
 	}
-	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "凭据目录仍在 deny 行");
-	// 嵌套条目不影响上面四条：`~/.config/gh` 在 deny 行，但 `~/.config` 自身不在
-	assert.ok(denyLine!.includes(`(subpath "${HOME}/.config/gh")`), "嵌套条目在");
-	assert.ok(!denyLine!.includes(`(subpath "${HOME}/.config")`), "~/.config 自身不在（否则工具状态目录又变回永不删除）");
+	assert.ok(denyLine!.includes(`(subpath "${HOME}/.ssh")`), "credential directories remain in the deny line");
+	// nested entries do not affect the four above: `~/.config/gh` is in the deny line, but `~/.config` itself is not
+	assert.ok(denyLine!.includes(`(subpath "${HOME}/.config/gh")`), "nested entries are in");
+	assert.ok(!denyLine!.includes(`(subpath "${HOME}/.config")`), "~/.config itself is not (or tool state directories become never-delete again)");
 });
 
-test("buildSeatbeltProfile：extraUnlinkRoots 并进同一行 allow，顺序不变", () => {
+test("buildSeatbeltProfile: extraUnlinkRoots merge into the same allow line, order preserved", () => {
 	const profile = buildSeatbeltProfile(makeBoundary(CWD), [`${HOME}/Downloads`, `${HOME}/Downloads`]);
 	const lines = profile.split("\n");
 	const unlinkAllow = lines.find((l) => l.startsWith("(allow file-write-unlink "));
-	assert.ok(unlinkAllow, "仍只有一行 unlink allow");
-	assert.ok(unlinkAllow!.includes(`(subpath "${HOME}/Downloads")`), "白名单根进了放行名单");
-	assert.equal(unlinkAllow!.split(`(subpath "${HOME}/Downloads")`).length - 1, 1, "去重");
+	assert.ok(unlinkAllow, "still only one unlink allow line");
+	assert.ok(unlinkAllow!.includes(`(subpath "${HOME}/Downloads")`), "allowlist roots entered the allow list");
+	assert.equal(unlinkAllow!.split(`(subpath "${HOME}/Downloads")`).length - 1, 1, "deduplicated");
 	assert.ok(
 		lines.indexOf("(deny file-write-unlink)") < lines.indexOf(unlinkAllow!),
-		"全局 deny 仍在 allow 之前（seatbelt 后写覆盖先写）",
+		"the global deny still precedes the allow (later seatbelt rules override earlier)",
 	);
 });

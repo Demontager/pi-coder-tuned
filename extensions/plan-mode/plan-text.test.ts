@@ -1,12 +1,16 @@
 /**
- * Tests for plan-text.ts — 注入给模型的上下文、批准对话框的计划截断、收尾指令。
+ * Tests for plan-text.ts — the context injected for the model, plan truncation for the
+ * approval dialog, and the wrap-up instructions.
  *
  * Run with:  node --test clients/pi/extensions/plan-mode/plan-text.test.ts
  *
- * plan-text.ts 不 import pi / pi-tui。这里最要紧的三件事：
- *   1. 截断后的总高度**不超过**对话框预算（超了就把计划开头顶出屏幕）；
- *   2. 写文档指令必须钉死目标路径、带上计划全文、并说明「写完不用再调工具」；
- *   3. doc-only 的收尾指令必须硬到模型不会顺手开始改代码（那时写权限已经恢复）。
+ * plan-text.ts imports no pi / pi-tui. The three things that matter most:
+ *   1. the truncated total height **does not exceed** the dialog budget (over pushes the
+ *      plan's top off-screen);
+ *   2. the doc-writing instruction must pin the target path, carry the full plan, and say
+ *      "no more tool calls after writing";
+ *   3. doc-only's wrap-up instruction must be firm enough that the model does not casually
+ *      start editing (write access is already restored by then).
  */
 
 import assert from "node:assert/strict";
@@ -22,100 +26,100 @@ import {
 	type WrapFn,
 } from "./plan-text.ts";
 
-describe("注入上下文", () => {
-	it("plan 阶段说明只读阶段、点名 exit_plan_mode 与 cwd", () => {
+describe("injected context", () => {
+	it("plan phase explains the read-only phase and names exit_plan_mode and cwd", () => {
 		const context = buildPlanModeContext("/Users/x/project");
 		assert.match(context, /\[PLAN MODE\]/);
 		assert.match(context, /exit_plan_mode/);
 		assert.match(context, /\/Users\/x\/project/);
-		assert.match(context, /ask_user_question/, "要告诉模型可以用它问用户");
+		assert.match(context, /ask_user_question/, "the model must be told it can ask the user through it");
 	});
 
-	it("plan 阶段要求提交的是一份完整方案，不是一串步骤标题", () => {
+	it("plan phase requires submitting a complete plan, not a list of step titles", () => {
 		const context = buildPlanModeContext("/repo");
-		assert.match(context, /complete Markdown design/, "参数名与形状都要说清楚");
+		assert.match(context, /complete Markdown design/, "the parameter name and shape must be spelled out");
 		assert.match(context, /markdown/i);
-		assert.match(context, /verification/, "验证方式是方案的一部分");
+		assert.match(context, /verification/, "verification is part of the plan");
 		assert.match(context, /not just step headings/);
 	});
 });
 
 // =============================================================================
-// 写文档子态
+// Doc-writing sub-state
 // =============================================================================
 
-const DOC_PATH = "/repo/.pi/plans/2026-09-24-改两个文件.md";
-const PLAN = "# 方案\n\n## 总结\n改 index.ts 与 render.ts。\n\n## 验证\n跑 node --test。";
+const DOC_PATH = "/repo/.pi/plans/2026-09-24-change-two-files.md";
+const PLAN = "# Plan\n\n## Summary\nChange index.ts and render.ts.\n\n## Verification\nRun node --test.";
 
 describe("buildDocWriteContext", () => {
-	it("钉死目标路径，并说明这是唯一允许写入的文件", () => {
-		const context = buildDocWriteContext(DOC_PATH, PLAN, "改两个文件");
+	it("pins the target path and says it is the only writable file", () => {
+		const context = buildDocWriteContext(DOC_PATH, PLAN, "change two files");
 		assert.match(context, /\[WRITE PLAN DOC\]/);
 		assert.match(context, /use this exact path/);
-		assert.ok(context.includes(DOC_PATH), "路径必须原样出现在指令里");
+		assert.ok(context.includes(DOC_PATH), "the path must appear verbatim in the instruction");
 		assert.match(context, /only writable file/);
-		assert.match(context, /Use the write tool/, "点名工具，模型才不会去试 bash 重定向");
+		assert.match(context, /Use the write tool/, "the tool must be named, or the model would try a bash redirect");
 	});
 
-	it("带上计划全文与总结（模型照着整理，不是重新想一遍）", () => {
-		const context = buildDocWriteContext(DOC_PATH, PLAN, "改两个文件");
-		assert.ok(context.includes(PLAN), "计划全文要原样带进去");
-		assert.match(context, /Design summary: 改两个文件/);
+	it("carries the full plan and summary (the model organizes it — not rethinks it)", () => {
+		const context = buildDocWriteContext(DOC_PATH, PLAN, "change two files");
+		assert.ok(context.includes(PLAN), "the full plan must be embedded verbatim");
+		assert.match(context, /Design summary: change two files/);
 	});
 
-	it("没有总结时给占位文案，不留一个空冒号", () => {
+	it("a missing summary gets placeholder text, not a dangling colon", () => {
 		assert.match(buildDocWriteContext(DOC_PATH, PLAN), /Design summary: \(no summary provided\)/);
 		assert.match(buildDocWriteContext(DOC_PATH, PLAN, "   "), /Design summary: \(no summary provided\)/);
 	});
 
-	it("明确边界没变：仍是只读阶段，不许开始改代码", () => {
+	it("the unchanged boundary is spelled out: still read-only, no editing code", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
 		assert.match(context, /Do not start changing code/);
 		assert.match(context, /edit is unavailable/);
-		assert.match(context, /Bash writes/, "bash 闸仍在，要说清楚");
+		assert.match(context, /Bash writes/, "the bash gate still stands — must be said");
 	});
 
-	it("写完不用再调任何工具（收尾由 tool_result 钩子自动做）", () => {
+	it("no tool calls after writing (tool_result wraps up automatically)", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
-		assert.match(context, /Do not call exit_plan_mode/, "少一次模型可能忘记的调用");
+		assert.match(context, /Do not call exit_plan_mode/, "one call less the model could forget");
 		assert.match(context, /finishes this phase/);
 	});
 
-	it("给出文档结构模板，且要求读者是零上下文的执行者", () => {
+	it("a document structure template is given, and the reader is required to be a zero-context executor", () => {
 		const context = buildDocWriteContext(DOC_PATH, PLAN);
 		assert.match(context, /no prior context/);
 		for (const section of ["## Summary", "## Background", "## Files", "## Implementation steps", "## Verification", "## Risks and open questions"]) {
-			assert.ok(context.includes(section), `模板里应有 ${section}`);
+			assert.ok(context.includes(section), `the template should contain ${section}`);
 		}
 	});
 });
 
 // =============================================================================
-// 收尾指令
+// Wrap-up instructions
 // =============================================================================
 
 describe("buildDocWrittenMessage", () => {
-	it("execute-with-doc：报路径、让模型按文档实施、建不建清单由它自己判断", () => {
+	it("execute-with-doc: report the path, send the model implementing per the doc, list-building left to its judgment", () => {
 		const message = buildDocWrittenMessage("execute-with-doc", DOC_PATH);
 		assert.ok(message.includes(DOC_PATH));
 		assert.match(message, /write access is restored/);
 		assert.match(message, /Follow this document/);
-		assert.match(message, /task_set/, "要提到这个工具，模型才知道进度归它自己");
-		assert.match(message, /when useful/, "不强制建清单 —— 这是本次改动的核心");
-		assert.match(message, /survives context compaction/, "文档存在的理由");
+		assert.match(message, /task_set/, "the tool must be named so the model knows progress is its own");
+		assert.match(message, /when useful/, "list-building is not forced — the core of this change");
+		assert.match(message, /survives context compaction/, "the document's reason to exist");
 	});
 
-	it("doc-only：报路径并硬止住，不许开始改代码", () => {
+	it("doc-only: report the path and firmly stop — no editing", () => {
 		const message = buildDocWrittenMessage("doc-only", DOC_PATH);
 		assert.ok(message.includes(DOC_PATH));
 		assert.match(message, /document only, no implementation/);
-		assert.match(message, /stop now/, "写权限已恢复，措辞必须硬");
+		assert.match(message, /stop now/, "write access is already restored — the wording must be firm");
 		assert.match(message, /Do not change code/);
 		assert.match(message, /create a task list/);
-		assert.ok(!message.includes("Follow this document"), "两条路线的指令不能串");
+		assert.ok(!message.includes("Follow this document"), "the two routes' instructions must not cross");
 	});
 
-	it("两条路线都把文档路径报出来（那是这次规划唯一的持久产物）", () => {
+	it("both routes report the doc path (the only persistent artifact of this planning)", () => {
 		for (const mode of ["execute-with-doc", "doc-only"] as const) {
 			assert.ok(buildDocWrittenMessage(mode, DOC_PATH).includes(DOC_PATH), mode);
 		}
@@ -123,7 +127,7 @@ describe("buildDocWrittenMessage", () => {
 });
 
 describe("buildRejectedMessage", () => {
-	it("说明仍在 plan mode（只读），要按用户反馈改后重新提交", () => {
+	it("explains it is still in plan mode (read-only), to revise per user feedback and resubmit", () => {
 		const message = buildRejectedMessage();
 		assert.match(message, /did not approve/);
 		assert.match(message, /Remain in plan mode \(read-only\)/);
@@ -132,12 +136,13 @@ describe("buildRejectedMessage", () => {
 });
 
 // =============================================================================
-// 批准对话框的计划截断
+// Plan truncation for the approval dialog
 // =============================================================================
 
 /**
- * 测试用的折行器：按**字符数**硬断（不认 CJK 宽字）。生产代码注入的是 pi-tui 的
- * `wrapTextWithAnsi`，它按可见列宽折行 —— 两者接口相同，这里只需要一个行数可预测的实现。
+ * The test wrapper: hard-breaks by **character count** (no CJK wide-char awareness). Production
+ * injects pi-tui's `wrapTextWithAnsi`, which wraps by visible columns — same interface; the
+ * test only needs one with predictable row counts.
  */
 const wrapByChars: WrapFn = (text, width) => {
 	if (width <= 0) return [text];
@@ -146,12 +151,12 @@ const wrapByChars: WrapFn = (text, width) => {
 	return out.length > 0 ? out : [""];
 };
 
-/** N 行同样长度的计划（markdown 形状：每行一句）。 */
-function makePlan(lines: number, text = "改一个文件"): string {
+/** A plan of N same-length lines (markdown shape: one sentence per line). */
+function makePlan(lines: number, text = "change a file"): string {
 	return Array.from({ length: lines }, (_, i) => `${i + 1}. ${text}`).join("\n");
 }
 
-/** 一段文本在对话框里占多少行（与生产代码同一个算法：逐行折行后求和）。 */
+/** How many rows a text occupies in the dialog (same algorithm as production: wrap per line, then sum). */
 function dialogHeight(text: string, contentWidth: number): number {
 	return text
 		.split("\n")
@@ -159,75 +164,75 @@ function dialogHeight(text: string, contentWidth: number): number {
 }
 
 describe("dialogPlanBudget", () => {
-	it("宽终端：chrome 11 行（三选一）+ 下方预留 5 行", () => {
+	it("wide terminal: chrome 11 rows (three choices) + 5 reserved below", () => {
 		const { budget, contentWidth } = dialogPlanBudget({ rows: 40, columns: 100 });
-		assert.equal(contentWidth, 98, "Text 的 paddingX=1，左右各吃一列");
+		assert.equal(contentWidth, 98, "Text's paddingX=1 eats one column on each side");
 		assert.equal(budget, 40 - 11 - 5);
 	});
 
-	it("窄终端（<50 列）：快捷键提示折行，chrome 多 1 行", () => {
+	it("narrow terminal (<50 cols): the shortcut hint wraps, chrome +1 row", () => {
 		const wide = dialogPlanBudget({ rows: 40, columns: 100 }).budget;
 		const narrow = dialogPlanBudget({ rows: 40, columns: 40 }).budget;
 		assert.equal(narrow, wide - 1);
 	});
 
-	it("列宽有下限，极窄终端不会算出 0 或负数", () => {
+	it("the column width has a floor — an extremely narrow terminal never yields 0 or negative", () => {
 		assert.ok(dialogPlanBudget({ rows: 40, columns: 1 }).contentWidth >= 8);
 	});
 });
 
 describe("truncatePlanForDialog", () => {
-	it("塞得下的计划原样返回，一个字符都不动", () => {
+	it("a fitting plan returns verbatim, not one char touched", () => {
 		const plan = makePlan(5);
 		const result = truncatePlanForDialog(plan, { rows: 40, columns: 100 }, wrapByChars);
 		assert.equal(result, plan);
-		assert.ok(!result.includes("还有"), "不该出现截断提示");
+		assert.ok(!result.includes("plus"), "no truncation hint should appear");
 	});
 
-	it("markdown 的空行也占一行（段落间距是可读性的一部分）", () => {
-		const plan = "第一段\n\n第二段";
+	it("markdown blank lines count as rows too (paragraph spacing is part of readability)", () => {
+		const plan = "first line\n\nsecond line";
 		const result = truncatePlanForDialog(plan, { rows: 40, columns: 100 }, wrapByChars);
-		assert.equal(result, plan, "空行不能被压掉");
+		assert.equal(result, plan, "blank lines must not be squashed");
 	});
 
-	it("CRLF 归一成 LF，不因为 \\r 多算宽度", () => {
-		const plan = "第一行\r\n第二行";
+	it("CRLF normalizes to LF — \\r adds no width", () => {
+		const plan = "first line\nsecond line";
 		const result = truncatePlanForDialog(plan, { rows: 40, columns: 100 }, wrapByChars);
-		assert.equal(result, "第一行\n第二行");
+		assert.equal(result, "first line\nsecond line");
 	});
 
-	it("刚好等于预算不截断，多一行就截断", () => {
+	it("exactly at the budget no truncation; one line over and it truncates", () => {
 		const metrics = { rows: 40, columns: 100 };
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
 		const exact = truncatePlanForDialog(makePlan(budget), metrics, wrapByChars);
-		assert.ok(!exact.includes("还有"), `${budget} 行刚好塞满，不该截断`);
+		assert.ok(!exact.includes("plus"), `${budget} rows fit exactly — must not truncate`);
 
 		const over = truncatePlanForDialog(makePlan(budget + 1), metrics, wrapByChars);
-		// 提示行自己占 1 行，所以能完整留下的只有 budget-1 行，藏起来的是 2 行。
-		assert.match(over, /plus 2 lines/, "多一行就该截断并点名剩下几行");
-		assert.equal(dialogHeight(over, contentWidth), budget, "截断后恰好占满预算");
+		// the hint line takes 1 row itself, so only budget-1 lines stay whole; 2 lines are hidden.
+		assert.match(over, /plus 2 lines/, "one line over must truncate and name how many are hidden");
+		assert.equal(dialogHeight(over, contentWidth), budget, "after truncation it fills the budget exactly");
 	});
 
-	it("超屏计划截断后带提示行，且提示行报的是被藏起来的行数", () => {
+	it("an overlong plan truncates with a hint line that reports the hidden line count", () => {
 		const metrics = { rows: 30, columns: 100 };
 		const result = truncatePlanForDialog(makePlan(40), metrics, wrapByChars);
 		const lines = result.split("\n");
 		assert.match(lines[lines.length - 1]!, /^… plus \d+ lines \(scroll up to read the full plan\)$/);
 		const { budget } = dialogPlanBudget(metrics);
-		assert.ok(lines.length <= budget, `${lines.length} 行应 ≤ 预算 ${budget}`);
+		assert.ok(lines.length <= budget, `${lines.length} rows should be ≤ budget ${budget}`);
 	});
 
-	it("折行占多行的段落按真实高度计入预算", () => {
-		// 每行 300 字符，在 98 列下折成 4 行（wrapByChars 按字符硬断）
+	it("a paragraph wrapping to multiple rows counts at its real height", () => {
+		// 300 chars per line wraps to 4 rows at 98 columns (wrapByChars hard-breaks by char)
 		const long = "x".repeat(300);
 		const metrics = { rows: 30, columns: 100 };
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
 		const result = truncatePlanForDialog(makePlan(20, long), metrics, wrapByChars);
-		assert.ok(dialogHeight(result, contentWidth) <= budget, `截断后总高应 ≤ 预算 ${budget}`);
+		assert.ok(dialogHeight(result, contentWidth) <= budget, `truncated total height should be ≤ budget ${budget}`);
 		assert.match(result, /plus \d+ lines/);
 	});
 
-	it("CJK 文案按注入的折行器算高度（生产注入 pi-tui 的 wrapTextWithAnsi，逐字断行）", () => {
+	it("CJK text is measured by the injected wrapper (production injects pi-tui's wrapTextWithAnsi, breaking per char)", () => {
 		const cjk = "中".repeat(200);
 		const metrics = { rows: 30, columns: 100 };
 		const { budget, contentWidth } = dialogPlanBudget(metrics);
@@ -235,31 +240,31 @@ describe("truncatePlanForDialog", () => {
 		assert.ok(dialogHeight(result, contentWidth) <= budget);
 	});
 
-	it("终端极矮（预算连一行都放不下）时只给提示行，不超预算", () => {
+	it("an extremely short terminal (budget under one row) yields only the hint line, within budget", () => {
 		const metrics = { rows: 17, columns: 100 }; // budget = 17 - 11 - 5 = 1
 		const { budget } = dialogPlanBudget(metrics);
 		const result = truncatePlanForDialog(makePlan(8), metrics, wrapByChars);
-		assert.ok(budget <= 1, `这个终端的预算应是 1，实际 ${budget}`);
-		assert.equal(result.split("\n").length, 1, "只有一行提示");
+		assert.ok(budget <= 1, `this terminal's budget should be 1; got ${budget}`);
+		assert.equal(result.split("\n").length, 1, "only the one hint line");
 		assert.match(result, /Plan has 8 lines/);
 	});
 
-	it("预算为 0 或负数（终端矮到放不下对话框）也不崩、不超预算", () => {
+	it("budget 0 or negative (terminal too short for the dialog) does not crash or overflow", () => {
 		for (const rows of [16, 10, 1]) {
 			const metrics = { rows, columns: 100 };
 			const result = truncatePlanForDialog(makePlan(8), metrics, wrapByChars);
-			assert.equal(result.split("\n").length, 1, `rows=${rows} 应只有一行提示`);
+			assert.equal(result.split("\n").length, 1, `rows=${rows} should only have the hint line`);
 		}
 	});
 
-	it("一行超长计划按宽度截到能显示，不给用户一个空框", () => {
+	it("a single overlong line is clipped to displayable width — no empty box for the user", () => {
 		const metrics = { rows: 20, columns: 100 }; // budget = 4
 		const result = truncatePlanForDialog("x".repeat(2000), metrics, wrapByChars);
 		assert.ok(result.length > 0);
 		assert.ok(dialogHeight(result, dialogPlanBudget(metrics).contentWidth) <= 4);
 	});
 
-	it("空计划不崩（返回空串）", () => {
+	it("an empty plan does not crash (returns an empty string)", () => {
 		assert.equal(truncatePlanForDialog("", { rows: 40, columns: 100 }, wrapByChars), "");
 	});
 });

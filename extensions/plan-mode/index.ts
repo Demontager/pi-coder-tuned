@@ -1,59 +1,73 @@
 /**
- * pi-plan-mode — Claude Code 风格的 plan mode。
+ * pi-plan-mode — a Claude Code-style plan mode.
  *
- * 两态：bypass → plan（只读探索，模型出方案）。与 Claude Code 对齐：
+ * Two states: bypass → plan (read-only exploration; the model produces a plan). Aligned with
+ * Claude Code:
  *
- *   - `exit_plan_mode` 的参数是**一份完整方案文本**（cc 的 `ExitPlanMode(plan)` 同形），
- *     不是一串结构化步骤。
- *   - 批准后**没有 execute 态**：扩展把方案落成计划文档（`.pi/plans/`，模型自己 write），
- *     写完即回 bypass、还原写权限，「按文档实施」是一次性交给模型的指令。进度也交还
- *     模型 —— 它认为该建任务清单就自己 `task_set`，扩展不再镜像步骤、不再记进度。
+ *   - `exit_plan_mode`'s argument is **a complete plan text** (same shape as cc's
+ *     `ExitPlanMode(plan)`), not a list of structured steps.
+ *   - **There is no execute state after approval**: the extension turns the plan into a plan
+ *     document (`.pi/plans/`, written by the model itself), then returns straight to bypass
+ *     and restores write access — "implement per the document" is handed to the model as a
+ *     one-shot instruction. Progress also goes back to the model: if it wants a task list it
+ *     calls `task_set` itself; the extension no longer mirrors steps or tracks progress.
  *
- * ## 审批对话框（三选一）
+ * ## The approval dialog (three choices)
  *
- *   写计划文档并实施   模型把方案写成 .pi/plans/<日期>-<slug>.md，写完自动收尾进实施
- *   只写计划文档       同上，但收尾指令是「报告路径就停，不要动手」
- *   打回               留在 plan 态，等用户反馈后重新提交
+ *   Write plan and implement  the model writes the plan to .pi/plans/<date>-<slug>.md; on write
+ *                            success it wraps up automatically and enters implementation
+ *   Write plan only           same, but the wrap-up instruction is "report the path and stop —
+ *                            do not implement"
+ *   Request changes           stays in plan state, waiting for user feedback before resubmitting
  *
- * 两条批准路线都经过**写文档子态**（`docWriting`，phase 仍是 plan）：`write` 被单独放回
- * 工具表，但 `tool_call` 钩子把它限死在计划文档那一个路径；`tool_result` 钩子看到这次
- * write 成功就自动收尾（不需要模型再调一次 exit_plan_mode）。
+ * Both approval routes pass through **the doc-writing sub-state** (`docWriting`; phase stays
+ * plan): `write` alone returns to the tool set, but the `tool_call` hook pins it to the plan
+ * document's path; the `tool_result` hook sees that write succeed and wraps up automatically
+ * (the model does not need to call exit_plan_mode a second time).
  *
- * ## 入口
+ * ## Entry points
  *
- *   shift+tab      切模式（正常 ⇄ plan）。pi 把它留给了内置的 app.thinking.cycle，
- *                  扩展抢不到（runner 会 skip 与内置冲突的 registerShortcut），所以
- *                  走 ctx.ui.onTerminalInput 在按键到达编辑器**之前**拦下并 consume。
- *                  代价是思考等级循环键被吃掉，本扩展首次启动时会把
- *                  ~/.pi/agent/keybindings.json 里的 app.thinking.cycle 改绑到 ctrl+shift+t
- *                  （只在该键仍是 pi 默认值时改；用户自己配过就尊重用户的选择）。
- *   /plan          手动切（等价于 shift+tab）
- *   /plan-status   看当前状态
- *   --plan         启动即进 plan mode
- *   自动进入       注册 enter_plan_mode 工具 —— 模型判断任务偏大时自己调用，
- *                  这就是 Claude Code 的机制（不是关键词启发式）。路由判据全在这个
- *                  工具的描述里（CC 同构：它的系统提示词里一句 plan 规则都没有），
- *                  全局 AGENTS.md 只留一条指针。模型路径还要过一道**用户同意弹框**
- *                  （CC 的 “must consent to entering plan mode”）：用户可以选「直接实施」
- *                  否掉，所以判据可以写松 —— 误判的代价是用户按一次键，不是白做一轮。
- *                  PI_PLAN_MODE_CONSENT=off 关掉这道弹框。
+ *   shift+tab      toggles mode (normal ⇄ plan). pi reserved it for the built-in
+ *                  app.thinking.cycle and the extension cannot take it (the runner skips
+ *                  registerShortcut calls that conflict with a built-in), so it is intercepted
+ *                  through ctx.ui.onTerminalInput **before** the key reaches the editor and
+ *                  consumed there. The cost is the thinking-level cycle key being swallowed, so
+ *                  on first start this extension rebinds app.thinking.cycle to ctrl+shift+t in
+ *                  ~/.pi/agent/keybindings.json (only while that key still holds pi's default;
+ *                  a user's own config is respected).
+ *   /plan          manual toggle (equivalent to shift+tab)
+ *   /plan-status   show the current state
+ *   --plan         start in plan mode
+ *   auto-enter     an enter_plan_mode tool is registered — the model calls it when it judges
+ *                  the task to be big; that is Claude Code's mechanism (not a keyword
+ *                  heuristic). The routing criteria live entirely in this tool's description
+ *                  (CC-isomorphic: its system prompt contains not a single plan rule) and
+ *                  global AGENTS.md keeps only a pointer. The model path also passes a
+ *                  **user-consent dialog** (CC's "must consent to entering plan mode"): the
+ *                  user can pick "implement directly" to decline, so the criteria can afford
+ *                  to be loose — a false positive costs one keypress, not a wasted round.
+ *                  PI_PLAN_MODE_CONSENT=off disables that dialog.
  *
- * ## 约束（收工具 + 拦 bash，两道独立的闸）
+ * ## Constraints (tool removal + bash interception — two independent gates)
  *
- *   1. 工具集：进 plan 时把 edit / write / powershell 从活动工具里摘掉，退出时按
- *      进入前的快照**原样还原**。本机 pi 的工具表里有二十多个扩展动态注册的工具，
- *      硬编码白名单会把它们全吃掉，所以快照-还原是唯一安全的做法。写文档子态单独
- *      放回 write（`planModeToolSet(active, true)`）。
- *   2. tool_call 钩子：写类 bash（重定向 / rm / git commit / npm install …）不管在不在
- *      工具表里都被拦；写文档子态里 write 只许写计划文档那一个路径。拒绝原因作为
- *      工具错误结果回给模型。判定细节见 plan.ts。
+ *   1. Tool set: entering plan removes edit / write / powershell from the active tools;
+ *      exiting restores the **exact** pre-entry snapshot. The local pi's tool table carries
+ *      twenty-plus dynamically registered extension tools — a hardcoded whitelist would eat
+ *      them all, so snapshot-and-restore is the only safe option. The doc-writing sub-state
+ *      puts write back alone (`planModeToolSet(active, true)`).
+ *   2. tool_call hook: write-class bash (redirects / rm / git commit / npm install …) is
+ *      blocked whether or not it is in the tool table; inside the doc-writing sub-state write
+ *      may only target the plan document's one path. The refusal reason goes back to the
+ *      model as a tool-error result. See plan.ts for the judgment details.
  *
- * 这是给配合的模型用的护栏，不是沙箱 —— 见 plan.ts 文件头的取舍说明。
+ * This is a guardrail for a cooperating model, not a sandbox — see plan.ts's file header for
+ * the trade-off.
  *
- * ## 计划落地
+ * ## Plan persistence
  *
- * 状态存 `pi.appendEntry("plan-mode")`（不进模型上下文）；计划文档写进工作区的
- * `.pi/plans/`（被 .gitignore 排除 —— 计划是过程产物）。除此之外工作区不会多出任何东西。
+ * State lives in `pi.appendEntry("plan-mode")` (never enters the model context); the plan
+ * document lands in the workspace's `.pi/plans/` (gitignored — plans are process artifacts).
+ * Nothing else is added to the workspace.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -87,42 +101,46 @@ import { buildPlanDocPath } from "./plan-doc.ts";
 import { STATUS_KEY, formatPlanStatus } from "./render.ts";
 import { THINKING_FALLBACK_KEY, keybindingsPath, rebindThinkingKey } from "./keybinding.ts";
 
-/** 关掉整个扩展。 */
+/** Turn the whole extension off. */
 const DISABLED = (process.env.PI_PLAN_MODE ?? "").trim().toLowerCase() === "off";
-/** 只关自动进入（shift+tab 与 /plan 仍可用）。 */
+/** Turn off only auto-enter (shift+tab and /plan still work). */
 const AUTO_DISABLED = (process.env.PI_PLAN_MODE_AUTO ?? "").trim().toLowerCase() === "off";
-/** 关掉模型自动进入前的同意弹框（回到「调了就直接进」）。 */
+/** Turn off the consent dialog before a model-initiated enter (back to "a call enters directly"). */
 const CONSENT_DISABLED = (process.env.PI_PLAN_MODE_CONSENT ?? "").trim().toLowerCase() === "off";
 
 const ENTER_TOOL = "enter_plan_mode";
 const EXIT_TOOL = "exit_plan_mode";
-/** 会话里持久化状态的 custom entry 类型。 */
+/** The custom-entry type holding the persisted state in the session. */
 const ENTRY_TYPE = "plan-mode";
 
-/** 审批对话框的三个选项（顺序即默认选中顺序：第一项是推荐路线）。 */
+/** The approval dialog's three choices (order = default-selection order; first is the recommended route). */
 const CHOICE_EXECUTE = "Write plan and implement";
 const CHOICE_DOC_ONLY = "Write plan only";
 const CHOICE_REJECT = "Request changes";
 
 /**
- * 同意弹框的两个选项（第一项是默认选中项 = 接受模型的请求）。
+ * The consent dialog's two choices (first = default selection = accept the model's request).
  *
- * 这是 Claude Code 的机制：它的 `EnterPlanMode` 是 `shouldDefer: true`，描述里明写
- * “This tool REQUIRES user approval - they must consent to entering plan mode”，弹框是
- * `Yes, enter plan mode` / `No, start implementing now`。正因为每次进入都要用户点头，
- * CC 才敢把判据写松（还留了 “err on the side of planning”）—— 误判的代价被弹框吸收了。
- * 没有这道弹框时，判据一松就直接变成打扰（实测 15.5% 的用户指令进了 plan）。
+ * This is Claude Code's mechanism: its `EnterPlanMode` is `shouldDefer: true`, its description
+ * says "This tool REQUIRES user approval - they must consent to entering plan mode", and the
+ * dialog is `Yes, enter plan mode` / `No, start implementing now`. Precisely because every
+ * entry requires a nod, CC can afford loose criteria (it even keeps "err on the side of
+ * planning") — the dialog absorbs the cost of false positives.
+ * Without that dialog, loose criteria become pure noise (measured: 15.5% of user instructions
+ * entered plan).
  */
 const CONSENT_PLAN = "Enter plan mode (read-only exploration)";
 const CONSENT_IMPL = "Implement directly";
 
 /**
- * `enter_plan_mode` 的工具描述 = 全部路由判据。
+ * `enter_plan_mode`'s tool description = the entire routing criteria.
  *
- * 判据只写在这里，全局 AGENTS.md 只留一条指针（Claude Code 同构：它的系统提示词里
- * 一句 plan 规则都没有，7 条正面条件 + 4 条豁免 + GOOD/BAD 示例全在工具描述里）。
- * 这样判据在模型决定要不要调这个工具的那一刻正好在眼前，而且不会与 AGENTS.md 漂移。
- * 结构照 CC：什么时候用（7 条）/ 什么时候不用（4 条豁免）/ 例子 / 注意。
+ * The criteria live only here; global AGENTS.md keeps just a pointer (Claude Code-isomorphic:
+ * its system prompt has no plan rules at all — 7 positive conditions + 4 exemptions +
+ * GOOD/BAD examples all sit in the tool description). That way the criteria are right in
+ * front of the model at the moment it decides whether to call, and they cannot drift away
+ * from AGENTS.md. Structure follows CC: when to use (7) / when not to use (4 exemptions) /
+ * examples / notes.
  */
 const ENTER_TOOL_DESCRIPTION = `Enter plan mode (read-only exploration): explain the design, wait for approval, then implement.
 
@@ -158,22 +176,24 @@ interface PersistedState {
 }
 
 /**
- * 把落盘条目里的 phase 收敛到当前联合类型，认不出的一律当 `"bypass"`。
+ * Collapse a persisted entry's phase into the current union; anything unrecognizable counts
+ * as `"bypass"`.
  *
- * 白名单式判定兜住一切历史值：2026-09-23 的 `normal` → `bypass` 改名、2026-09-24 删掉
- * 的 `execute` 态（旧会话恢复出来当 bypass —— 那次批准没有留下任何扩展持有的状态，
- * 直接放行不会丢东西）。
+ * A whitelist check backstops every historical value: the 2026-09-23 rename `normal` →
+ * `bypass`, and the `execute` state deleted on 2026-09-24 (restored from an old session it
+ * becomes bypass — that approval left no extension-held state behind, so letting it through
+ * loses nothing).
  */
 function normalizePhase(value: unknown): PlanState["phase"] {
 	return value === "plan" ? "plan" : "bypass";
 }
 
-/** 落盘条目里的 docMode 同样白名单式收敛：认不出的当没选过。 */
+/** The persisted entry's docMode gets the same whitelist collapse: unrecognizable = never chosen. */
 function normalizeDocMode(value: unknown): PlanDocMode | undefined {
 	return value === "execute-with-doc" || value === "doc-only" ? value : undefined;
 }
 
-/** 落盘条目里的 pending：2026-09-24 之前是步骤数组，现在只认字符串（旧计划丢弃）。 */
+/** The persisted entry's pending: before 2026-09-24 it was a step array; only strings are accepted now (old plans are dropped). */
 function normalizePending(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
@@ -182,14 +202,14 @@ export default function planMode(pi: ExtensionAPI) {
 	if (DISABLED) return;
 
 	const state: PlanState = initialPlanState();
-	/** 最近一次 ctx：onTerminalInput 回调拿不到 ctx，而 shift+tab 需要它。 */
+	/** The most recent ctx: the onTerminalInput callback receives none, and shift+tab needs one. */
 	let currentCtx: ExtensionContext | undefined;
-	/** 会话替换（/clear、/new、/resume）期间旧 ctx 会失效；渲染失败一律吞掉。 */
+	/** The old ctx goes stale during session replacement (/clear, /new, /resume); render failures are always swallowed. */
 	let restoreInProgress = false;
-	/** pi 自己的弹窗打开时不要抢键，交给弹窗。 */
+	/** Do not steal keys while pi's own dialog is open — hand them to the dialog. */
 	let dialogOpen = false;
 	let thinkingKeyChecked = false;
-	/** shift+tab 的原始输入监听器退订函数（防重入用，见 attachInputListener）。 */
+	/** Unsubscribe function for the shift+tab raw-input listener (reentrancy guard; see attachInputListener). */
 	let inputUnsubscribe: (() => void) | null = null;
 
 	pi.registerFlag("plan", {
@@ -199,7 +219,7 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	// =========================================================================
-	// 渲染
+	// Rendering
 	// =========================================================================
 
 	function render(ctx: ExtensionContext | undefined): void {
@@ -207,13 +227,13 @@ export default function planMode(pi: ExtensionAPI) {
 		try {
 			ctx.ui.setStatus(STATUS_KEY, formatPlanStatus(ctx.ui.theme, state));
 		} catch {
-			// 会话替换窗口里 ctx 可能已被 pi 作废。渲染是尽力而为，绝不能让它打死进程
-			// （本机 user-message-bar 扩展踩过同一个坑，代价是 pi 直接退出）。
+			// inside the session-replace window the ctx may already be invalidated by pi. Rendering is best-effort and must never kill the process
+			// (the local user-message-bar extension hit the same hole — the cost was pi exiting outright).
 		}
 	}
 
 	// =========================================================================
-	// 持久化（只在会话条目里）
+	// Persistence (session entries only)
 	// =========================================================================
 
 	function persist(): void {
@@ -230,13 +250,14 @@ export default function planMode(pi: ExtensionAPI) {
 	}
 
 	/**
-	 * 只认当前分支上的最新记录。
-	 *
-	 * 用 getBranch() 而不是 getEntries()：后者返回**全量**条目（`session-manager.js` 的
-	 * `fileEntries.filter(...)`），包含 rewind / fork / 分支导航之后被丢弃的分支 —— 用它
-	 * 会让一条已经不上分支的计划在下次启动时复活。pi 的 docs/extensions.md 也要求用
-	 * getBranch() 重建分支敏感状态。
-	 */
+ * Only the newest record **on the current branch** counts.
+ *
+ * Uses getBranch() rather than getEntries(): the latter returns **all** entries
+ * (`session-manager.js`'s `fileEntries.filter(...)`), including branches discarded by rewind /
+ * fork / branch navigation — using it would resurrect a plan that is no longer on any branch
+ * at the next start. pi's docs/extensions.md also requires getBranch() for rebuilding
+ * branch-sensitive state.
+ */
 	function restore(ctx: ExtensionContext): void {
 		const entries = ctx.sessionManager.getBranch();
 		for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -251,8 +272,8 @@ export default function planMode(pi: ExtensionAPI) {
 			state.planSummary = typeof entry.data.planSummary === "string" ? entry.data.planSummary : undefined;
 			break;
 		}
-		// plan 态恢复后工具表要跟着收回去（工具集本身不进会话条目，按当前表重算）。
-		// 写文档子态里 write 要在场。
+		// after a plan-state restore the tool set must shrink with it (the tool set itself is not in the session entry; recomputed from the current table).
+		// inside the doc-writing sub-state write must be present.
 		if (state.phase === "plan") {
 			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
 			pi.setActiveTools(planToolSet(state.toolsBeforePlan, state.docWriting === true));
@@ -260,20 +281,22 @@ export default function planMode(pi: ExtensionAPI) {
 	}
 
 	// =========================================================================
-	// 状态迁移
+	// State transitions
 	// =========================================================================
 
 	/**
-	 * plan 阶段的活动工具：pi 的写工具 + 已经没用的 enter_plan_mode 都摘掉。
-	 * `allowWrite` 是写文档子态的开关：单独放回 write（路径仍被 tool_call 钩子限死）。
-	 */
+ * The active tools during plan: pi's write tools plus the now-useless enter_plan_mode are
+ * removed.
+ * `allowWrite` is the doc-writing sub-state's switch: write alone is put back (its path still
+ * pinned by the tool_call hook).
+ */
 	function planToolSet(active: readonly string[], allowWrite = false): string[] {
 		return planModeToolSet(active, allowWrite).filter((name) => name !== ENTER_TOOL);
 	}
 
 	function enter(ctx: ExtensionContext | undefined, reason: "user" | "model"): void {
 		if (state.phase === "plan") return;
-		// 快照必须取在摘工具**之前** —— 退出时靠它原样还原（含二十多个扩展工具）
+		// the snapshot must be taken **before** removing tools — the exit restores from it verbatim (incl. twenty-plus extension tools)
 		const before = pi.getActiveTools();
 		Object.assign(state, enterPlan(state, before));
 		pi.setActiveTools(planToolSet(before));
@@ -304,7 +327,7 @@ export default function planMode(pi: ExtensionAPI) {
 	}
 
 	// =========================================================================
-	// shift+tab 抢键
+	// shift+tab interception
 	// =========================================================================
 
 	pi.on("session_start", async (event, ctx) => {
@@ -334,30 +357,32 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	/**
-	 * shift+tab 在到达编辑器**之前**被这里拦下。
-	 *
-	 * 只在「TUI + 空闲 + 没有扩展弹窗 + 不在会话切换窗口」时 consume：pi 的 picker
-	 * （/model、/sessions 等）自己也吃 shift+tab，抢它会让人在弹窗里切不动选项。
-	 * 忙碌时（流式中）不抢，让 pi 的思考等级循环照常工作 —— 这是刻意的：plan mode
-	 * 只在你停下来的时候才切。
-	 *
-	 * 防重入很重要：`session_start` 会在 `/reload`、`/new`、`/resume` 时各跑一次，
-	 * 每跑一次就多注册一个监听器的话，一次 shift+tab 会被切两次（等于没切）。
-	 * pi 换会话时会 `clearExtensionTerminalInputListeners()` 清掉旧的，但 `/reload`
-	 * 不保证清干净 —— 所以这里自己先退订上一次。
-	 */
+ * shift+tab is intercepted here **before** it reaches the editor.
+ *
+ * It is consumed only when "TUI + idle + no extension dialog + not inside a session-switch
+ * window": pi's own pickers (/model, /sessions …) eat shift+tab themselves, and stealing it
+ * would leave the user unable to switch options inside a dialog. While busy (streaming) it is
+ * not stolen either — pi's thinking-level cycle works as usual. Deliberate: plan mode only
+ * toggles when you are standing still.
+ *
+ * The reentrancy guard matters: `session_start` runs once each for `/reload`, `/new`,
+ * `/resume`; one listener added per run would make a single shift+tab toggle twice (a
+ * no-op). pi clears old listeners via `clearExtensionTerminalInputListeners()` on session
+ * switch, but `/reload` does not guarantee it — so the previous listener is unsubscribed
+ * here first.
+ */
 	function attachInputListener(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
 		inputUnsubscribe?.();
 		inputUnsubscribe = null;
 			try {
 			inputUnsubscribe = ctx.ui.onTerminalInput((data) => {
-				// 必须用 pi 自己的 matchesKey，**不能**手写 `data !== "\x1b[Z"`：
-				// shift+tab 有三种编码 —— 裸 CSI（`\x1b[Z`）、Kitty 键盘协议的 CSI-u
-				// （`\x1b[9;2u` 之类）与 xterm modifyOtherKeys。pi 启动时会主动启用
-				// Kitty 协议（`terminal.js` 发 `\x1b[>{flags}u\x1b[?u\x1b[c` 并等回复），
-				// 一旦启用，真实终端发的就不再是 `\x1b[Z` —— 硬编码比对会完全失效
-				// （实测踩到：pty 里能切、真实 Ghostty 里按 shift+tab 没反应）。
+				// must use pi's own matchesKey — **never** hand-roll `data !== "\x1b[Z"`:
+				// shift+tab has three encodings — bare CSI (`\x1b[Z`), the Kitty keyboard protocol's CSI-u
+				// (`\x1b[9;2u` and friends), and xterm modifyOtherKeys. pi proactively enables the Kitty
+				// protocol at startup (`terminal.js` sends `\x1b[>{flags}u\x1b[?u\x1b[c` and awaits the reply),
+				// and once enabled a real terminal stops sending `\x1b[Z` — a hardcoded compare goes fully dead
+				// (hit for real: worked in a pty, no response to shift+tab in a real Ghostty).
 				if (!matchesKey(data, "shift+tab")) return undefined;
 				const current = currentCtx;
 				if (!current || current.mode !== "tui") return undefined;
@@ -367,7 +392,7 @@ export default function planMode(pi: ExtensionAPI) {
 				return { consume: true };
 			});
 		} catch {
-			// 宿主没有原始输入通道：shift+tab 不可用，/plan 仍然可用
+			// the host has no raw-input channel: shift+tab is unavailable, /plan still works
 		}
 	}
 
@@ -379,7 +404,7 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	// =========================================================================
-	// 命令
+	// Commands
 	// =========================================================================
 
 	pi.registerCommand("plan", {
@@ -415,7 +440,7 @@ export default function planMode(pi: ExtensionAPI) {
 	});
 
 	// =========================================================================
-	// 自动进入：模型工具
+	// Auto-enter: the model tool
 	// =========================================================================
 
 	if (!AUTO_DISABLED) {
@@ -429,9 +454,9 @@ export default function planMode(pi: ExtensionAPI) {
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				currentCtx = ctx;
 				const reason = typeof params.reason === "string" && params.reason.trim() !== "" ? params.reason.trim() : "";
-				// 同意弹框只在模型路径：shift+tab / /plan / --plan 走 enter(ctx, "user")，
-				// 那已经是用户自己的决定，再问一次是纯打扰。无 UI（pi -p）没有人会被打扰，
-				// 也不弹 —— 保持既有 headless 行为。
+				// the consent dialog exists only on the model path: shift+tab / /plan / --plan go through enter(ctx, "user"),
+				// which is already the user's own decision — asking again is pure noise. No UI (pi -p) means nobody to bother,
+				// so no dialog there either — headless behavior stays as before.
 				if (ctx.hasUI && !CONSENT_DISABLED) {
 					const choice = await ctx.ui.select(
 						`The model requests plan mode (read-only exploration).${reason ? `
@@ -442,15 +467,15 @@ Reason: ${reason}` : ""}\n\n` +
 							`${CONSENT_IMPL}: skip planning and implement your instructions now`,
 						[CONSENT_PLAN, CONSENT_IMPL],
 					);
-					// esc（undefined）当作否决，与 CC 的 “must consent” 一致 ——
-					// 「嫌烦想跳过」这条最常见路径只需一个键。
+					// esc (undefined) counts as a decline, matching CC's "must consent" —
+					// the most common path ("too lazy, just implement") costs a single key.
 					if (choice !== CONSENT_PLAN) {
 						ctx.ui.notify("Skipped plan mode; implementing directly.", "info");
 						return {
 							content: [
 								{
 									type: "text",
-									text: `The user chose direct implementation, without entering plan mode. Follow the user's instructions now; do not call again: ${ENTER_TOOL}。`,
+									text: `The user chose direct implementation, without entering plan mode. Follow the user's instructions now; do not call again: ${ENTER_TOOL}.`,
 								},
 							],
 							details: { phase: state.phase, consented: false },
@@ -462,7 +487,7 @@ Reason: ${reason}` : ""}\n\n` +
 					content: [
 						{
 							type: "text",
-							text: `Entered plan mode (read-only). ${reason ? `Reason: ${reason}。` : ""}
+							text: `Entered plan mode (read-only). ${reason ? `Reason: ${reason}.` : ""}
 edit / write are disabled; Bash writes are blocked. Read the code first; use ask_user_question for decisions that need user input. When the design is ready, call ${EXIT_TOOL} to submit.`,
 						},
 					],
@@ -472,7 +497,7 @@ edit / write are disabled; Bash writes are blocked. Read the code first; use ask
 		});
 	}
 
-	// plan 阶段唯一的出口：提交计划给用户审批
+	// the only exit from plan phase: submit the plan for user approval
 	pi.registerTool({
 		name: EXIT_TOOL,
 		label: "Submit Plan",
@@ -502,7 +527,7 @@ edit / write are disabled; Bash writes are blocked. Read the code first; use ask
 					content: [
 						{
 							type: "text",
-							text: `Currently writing the plan document: use the write tool to save it to \`${state.pendingDocPath}\`. The extension finishes this phase after a successful write; do not call again: ${EXIT_TOOL}。`,
+							text: `Currently writing the plan document: use the write tool to save it to \`${state.pendingDocPath}\`. The extension finishes this phase after a successful write; do not call again: ${EXIT_TOOL}.`,
 						},
 					],
 					details: { accepted: false, phase: state.phase, docWriting: true },
@@ -517,16 +542,16 @@ edit / write are disabled; Bash writes are blocked. Read the code first; use ask
 				};
 			}
 			const summary = typeof params.summary === "string" && params.summary.trim() !== "" ? params.summary.trim() : undefined;
-			// slug 是文档名的来源；模型漏传时退回 summary（清洗后若全是中文仍会落到 `plan`）。
+			// slug feeds the document name; when the model forgets it, fall back to summary (if the cleaned summary is all-CJK it still lands on `plan`).
 			const slug = typeof params.slug === "string" && params.slug.trim() !== "" ? params.slug.trim() : summary;
 
 			Object.assign(state, submitPlan(state, plan, summary));
 			persist();
 			render(ctx);
 
-			// confirm/select 对话框是一个不可滚动的 Text，主屏渲染又把视口钉在底部 ——
-			// 长计划必然看不全。截到一屏放得下；被截掉的部分仍写进了终端缓冲区，用户
-			// 上翻可看全文（弹窗期间重绘已冻结）。
+			// the confirm/select dialog is a non-scrollable Text, and the main-screen render pins the viewport to the bottom —
+			// a long plan is guaranteed unreadable in full. It is clipped to one screen; the clipped part still reached the terminal buffer, and the user
+			// can scroll back for the full text (repaints are frozen during the dialog).
 			const dialogPlan = truncatePlanForDialog(
 				plan,
 				{
@@ -535,8 +560,8 @@ edit / write are disabled; Bash writes are blocked. Read the code first; use ask
 				},
 				wrapTextWithAnsi,
 			);
-			// 非交互运行（`pi -p`）没有对话框可弹：自动按推荐路线（写文档并实施）走，
-			// 比死锁好 —— 模型已经规划完，卡在这里只会让整个运行白跑。
+			// a non-interactive run (`pi -p`) has no dialog to show: auto-take the recommended route (write doc + implement),
+			// better than a deadlock — the model already finished planning, and stalling here wastes the whole run.
 			const choice = ctx.hasUI
 				? await ctx.ui.select(`Approve this plan?
 
@@ -554,11 +579,11 @@ ${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
 			}
 
 			const docMode: PlanDocMode = choice === CHOICE_DOC_ONLY ? "doc-only" : "execute-with-doc";
-			// 路径在用户选路线的这一刻算好并钉死：撞名判定问的是文件系统，之后重算
-			// 可能得到不同的 -2 后缀，模型就会往另一个文件写。
+			// the path is computed and pinned at the moment the user picks a route: the name-collision check asks the filesystem,
+			// and a later recompute could yield a different -2 suffix — then the model would write to a different file.
 			const docPath = buildPlanDocPath({ cwd: ctx.cwd, slug, exists: existsSync });
 			Object.assign(state, enterDocWriting(state, docMode, docPath));
-			// 放回 write（其余写工具仍摘着）；write 的目标路径由 tool_call 钩子限死。
+			// put write back (the other write tools stay removed); its target path is pinned by the tool_call hook.
 			if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
 			pi.setActiveTools(planToolSet(state.toolsBeforePlan, true));
 			persist();
@@ -567,7 +592,7 @@ ${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
 				content: [
 					{
 						type: "text",
-						text: `The user approved the plan and selected '${choice}'. Use the write tool to save the plan document to \`${docPath}\` — the only file writable in this phase. After a successful write, the extension finishes this phase and provides the next instructions; do not call again: ${EXIT_TOOL}。`,
+						text: `The user approved the plan and selected '${choice}'. Use the write tool to save the plan document to \`${docPath}\` — the only file writable in this phase. After a successful write, the extension finishes this phase and provides the next instructions; do not call again: ${EXIT_TOOL}.`,
 					},
 				],
 				details: { accepted: true, docMode, docPath },
@@ -576,13 +601,13 @@ ${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
 	});
 
 	// =========================================================================
-	// 每轮注入上下文 + 拦截写操作
+	// per-round context injection + write interception
 	// =========================================================================
 
 	pi.on("before_agent_start", async (_event, ctx) => {
 		currentCtx = ctx;
 		if (state.phase !== "plan") return undefined;
-		// 每轮重收一次：模型可能刚调过 enter_plan_mode，别的扩展也可能改过工具表
+		// re-shrink every round: the model may have just called enter_plan_mode, and another extension may have touched the tool table
 		if (!state.toolsBeforePlan) state.toolsBeforePlan = pi.getActiveTools();
 		pi.setActiveTools(planToolSet(state.toolsBeforePlan, state.docWriting === true));
 		if (state.docWriting && state.pendingDocPath) {
@@ -604,16 +629,19 @@ ${dialogPlan}`, [CHOICE_EXECUTE, CHOICE_DOC_ONLY, CHOICE_REJECT])
 	});
 
 	/**
-	 * 第二道闸：写类 bash 一律拦；写文档子态里 write 只许写计划文档那一个路径。
-	 * 工具表里摘掉的是 edit / write / powershell（子态放回 write），bash 还在，
-	 * 所以这道钩子才是拦住 `echo x > f` / `git commit` / `npm install` 的地方。
-	 * 拒绝原因作为工具错误结果回给模型 —— 这就是它能看到的反馈。
-	 */
+ * The second gate: write-class bash is always blocked; inside the doc-writing sub-state write
+ * may only target the plan document's one path.
+ * The tools removed from the table are edit / write / powershell (the sub-state restores
+ * write); bash stays, so this hook is the thing that actually stops `echo x > f` /
+ * `git commit` / `npm install`.
+ * The refusal reason goes back to the model as a tool-error result — the only feedback it
+ * ever sees.
+ */
 	pi.on("tool_call", async (event, ctx) => {
 		if (state.phase !== "plan") return undefined;
 
 		if (event.toolName === "write") {
-			// 非子态时 write 根本不在工具表里，这里是双保险
+			// outside the sub-state write is not in the tool table at all — this is a belt-and-suspenders check
 			if (!state.docWriting) {
 				return {
 					block: true,
@@ -642,13 +670,14 @@ Currently in plan mode (read-only): explain the design and submit it using ${EXI
 	});
 
 	/**
-	 * 写文档子态的自动收尾：模型用 write 把计划文档写成功的那一刻，状态回 bypass、
-	 * 工具表还原，收尾指令（实施 / 只报告路径）**替换**掉 write 的普通成功文本 ——
-	 * 模型在同一轮里就能看到接下来该做什么，不需要再调任何工具。
-	 *
-	 * 判定严格三重：write 工具 + 成功 + 路径正是钉死的那个。write 失败（isError）
-	 * 不收尾，模型自己会看到错误并重试。
-	 */
+ * The doc-writing sub-state's auto wrap-up: the instant the model's write of the plan document
+ * succeeds, the state returns to bypass, the tool set is restored, and the wrap-up instruction
+ * (implement / report-path-only) **replaces** write's normal success text — the model sees
+ * what to do next in the same round, without calling any more tools.
+ *
+ * The check is strictly triple: write tool + success + the path is exactly the pinned one. A
+ * failed write (isError) does not wrap up — the model sees the error and retries itself.
+ */
 	pi.on("tool_result", async (event, ctx) => {
 		currentCtx = ctx;
 		if (state.phase !== "plan" || !state.docWriting) return undefined;
@@ -658,7 +687,7 @@ Currently in plan mode (read-only): explain the design and submit it using ${EXI
 
 		const outcome = completeDocWrite(state);
 		if (!outcome) return undefined;
-		// 还原要用旧状态里的快照 —— 必须在 Object.assign 之前取
+		// the restore needs the snapshot from the old state — it must be read before Object.assign
 		const tools = restoredToolSet(state, pi.getActiveTools());
 		Object.assign(state, outcome.state);
 		pi.setActiveTools(tools);
@@ -670,7 +699,7 @@ Currently in plan mode (read-only): explain the design and submit it using ${EXI
 		};
 	});
 
-	// 回到 bypass 之后，把陈旧的 plan 上下文从模型上下文里过滤掉（不该看到过期的指令）
+	// back in bypass, stale plan context is filtered out of the model's context (it should not see outdated instructions)
 	pi.on("context", async (event) => {
 		if (state.phase !== "bypass") return undefined;
 		return {
@@ -683,17 +712,18 @@ Currently in plan mode (read-only): explain the design and submit it using ${EXI
 }
 
 // =============================================================================
-// 思考等级键改绑
+// Thinking-key rebinding
 // =============================================================================
 
 /**
- * 启动时确保 thinking cycle 已让位；失败只提示不抛，也不反复重试。
+ * At startup, ensure the thinking cycle has yielded its key; failures notify without throwing
+ * and are not retried.
  *
- * 三种情况：
- *   - 配置文件里已经绑到 fallback（本扩展写过的，或用户自己配的）→ **完全静默**
- *   - 绑到别的键（用户自己的选择）→ **完全静默**，尊重用户配置
- *   - 没有任何绑定 → 写入 fallback 并告知一次
- *   - 配置文件不是合法 JSON（读不动、不敢改）→ 提示用户手动处理
+ * Three cases:
+ *   - the config already binds to the fallback (written by this extension, or by the user) → **fully silent**
+ *   - bound to another key (the user's own choice) → **fully silent**, respect the user config
+ *   - no binding at all → write the fallback and notify once
+ *   - the config file is not valid JSON (unreadable, dare not touch) → tell the user to handle it manually
  */
 function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 	const path = keybindingsPath();
@@ -706,10 +736,10 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 
 	const { value, outcome } = rebindThinkingKey(raw, path);
 	if (!outcome.changed) {
-		// 已经绑过（无论是谁绑的）→ 静默。只有「配置坏了、我们不敢动」才需要提醒。
+		// already bound (by anyone) → silent. Only "config is broken and we dare not touch it" warrants a warning.
 		if (outcome.needsAttention === true && ctx.hasUI) {
 			ctx.ui.notify(
-				`Plan mode uses shift+tab, but automatic remapping failed (${outcome.reason}). Manually remap app.thinking.cycle to ${THINKING_FALLBACK_KEY}（${path}）。`,
+				`Plan mode uses shift+tab, but automatic remapping failed (${outcome.reason}). Manually remap app.thinking.cycle to ${THINKING_FALLBACK_KEY} (${path}).`,
 				"warning",
 			);
 		}
@@ -721,14 +751,14 @@ function ensureThinkingKeyRebound(ctx: ExtensionContext): void {
 		writeFileSync(path, value, "utf8");
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`Plan mode uses shift+tab; thinking-level cycling was remapped to ${THINKING_FALLBACK_KEY}（${path}; takes effect after /reload)`,
+				`Plan mode uses shift+tab; thinking-level cycling was remapped to ${THINKING_FALLBACK_KEY} (${path}; takes effect after /reload)`,
 				"info",
 			);
 		}
 	} catch {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`Plan mode uses shift+tab. In ${path}, remap app.thinking.cycle to ${THINKING_FALLBACK_KEY}。`,
+				`Plan mode uses shift+tab. In ${path}, remap app.thinking.cycle to ${THINKING_FALLBACK_KEY}.`,
 				"warning",
 			);
 		}

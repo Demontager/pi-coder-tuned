@@ -1,11 +1,13 @@
 /**
- * Tests for working-summary.ts — spinner 行右对齐提示词摘要的压平 + 纯布局逻辑。
+ * Tests for working-summary.ts — the flattening + pure layout logic of the spinner line's
+ * right-aligned prompt summary.
  *
  * Run with:  node --test clients/pi/extensions/working-indicator/working-summary.test.ts
  *
- * 被测模块不 import pi / pi-tui（宽度函数是注入的），所以这里喂一个简单的
- * 假宽度函数：ASCII/半角 = 1 列，CJK 全角 = 2 列，与 pi-tui `visibleWidth`
- * 对本用例涉及字符的口径一致（`…`、`✦` 都是 1 列）。
+ * The module under test imports no pi / pi-tui (the width function is injected), so this test
+ * feeds a trivial fake width function: ASCII/halfwidth = 1 column, CJK fullwidth = 2 columns —
+ * consistent with pi-tui `visibleWidth` on the characters these cases involve (`…`, `✦` are
+ * both 1 column).
  */
 
 import assert from "node:assert/strict";
@@ -22,7 +24,7 @@ import {
 	layoutPromptSummary,
 } from "./working-summary.ts";
 
-/** 假宽度函数：CJK 常见全角区间按 2 列，其余按 1 列（含 `…` / `✦`）。 */
+/** Fake width function: the usual CJK fullwidth ranges count 2 columns, everything else 1 (incl. `…` / `✦`). */
 function fakeWidth(text: string): number {
 	let width = 0;
 	for (const ch of text) {
@@ -112,7 +114,7 @@ describe("flattenPrompt: whitespace compaction", () => {
 
 	it("normalizes unicode spaces to a regular space", () => {
 		assert.equal(flattenPrompt("a\u00a0b"), "a b"); // NBSP
-		assert.equal(flattenPrompt("a\u3000b"), "a b"); // 全角空格
+		assert.equal(flattenPrompt("a\u3000b"), "a b"); // ideographic space
 		assert.equal(flattenPrompt("a\u2003b"), "a b"); // em space
 	});
 
@@ -177,7 +179,7 @@ describe("flattenPrompt: scan cap", () => {
 	});
 
 	it("does not leave a lone surrogate when the cap cuts a pair", () => {
-		// 显式把上限设成奇数，切点必定落在代理对中间
+		// an explicit odd cap guarantees the cut lands mid surrogate pair
 		const flat = flattenPrompt("😀😀😀", 5);
 		assert.equal(flat, "😀😀");
 		const last = flat.charCodeAt(flat.length - 1);
@@ -197,7 +199,7 @@ describe("fitToWidth", () => {
 	});
 
 	it("never splits a double-width character", () => {
-		// "我要优化" 每字 2 列：宽度 5 只放得下 2 个字（4 列），第 3 个字会到 6 列。
+		// the CJK fixture: 2 columns per char — width 5 fits 2 chars (4 columns); a 3rd would reach 6.
 		assert.equal(fitToWidth("我要优化", 5, fakeWidth), "我要");
 		assert.equal(fitToWidth("我要优化", 4, fakeWidth), "我要");
 		assert.equal(fitToWidth("我要优化", 3, fakeWidth), "我");
@@ -209,7 +211,7 @@ describe("fitToWidth", () => {
 	});
 
 	it("does not split surrogate pairs", () => {
-		const emoji = "😀😀😀"; // 每个码点 2 个 UTF-16 单元（假宽度函数按 1 列计）
+		const emoji = "😀😀😀"; // each code point is 2 UTF-16 units (the fake width function counts it as 1 column)
 		const fitted = fitToWidth(emoji, 1, fakeWidth);
 		assert.equal(fitted, "😀");
 		assert.ok(!fitted.endsWith("\ud83d"));
@@ -228,7 +230,7 @@ describe("availableSummaryTextWidth", () => {
 				widthOf: fakeWidth,
 			});
 			assert.ok(layout, `width ${totalWidth}`);
-			// 截断后的正文（含 `…`）恰好占满可用宽度。
+			// the truncated body (incl. `…`) fills the available width exactly.
 			assert.equal(fakeWidth(layout.summaryText), avail, `width ${totalWidth}`);
 		}
 	});
@@ -244,7 +246,7 @@ describe("availableSummaryTextWidth", () => {
 	});
 
 	it("honours a custom marker and minGap like the layout does", () => {
-		const marker = "記"; // 假宽度函数下 2 列
+		const marker = "記"; // 2 columns under the fake width function
 		const avail = availableSummaryTextWidth({
 			leftWidth: 10,
 			totalWidth: 60,
@@ -268,8 +270,8 @@ describe("layoutPromptSummary", () => {
 			widthOf: fakeWidth,
 		});
 		assert.ok(layout);
-		assert.equal(layout.summaryText, "hi"); // 放得下 → 不补省略号
-		// 右对齐不变量：左段 + gap + "✦ " + 摘要 === 预算
+		assert.equal(layout.summaryText, "hi"); // fits → no ellipsis
+		// right-align invariant: left segment + gap + "✦ " + summary === budget
 		assert.equal(leftWidth + layout.gap + MARKER_WIDTH + fakeWidth(layout.summaryText), 60);
 		assert.ok(layout.gap >= DEFAULT_MIN_GAP);
 	});
@@ -284,13 +286,13 @@ describe("layoutPromptSummary", () => {
 		});
 		assert.ok(layout);
 		assert.ok(layout.summaryText.endsWith("…"));
-		// 截断时 gap 恰好落到下限
+		// truncation lands the gap exactly on the floor
 		assert.equal(layout.gap, DEFAULT_MIN_GAP);
 		assert.equal(leftWidth + layout.gap + MARKER_WIDTH + fakeWidth(layout.summaryText), 60);
 	});
 
 	it("truncates the whole flattened paragraph, not just the first line", () => {
-		// 第一行很短，信息在后面的行里 —— 摘要必须能越过第一行取到后面的内容。
+		// a short first line with the information in later lines — the summary must reach past the first line.
 		const flat = flattenPrompt("修 bug\n" + "细节内容".repeat(200));
 		const layout = layoutPromptSummary({
 			promptText: flat,
@@ -304,7 +306,7 @@ describe("layoutPromptSummary", () => {
 	});
 
 	it("keeps the right-align invariant when truncation lands inside a CJK char", () => {
-		// 全 CJK 行：截断点可能差 1 列，差值必须并进 gap 而不是超宽。
+		// an all-CJK line: the cut may fall one column short; the slack must fold into the gap, not overflow.
 		const text = "我要优化这个很长的提示词".repeat(4);
 		for (const totalWidth of [40, 41, 42, 43, 60, 79]) {
 			const layout = layoutPromptSummary({
@@ -328,11 +330,11 @@ describe("layoutPromptSummary", () => {
 		const layout = layoutPromptSummary({
 			promptText: "hello world and beyond",
 			leftWidth,
-			totalWidth: 13 + DEFAULT_MIN_GAP + MARKER_WIDTH + 6, // 摘要正文预算恰好 6
+			totalWidth: 13 + DEFAULT_MIN_GAP + MARKER_WIDTH + 6, // summary body budget exactly 6
 			widthOf: fakeWidth,
 		});
 		assert.ok(layout);
-		assert.equal(layout.summaryText, "hello…"); // 不是 "hello …"
+		assert.equal(layout.summaryText, "hello…"); // not "hello …"
 	});
 
 	it("returns null when the prompt is empty", () => {
@@ -343,7 +345,7 @@ describe("layoutPromptSummary", () => {
 	});
 
 	it("returns null when there is no room for the summary", () => {
-		// 预算被左段吃光
+		// the budget is entirely eaten by the left segment
 		assert.equal(
 			layoutPromptSummary({
 				promptText: "hi",
@@ -353,7 +355,7 @@ describe("layoutPromptSummary", () => {
 			}),
 			null,
 		);
-		// 剩的宽度低于摘要正文下限（marker 2 列 + minGap 1 列之后不足 MIN_SUMMARY_TEXT_WIDTH）
+		// remaining width below the summary-body floor (after 2-column marker + 1-column minGap, under MIN_SUMMARY_TEXT_WIDTH)
 		const tight = leftWidth + DEFAULT_MIN_GAP + MARKER_WIDTH + MIN_SUMMARY_TEXT_WIDTH - 1;
 		assert.equal(
 			layoutPromptSummary({
@@ -364,7 +366,7 @@ describe("layoutPromptSummary", () => {
 			}),
 			null,
 		);
-		// 恰好到下限就能显示
+		// exactly at the floor it can show
 		const ok = tight + 1;
 		assert.ok(
 			layoutPromptSummary({
@@ -398,9 +400,9 @@ describe("layoutPromptSummary", () => {
 			maxWidth: 50,
 		});
 		assert.ok(layout);
-		// 整段（marker + 正文）不超上限
+		// the whole segment (marker + body) stays under the cap
 		assert.ok(MARKER_WIDTH + fakeWidth(layout.summaryText) <= 50);
-		// 右对齐不变量仍成立，富余并进 gap（gap 远大于下限）
+		// the right-align invariant still holds; the headroom folds into the gap (gap far above the floor)
 		assert.equal(leftWidth + layout.gap + MARKER_WIDTH + fakeWidth(layout.summaryText), 100);
 		assert.ok(layout.gap > DEFAULT_MIN_GAP);
 		assert.ok(layout.summaryText.endsWith("…"));
@@ -430,7 +432,7 @@ describe("layoutPromptSummary", () => {
 			}),
 			null,
 		);
-		// 恰好到下限就能显示
+		// exactly at the floor it can show
 		assert.ok(
 			layoutPromptSummary({
 				promptText: "hi there",
@@ -443,7 +445,7 @@ describe("layoutPromptSummary", () => {
 	});
 
 	it("honors a custom marker with a different width", () => {
-		const marker = "記"; // CJK，假宽度函数下 2 列（+ 空格 = 3 列前缀）
+		const marker = "記"; // CJK — 2 columns under the fake width function (+ the space = a 3-column prefix)
 		const layout = layoutPromptSummary({
 			promptText: "x".repeat(100),
 			leftWidth,
@@ -468,7 +470,7 @@ describe("layoutPromptSummary", () => {
 		];
 		for (const line of lines) {
 			for (let totalWidth = 10; totalWidth <= 140; totalWidth++) {
-				// 同时覆盖两种形态：不限宽 与 半屏上限（与 index.ts 的传参一致）
+				// cover both shapes at once: uncapped and half-screen cap (same as index.ts's arguments)
 				for (const maxWidth of [undefined, Math.floor(totalWidth / 2)]) {
 					const layout = layoutPromptSummary({
 						promptText: line,
@@ -488,7 +490,7 @@ describe("layoutPromptSummary", () => {
 					if (maxWidth !== undefined) {
 						assert.ok(MARKER_WIDTH + fakeWidth(layout.summaryText) <= maxWidth, tag);
 					}
-					// 摘要要么是整行（放得下），要么以省略号结尾（截断）
+					// the summary is either the whole line (fits) or ends with the ellipsis (truncated)
 					if (layout.summaryText !== line) {
 						assert.ok(layout.summaryText.endsWith("…"), tag);
 					}

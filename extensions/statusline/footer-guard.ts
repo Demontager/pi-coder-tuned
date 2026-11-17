@@ -1,39 +1,51 @@
 /**
- * footer-guard.ts — 会话替换期间的 footer「冻结」
+ * footer-guard.ts — "freezing" the footer across session replacement
  *
- * 要解决的问题：pi 每次换会话（`/new`、`/clear`、`/resume`、fork、rewind）都会在
- * `session_shutdown` 之后、新会话 `session_start` 之前调 `resetExtensionUI()`，它无条件
- * `setExtensionFooter(undefined)` 把 footer 还原成内置那只、并 `clearExtensionStatuses()`
- * 清掉所有 `setStatus` 文本（`interactive-mode.js`）。中间要新建会话对象、重绑扩展，
- * 几十毫秒起步，而 pi-tui 的渲染节流只有 16ms（`TuiBase.MIN_RENDER_INTERVAL_MS`），
- * 所以这段窗口至少会出几帧 —— 用 `ctx.ui.setFooter()` 装的 statusline 就「闪」成
- * pi 默认 footer，第二行（cwd / checkpoint）整行消失。
+ * The problem it solves: on every session swap (`/new`, `/clear`, `/resume`, fork,
+ * rewind) pi calls `resetExtensionUI()` after `session_shutdown` and before the new
+ * session's `session_start` — it unconditionally `setExtensionFooter(undefined)`,
+ * restoring the built-in footer, and `clearExtensionStatuses()` wipes every
+ * `setStatus` text (`interactive-mode.js`). A new session object and extension
+ * rebinding take tens of milliseconds at minimum, while pi-tui's render throttle is
+ * just 16ms (`TuiBase.MIN_RENDER_INTERVAL_MS`) — that window emits several real
+ * frames, and a statusline installed via `ctx.ui.setFooter()` "flashes" back to
+ * pi's default footer while the second row (cwd / checkpoint) vanishes wholesale.
  *
- * 为什么只能在渲染路径上解决：扩展侧没有更早的钩子。新扩展实例要等
- * `bindCurrentSessionExtensions()` 才拿到 ctx，而那正是窗口结束的时刻；在窗口内主动
- * 重挂 footer 也不可靠（`resetExtensionUI` 发生在我们的 `session_shutdown` 回调**之后**，
- * 且整条链上有多个 await，`setImmediate` / 微任务谁先谁后取决于别的扩展在这段里等多久）。
- * 所以保证落在**出帧那一刻**：接管 footer 容器的 `render`，发现里面装的已经不是我们的
- * 组件时，返回上一帧的行 —— 默认 footer 一帧都不会出现。
+ * Why it can only be solved on the render path: no earlier hook exists on the
+ * extension side. A new extension instance gets its ctx only in
+ * `bindCurrentSessionExtensions()` — which is precisely when the window ends; and
+ * proactively re-mounting the footer inside the window is unreliable
+ * (`resetExtensionUI` runs **after** our `session_shutdown` callback, and with
+ * multiple awaits on the chain, `setImmediate` vs microtask order depends on how
+ * long other extensions take). So the guarantee lands **at frame time**: take over
+ * the footer container's `render` and, on finding our component is no longer
+ * inside, return the previous frame's rows — the default footer never draws once.
  *
- * 做法上的约束（和本目录其它文件一致）：
- *   - 只替换 footer 容器的 `render` 方法，不改 `children`、不猜下标、不碰 pi 的内部状态；
- *   - 容器用**对象身份**从 `tui.children` 找（`findRenderContainer`），找不到就什么都不做；
- *   - 任何一步抛错都当作「没冻住」，绝不把异常漏给宿主弹 extension error；
- *   - 接管记录挂在容器的 `FOOTER_GUARD_KEY`（`Symbol.for`，所以 `/reload` 后新的扩展实例
- *     也能看到并解除旧实例遗留的接管）；另有 `maxAgeMs` 兜底，交接万一失败也只冻一小会儿。
+ * The implementation constraints (same as this directory's other files):
+ *   - only the container's `render` method is replaced — `children` untouched, no
+ *     index guessing, no pi internal state;
+ *   - the container is found by **object identity** inside `tui.children`
+ *     (`findRenderContainer`); not found → nothing happens;
+ *   - any throw anywhere counts as "not frozen" — an exception never reaches the
+ *     host as an extension error;
+ *   - the takeover record hangs on the container's `FOOTER_GUARD_KEY`
+ *     (`Symbol.for`, so a `/reload`'d new extension instance can see and release a
+ *     previous instance's takeover); `maxAgeMs` is the fallback — a failed handover
+ *     freezes only briefly.
  *
- * 已知小代价：冻结期间该容器的鼠标命中测试（`Container.handleMouse` 读 `children`）会按
- * 内置 footer 的高度算，而窗口只有一两帧、footer 本来不可点，可忽略。
+ * The known small cost: while frozen, the container's mouse hit-testing
+ * (`Container.handleMouse` reads `children`) measures by the built-in footer's
+ * height — the window is a frame or two and the footer is not clickable anyway, so
+ * it is negligible.
  */
 
-/** 挂在 footer 容器上的接管记录键（全局符号注册表：跨扩展实例可见）。 */
+/** The takeover-record key hung on the footer container (global symbol registry: visible across extension instances). */
 export const FOOTER_GUARD_KEY: symbol = Symbol.for("litellm-any.pi-statusline.footerGuard");
 
-/** 冻结的最长时长：正常情况下新会话的 `session_start` 会远早于它解除。 */
+/** The freeze's max duration: a normal new-session `session_start` releases it far earlier. */
 export const FOOTER_GUARD_MAX_AGE_MS = 3000;
 
-/** pi-tui `Container` 里本模块用到的那部分结构（`children` 是公开字段）。 */
+/** The part of pi-tui `Container` this module uses (`children` is a public field). */
 export interface RenderableContainer {
 	children: unknown[];
 	render(width: number): string[];
@@ -44,8 +56,10 @@ interface GuardRecord {
 }
 
 /**
- * 在 `root` 的子树里按对象身份找「直接装着 `component` 的那个容器」。
- * 只认对象身份（同形状的组件到处都是），带 seen 集与深度上限，任何异常都当作没找到。
+ * Find "the container directly holding `component`" inside `root`'s subtree, by
+ * object identity.
+ * Identity only (identically-shaped components are everywhere); a seen-set and a
+ * depth cap; any exception counts as not found.
  */
 export function findRenderContainer(
 	root: unknown,
@@ -77,7 +91,7 @@ export function findRenderContainer(
 	}
 }
 
-/** 解除 `container` 上现有的接管（可能是别的扩展实例遗留的）。返回是否解掉了什么。 */
+/** Release whatever takeover `container` carries (possibly a leftover of another extension instance). Returns whether anything was released. */
 export function releaseFooterGuard(container: unknown): boolean {
 	try {
 		const record = (container as { [FOOTER_GUARD_KEY]?: GuardRecord } | undefined)?.[FOOTER_GUARD_KEY];
@@ -90,11 +104,14 @@ export function releaseFooterGuard(container: unknown): boolean {
 }
 
 /**
- * 接管 footer 容器的渲染，返回解除函数（幂等）。
+ * Take over the footer container's rendering; returns the release function
+ * (idempotent).
  *
- * - `ownComponent` 还在容器里 → 原样透传（并在超时后顺手交还，自愈）；
- * - 容器被 pi 换成内置 footer → 返回 `frozenRender(width)` 的行；
- * - 超过 `maxAgeMs` 仍等不到新 footer → 交还，回到 pi 默认行为。
+ * - `ownComponent` still inside → pass through (and hand back after the timeout —
+ *   self-healing);
+ * - the container was swapped to pi's built-in footer → `frozenRender(width)`'s
+ *   rows;
+ * - no new footer within `maxAgeMs` → release, back to pi's default behavior.
  */
 export function freezeFooterContainer(options: {
 	container: unknown;
@@ -112,7 +129,7 @@ export function freezeFooterContainer(options: {
 	) {
 		return undefined;
 	}
-	// 先解除已有接管（自己重入 / 上一个扩展实例遗留），避免叠两层 wrapper。
+	// release any existing takeover first (own re-entry / a leftover of the previous extension instance) — avoids stacking two wrappers.
 	releaseFooterGuard(container);
 
 	const ownComponent = options.ownComponent;
@@ -132,7 +149,7 @@ export function freezeFooterContainer(options: {
 			if (hadOwnRender) container.render = originalRender;
 			else delete (container as { render?: unknown }).render;
 		} catch {
-			// 容器只读 / 已被替换：wrapper 自己会因 released 标志透传，不再冻。
+			// read-only container / already replaced: the wrapper passes through via its released flag — no more freezing.
 		}
 	};
 
@@ -143,7 +160,7 @@ export function freezeFooterContainer(options: {
 		try {
 			mounted = Array.isArray(container.children) && container.children.includes(ownComponent);
 		} catch {
-			mounted = true; // 读 children 都抛：别硬撑，交还给原渲染。
+			mounted = true; // even reading children throws: don't force it — hand back to the original render.
 		}
 		if (mounted) {
 			if (expired) release();

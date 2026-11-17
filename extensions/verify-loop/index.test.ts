@@ -1,11 +1,13 @@
 /**
- * verify-loop 的装配验证：纯判定在 gate/goal/evaluator 各自的测试里；
- * 这里**不 mock pi**，用 pi 自己的扩展加载器（`discoverAndLoadExtensions`）真加载
- * `index.ts`，然后直接驱动它注册的 `agent_before_settle` handler 与 `/goal` 命令。
+ * verify-loop's assembly checks: the pure judgments are covered in gate's / goal's /
+ * evaluator's own test files; here pi is **not mocked** — pi's own extension loader
+ * (`discoverAndLoadExtensions`) really loads `index.ts`, and the registered
+ * `agent_before_settle` handler plus the `/goal` command are driven directly.
  *
- * 加载器给的 runtime 上 `appendEntry` / `sendUserMessage` 是抛错桩
- * （loader.js 的 notInitialized），但包装函数在**调用时**才读 runtime 属性，
- * 所以测试里直接替换成记录器即可（runner.bindCore 在真 pi 里做的就是这件事）。
+ * On the loader-provided runtime, `appendEntry` / `sendUserMessage` are throwing stubs
+ * (loader.js's notInitialized), but the wrapper functions read the runtime properties
+ * **at call time** — so replacing them with recorders in the test works (runner.bindCore
+ * does exactly this in real pi).
  *
  *   node --test clients/pi/extensions/verify-loop/index.test.ts
  */
@@ -23,7 +25,7 @@ import { GOAL_ENTRY_TYPE } from "./goal.ts";
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 
 // =============================================================================
-// 找到本机 pi 的库入口（core-rules/index.test.ts 同源）
+// Find the local pi library entry (same origin as core-rules/index.test.ts)
 // =============================================================================
 
 async function findPiLibraryEntry(): Promise<string | undefined> {
@@ -37,13 +39,13 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -56,17 +58,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
 }
 
 const piEntry = await findPiLibraryEntry();
-const skip = piEntry === undefined ? "找不到本机 pi 的库入口（装过 pi 才有）" : false;
+const skip = piEntry === undefined ? "could not find the local pi library entry (requires an installed pi)" : false;
 
 // =============================================================================
-// 投影消息构造
+// Building projection messages
 // =============================================================================
 
 type Message = Record<string, unknown>;
@@ -96,7 +98,7 @@ function toolResult(): Message {
 }
 
 // =============================================================================
-// 加载与驱动
+// Loading and driving
 // =============================================================================
 
 interface LoadedExtension {
@@ -106,23 +108,23 @@ interface LoadedExtension {
 }
 
 interface Harness {
-	/** 驱动 agent_before_settle，返回 BoundaryResult。 */
+	/** Drive agent_before_settle; returns the BoundaryResult. */
 	settle(messages: Message[], outcome?: "completed" | "aborted" | "error"): Promise<unknown>;
-	/** 跑 /goal 命令。 */
+	/** Run the /goal command. */
 	goal(args: string): Promise<void>;
-	/** 驱动 session_start（重建 goal）。 */
+	/** Drive session_start (rebuilds the goal). */
 	startSession(branchEntries?: unknown[]): Promise<void>;
-	/** 记录到的 appendEntry 调用。 */
+	/** The appendEntry calls recorded. */
 	appended: Array<{ customType: string; data: unknown }>;
-	/** 记录到的 sendUserMessage 调用。 */
+	/** The sendUserMessage calls recorded. */
 	sentUserMessages: Array<{ content: string; options?: unknown }>;
-	/** 记录到的 notify。 */
+	/** The notifies recorded. */
 	notifies: string[];
-	/** setStatus 记录。 */
+	/** The setStatus calls recorded. */
 	statuses: Array<{ key: string; text: string | undefined }>;
-	/** 评估调用记录（可注入裁决）。 */
+	/** The evaluation calls recorded (a verdict can be injected). */
 	evaluations: Array<{ prompt: string; systemPrompt: string }>;
-	/** 下一次评估返回的原始文本（undefined = 评估失败）。 */
+	/** The raw text the next evaluation returns (undefined = evaluation failed). */
 	evaluatorReply: string | undefined;
 }
 
@@ -145,7 +147,7 @@ async function loadHarness(
 	fs.mkdirSync(agentDir, { recursive: true });
 	fs.mkdirSync(projectDir, { recursive: true });
 
-	// env 隔离：保存 → 覆盖 → 加载 → 还原（配置在工厂里一次性读取）。
+	// env isolation: save → override → load → restore (config is read once at factory time).
 	const saved: Record<string, string | undefined> = {};
 	for (const key of Object.keys(env)) {
 		saved[key] = process.env[key];
@@ -155,8 +157,8 @@ async function loadHarness(
 
 	let loaded: Awaited<ReturnType<typeof pi.discoverAndLoadExtensions>>;
 	try {
-		// 子代理探测用的假总线：对 `status` 请求回「没有子代理在跑」。
-		// 不回的话 `hasActiveSubagentWork` 会等满 1s 超时（fail-open 结果一样，但每个用例慢 1s）。
+		// the fake bus for subagent probing: answers "no subagents running" to `status` requests.
+		// otherwise `hasActiveSubagentWork` waits the full 1s timeout (same fail-open outcome, but every case gets 1s slower).
 		const bus = createFakeEventBus(options.activeSubagents ?? 0);
 		loaded = await pi.discoverAndLoadExtensions([EXTENSION_PATH], projectDir, agentDir, bus);
 	} finally {
@@ -166,9 +168,9 @@ async function loadHarness(
 		}
 	}
 
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	const extension = loaded.extensions[0];
-	assert.ok(extension, "应该加载到 verify-loop 扩展");
+	assert.ok(extension, "the verify-loop extension should load");
 
 	const harness: Harness = {
 		appended: [],
@@ -182,7 +184,7 @@ async function loadHarness(
 		startSession: async () => undefined,
 	};
 
-	// runner.bindCore 的测试等价物：把抛错桩换成记录器。
+	// the test equivalent of runner.bindCore: replace the throwing stubs with recorders.
 	loaded.runtime.appendEntry = (customType: string, data: unknown) => {
 		harness.appended.push({ customType, data });
 	};
@@ -224,9 +226,9 @@ async function loadHarness(
 	const settleHandler = extension.handlers.get("agent_before_settle")?.[0];
 	const startHandler = extension.handlers.get("session_start")?.[0];
 	const goalCommand = extension.commands.get("goal");
-	assert.ok(settleHandler, "应该注册 agent_before_settle handler");
-	assert.ok(goalCommand, "应该注册 /goal 命令");
-	assert.ok(extension.messageRenderers.get(VERIFY_LOOP_CUSTOM_TYPE), "应该注册注入消息的渲染器");
+	assert.ok(settleHandler, "an agent_before_settle handler should be registered");
+	assert.ok(goalCommand, "the /goal command should be registered");
+	assert.ok(extension.messageRenderers.get(VERIFY_LOOP_CUSTOM_TYPE), "a renderer for the injected messages should be registered");
 
 	harness.settle = async (messages, outcome = "completed") =>
 		settleHandler(
@@ -248,8 +250,9 @@ function lastDraft(result: unknown): { customType?: string; content?: string; di
 }
 
 /**
- * 假的 pi 事件总线：只认 pi-subagents 的 RPC 频道，回 `fleet.totalActive = <n>`。
- * recap/subagents.ts 的 `isSubagentWorkActive` 读的就是这个字段。
+ * The fake pi event bus: only knows pi-subagents' RPC channel, answering
+ * `fleet.totalActive = <n>`.
+ * That is the field recap/subagents.ts's `isSubagentWorkActive` reads.
  */
 function createFakeEventBus(active = 0): { on: (channel: string, handler: (data: unknown) => void) => () => void; emit: (channel: string, data: unknown) => void } {
 	const handlers = new Map<string, Set<(data: unknown) => void>>();
@@ -272,58 +275,58 @@ function createFakeEventBus(active = 0): { on: (channel: string, handler: (data:
 }
 
 // =============================================================================
-// 闸（CC 的 command 型 Stop hook）
+// The gate (CC's command-type Stop hook)
 // =============================================================================
 
 test(
-	"改了文件没验证 → block：注入 gate 消息并 continue",
+	"files changed, no verification → block: injects a gate message and continues",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		const result = (await harness.settle(messages)) as { continue?: boolean } | undefined;
-		assert.equal(result?.continue, true, "应该强制续跑一轮");
+		assert.equal(result?.continue, true, "should force one continuation");
 		const draft = lastDraft(result);
 		assert.equal(draft?.customType, VERIFY_LOOP_CUSTOM_TYPE);
 		assert.equal(draft?.details?.kind, "gate");
-		assert.equal(draft?.display, true, "CC 的 Stop hook feedback 用户可见");
+		assert.equal(draft?.display, true, "CC's Stop hook feedback is user-visible");
 		assert.match(draft?.content ?? "", /no command was run/);
 		assert.match(draft?.content ?? "", /src\/a\.js/);
 	},
 );
 
 test(
-	"改完跑过验证 → 放行",
+	"verification ran after the change → pass",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
 			assistantToolCalls({ name: "bash", args: { command: "node --test adapter/tests/*.test.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		assert.equal(await harness.settle(messages), undefined);
 	},
 );
 
 test(
-	"aborted / error outcome 不触发闸（CC：abort 不触发 Stop，API 错误走 StopFailure）",
+	"aborted / error outcomes do not trip the gate (CC: abort does not fire Stop; API errors go through StopFailure)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		assert.equal(await harness.settle(messages, "aborted"), undefined);
 		assert.equal(await harness.settle(messages, "error"), undefined);
@@ -331,32 +334,32 @@ test(
 );
 
 test(
-	"PI_VERIFY_LOOP=notify → 只提示不拦",
+	"PI_VERIFY_LOOP=notify → notify only, no blocking",
 	{ skip },
 	async () => {
 		const harness = await loadHarness({ PI_VERIFY_LOOP: "notify" });
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		const result = await harness.settle(messages);
-		assert.equal(result, undefined, "notify 模式不应 continue");
-		assert.ok(harness.notifies.some((text) => text.includes("[verify-loop]")), "应该有提示");
+		assert.equal(result, undefined, "notify mode must not continue");
+		assert.ok(harness.notifies.some((text) => text.includes("[verify-loop]")), "a notice should appear");
 	},
 );
 
 test(
-	"PI_VERIFY_LOOP=off → 什么都不做",
+	"PI_VERIFY_LOOP=off → does nothing",
 	{ skip },
 	async () => {
 		const harness = await loadHarness({ PI_VERIFY_LOOP: "off" });
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		assert.equal(await harness.settle(messages), undefined);
 		assert.equal(harness.notifies.length, 0);
@@ -364,47 +367,47 @@ test(
 );
 
 test(
-	"连续拦截达到上限 → 放行（CC 的强制放行）",
+	"consecutive blocks at the cap → pass (CC's forced release)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness({ PI_VERIFY_LOOP_CAP: "1" });
 		const messages = [
-			user("改一下"),
+			user("change it"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 			{ role: "custom", customType: VERIFY_LOOP_CUSTOM_TYPE, content: "...", details: { kind: "gate", at: 1 } },
-			assistantText("还是完成了"),
+			assistantText("still done"),
 		];
-		assert.equal(await harness.settle(messages), undefined, "已拦过一次（上限 1）应放行");
+		assert.equal(await harness.settle(messages), undefined, "already blocked once (cap 1) → should pass");
 	},
 );
 
 // =============================================================================
-// /goal 命令
+// The /goal command
 // =============================================================================
 
 test(
-	"/goal <条件>：落盘 + 指示器 + 立刻起一轮（条件即 directive）",
+	"/goal <condition>: persists + indicator + starts a turn immediately (the condition is the directive)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("临时文件里包含 HELLO");
+		await harness.goal("temp files contain HELLO");
 		assert.equal(harness.appended.length, 1);
 		assert.equal(harness.appended[0].customType, GOAL_ENTRY_TYPE);
-		assert.equal((harness.appended[0].data as { condition: string }).condition, "临时文件里包含 HELLO");
-		assert.equal(harness.sentUserMessages.length, 1, "CC：设定 goal 立即起一轮");
-		assert.match(harness.sentUserMessages[0].content, /临时文件里包含 HELLO/);
+		assert.equal((harness.appended[0].data as { condition: string }).condition, "temp files contain HELLO");
+		assert.equal(harness.sentUserMessages.length, 1, "CC: setting a goal starts a turn immediately");
+		assert.match(harness.sentUserMessages[0].content, /temp files contain HELLO/);
 		assert.ok(harness.statuses.some((s) => s.key === "verify-goal" && s.text === "◎ /goal active"));
 	},
 );
 
 test(
-	"/goal clear：清除并记录",
+	"/goal clear: clears and records",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("条件A");
+		await harness.goal("condition A");
 		await harness.goal("clear");
 		const last = harness.appended[harness.appended.length - 1];
 		assert.equal((last.data as { condition: string }).condition, "");
@@ -413,11 +416,11 @@ test(
 );
 
 test(
-	"/goal stop 等别名同样清除",
+	"/goal stop and other aliases clear the same way",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("条件A");
+		await harness.goal("condition A");
 		await harness.goal("stop");
 		const last = harness.appended[harness.appended.length - 1];
 		assert.equal((last.data as { condition: string }).condition, "");
@@ -425,20 +428,20 @@ test(
 );
 
 test(
-	"/goal（无参）：显示状态，不触发评估",
+	"/goal (no args): shows status, does not evaluate",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("条件A");
+		await harness.goal("condition A");
 		harness.notifies.length = 0;
 		await harness.goal("");
-		assert.ok(harness.notifies.some((text) => text.includes("条件A")));
+		assert.ok(harness.notifies.some((text) => text.includes("condition A")));
 		assert.equal(harness.evaluations.length, 0);
 	},
 );
 
 // =============================================================================
-// 评估循环（CC 的 prompt 型 Stop hook / /goal 评估器）
+// The evaluation loop (CC's prompt-type Stop hook / the /goal evaluator)
 // =============================================================================
 
 async function settleWithGoal(harness: Harness, messages: Message[]): Promise<{ continue?: boolean } | undefined> {
@@ -446,69 +449,69 @@ async function settleWithGoal(harness: Harness, messages: Message[]): Promise<{ 
 }
 
 test(
-	"goal 活跃 + 未达成 → 注入裁决并续跑",
+	"goal active + not met → inject the verdict and continue",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"not_met","reason":"没看到测试输出"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"not_met","reason":"no test output seen"}';
 
 		const messages = [
-			user("开始"),
+			user("start"),
 			assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
 			toolResult(),
-			assistantText("应该好了"),
+			assistantText("should be good now"),
 		];
 		const result = await settleWithGoal(harness, messages);
-		assert.equal(result?.continue, true, "未达成应续跑");
+		assert.equal(result?.continue, true, "not met → should continue");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-not-met");
-		assert.match(draft?.content ?? "", /没看到测试输出/);
-		assert.equal(harness.evaluations.length, 1, "评估器被调用一次");
-		assert.match(harness.evaluations[0].prompt, /所有测试通过/, "条件在评估提示词里");
-		assert.match(harness.evaluations[0].prompt, /\[Assistant\]/, "对话序列化在评估提示词里");
+		assert.match(draft?.content ?? "", /no test output seen/);
+		assert.equal(harness.evaluations.length, 1, "the evaluator is called once");
+		assert.match(harness.evaluations[0].prompt, /all tests pass/, "the condition is in the evaluation prompt");
+		assert.match(harness.evaluations[0].prompt, /\[Assistant\]/, "the serialized conversation is in the evaluation prompt");
 		const last = harness.appended[harness.appended.length - 1];
-		assert.equal((last.data as { evaluatedTurns: number }).evaluatedTurns, 1, "评估轮数落盘");
+		assert.equal((last.data as { evaluatedTurns: number }).evaluatedTurns, 1, "the evaluated-turn count is persisted");
 	},
 );
 
 test(
-	"goal 达成 → 记录 achieved 条目、不再续跑",
+	"goal met → records an achieved entry, no more continuation",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"met","reason":"输出显示 34/34 通过"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"met","reason":"output shows 34/34 passing"}';
 
 		const messages = [
-			user("开始"),
+			user("start"),
 			assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
 			toolResult(),
-			assistantText("全过了"),
+			assistantText("all passing"),
 		];
 		const result = await settleWithGoal(harness, messages);
-		assert.equal(result?.continue, undefined, "达成不应续跑");
+		assert.equal(result?.continue, undefined, "met → must not continue");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-met");
 		const last = harness.appended[harness.appended.length - 1];
 		assert.equal((last.data as { status: string }).status, "achieved");
 
-		// 达成后不再评估
+		// no evaluation after achieving
 		harness.evaluations.length = 0;
-		await settleWithGoal(harness, [...messages, assistantText("继续别的")]);
+		await settleWithGoal(harness, [...messages, assistantText("continue with something else")]);
 		assert.equal(harness.evaluations.length, 0);
 	},
 );
 
 test(
-	"goal 不可能 → 清除并记录",
+	"goal impossible → cleared and recorded",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("让太阳从西边升起");
-		harness.evaluatorReply = '{"verdict":"impossible","reason":"物理上不可能"}';
+		await harness.goal("make the sun rise in the west");
+		harness.evaluatorReply = '{"verdict":"impossible","reason":"physically impossible"}';
 
-		const messages = [user("开始"), assistantText("这做不到")];
+		const messages = [user("start"), assistantText("this cannot be done")];
 		const result = await settleWithGoal(harness, messages);
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-impossible");
@@ -518,52 +521,52 @@ test(
 );
 
 test(
-	"评估器失败 → fail-open 放行（CC：hook 失败不拦回合）",
+	"evaluator failure → fail-open pass (CC: hook failure does not block the turn)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = undefined; // complete() 抛错
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = undefined; // complete() throws
 
-		const messages = [user("开始"), assistantText("完成了")];
+		const messages = [user("start"), assistantText("done")];
 		const result = await settleWithGoal(harness, messages);
-		assert.equal(result, undefined, "评估失败应放行");
+		assert.equal(result, undefined, "an evaluation failure should pass");
 		assert.ok(harness.notifies.some((text) => text.includes("evaluation failed")));
 	},
 );
 
 test(
-	"评估器回的不是裁决 → fail-open 放行",
+	"the evaluator returns a non-verdict → fail-open pass",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = "我觉得应该差不多了吧";
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = "I think it should be about done";
 
-		const messages = [user("开始"), assistantText("完成了")];
+		const messages = [user("start"), assistantText("done")];
 		assert.equal(await settleWithGoal(harness, messages), undefined);
 	},
 );
 
 test(
-	"续跑次数到上限 → 停循环、goal 保留（CC 的 8 次强制放行）",
+	"continuations at the cap → stop the loop, goal kept (CC's forced release)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness({ PI_GOAL_CAP: "2" });
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"not_met","reason":"还差"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"not_met","reason":"still missing"}';
 
-		const messages: Message[] = [user("开始")];
+		const messages: Message[] = [user("start")];
 		for (let i = 0; i < 2; i += 1) {
 			messages.push(
 				{ role: "custom", customType: VERIFY_LOOP_CUSTOM_TYPE, content: "...", details: { kind: "goal-not-met", at: 1 } },
 				assistantToolCalls({ name: "bash", args: { command: "npm test" } }),
 				toolResult(),
-				assistantText("继续"),
+				assistantText("continue"),
 			);
 		}
 		const result = await settleWithGoal(harness, messages);
-		assert.equal(result?.continue, undefined, "到上限不再续跑");
+		assert.equal(result?.continue, undefined, "no continuation past the cap");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-cap");
 		assert.match(draft?.content ?? "", /condition is retained/);
@@ -571,94 +574,94 @@ test(
 );
 
 test(
-	"连续无进展（只回文字不调工具）→ 停循环、goal 保留（CC 的无进展检测）",
+	"consecutive no-progress (text-only, no tools) → stop the loop, goal kept (CC's no-progress detection)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"not_met","reason":"还差"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"not_met","reason":"still missing"}';
 
-		const messages: Message[] = [user("开始")];
+		const messages: Message[] = [user("start")];
 		for (let i = 0; i < 2; i += 1) {
 			messages.push(
 				{ role: "custom", customType: VERIFY_LOOP_CUSTOM_TYPE, content: "...", details: { kind: "goal-not-met", at: 1 } },
-				assistantText("我觉得已经完成了"),
+				assistantText("I think it is done already"),
 			);
 		}
 		const result = await settleWithGoal(harness, messages);
-		assert.equal(result?.continue, undefined, "无进展不再续跑");
+		assert.equal(result?.continue, undefined, "no continuation on no progress");
 		const draft = lastDraft(result);
 		assert.equal(draft?.details?.kind, "goal-halted");
 		assert.match(draft?.content ?? "", /no progress/);
-		assert.equal(harness.evaluations.length, 0, "halt 判定在评估之前，不花模型调用");
+		assert.equal(harness.evaluations.length, 0, "the halt check runs before evaluation — no model call spent");
 	},
 );
 
 test(
-	"后台子代理还在跑 → 本轮跳过评估（CC：background work defers evaluation）",
+	"a background subagent still running → skip this turn's evaluation (CC: background work defers evaluation)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness({}, { activeSubagents: 1 });
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"not_met","reason":"还差"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"not_met","reason":"still missing"}';
 
-		const messages = [user("开始"), assistantText("发出去了，等子代理")];
-		assert.equal(await settleWithGoal(harness, messages), undefined, "子代理在跑时不评估也不续跑");
+		const messages = [user("start"), assistantText("sent, waiting on the subagent")];
+		assert.equal(await settleWithGoal(harness, messages), undefined, "no evaluation or continuation while a subagent runs");
 		assert.equal(harness.evaluations.length, 0);
 	},
 );
 
 // =============================================================================
-// 会话生命周期
+// Session lifecycle
 // =============================================================================
 
 test(
-	"session_start：从分支条目恢复活跃 goal（CC：resume 恢复）",
+	"session_start: restores an active goal from branch entries (CC: resume restores)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
 		await harness.startSession([
-			{ type: "custom", customType: GOAL_ENTRY_TYPE, data: { condition: "所有测试通过", setAt: 1, status: "active", evaluatedTurns: 3 } },
+			{ type: "custom", customType: GOAL_ENTRY_TYPE, data: { condition: "all tests pass", setAt: 1, status: "active", evaluatedTurns: 3 } },
 		]);
-		assert.ok(harness.statuses.some((s) => s.key === "verify-goal" && s.text === "◎ /goal active"), "恢复后指示器应亮起");
+		assert.ok(harness.statuses.some((s) => s.key === "verify-goal" && s.text === "◎ /goal active"), "the indicator should light up after restore");
 
-		// 恢复的 goal 参与评估
+		// the restored goal participates in evaluation
 		harness.evaluatorReply = '{"verdict":"met","reason":"done"}';
-		const result = await settleWithGoal(harness, [user("继续"), assistantText("好了")]);
+		const result = await settleWithGoal(harness, [user("continue"), assistantText("done")]);
 		assert.equal(lastDraft(result)?.details?.kind, "goal-met");
 	},
 );
 
 test(
-	"session_start：已达成的 goal 不恢复（CC：不恢复已达成/已清除的 goal）",
+	"session_start: an achieved goal is not restored (CC: no restore of achieved/cleared goals)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
 		await harness.startSession([
-			{ type: "custom", customType: GOAL_ENTRY_TYPE, data: { condition: "旧条件", setAt: 1, status: "achieved", evaluatedTurns: 1 } },
+			{ type: "custom", customType: GOAL_ENTRY_TYPE, data: { condition: "old condition", setAt: 1, status: "achieved", evaluatedTurns: 1 } },
 		]);
 		assert.ok(!harness.statuses.some((s) => s.key === "verify-goal" && s.text === "◎ /goal active"));
-		assert.equal(await settleWithGoal(harness, [user("继续"), assistantText("好了")]), undefined);
+		assert.equal(await settleWithGoal(harness, [user("continue"), assistantText("done")]), undefined);
 	},
 );
 
 test(
-	"闸与 goal 同时在场：闸优先（先补验证，再谈 goal）",
+	"gate and goal both present: the gate wins (backfill verification first, then talk goal)",
 	{ skip },
 	async () => {
 		const harness = await loadHarness();
-		await harness.goal("所有测试通过");
-		harness.evaluatorReply = '{"verdict":"not_met","reason":"还差"}';
+		await harness.goal("all tests pass");
+		harness.evaluatorReply = '{"verdict":"not_met","reason":"still missing"}';
 
 		const messages = [
-			user("开始"),
+			user("start"),
 			assistantToolCalls({ name: "edit", args: { path: "src/a.js" } }),
 			toolResult(),
-			assistantText("完成了"),
+			assistantText("done"),
 		];
 		const result = await settleWithGoal(harness, messages);
 		assert.equal(result?.continue, true);
-		assert.equal(lastDraft(result)?.details?.kind, "gate", "闸先于 goal 评估");
-		assert.equal(harness.evaluations.length, 0, "闸 block 时不花评估调用");
+		assert.equal(lastDraft(result)?.details?.kind, "gate", "the gate runs before the goal evaluation");
+		assert.equal(harness.evaluations.length, 0, "a gate block spends no evaluation call");
 	},
 );

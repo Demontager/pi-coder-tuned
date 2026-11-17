@@ -1,84 +1,102 @@
 /**
- * verify-loop — 验证闭环 + 评估器，补 issue #12 里权重最高的一格空白。
+ * verify-loop — the verification loop + evaluator, covering the heaviest blank cell from
+ * issue #12.
  *
- * ## 要解决的问题
+ * ## The problem
  *
- * 改动完成度**全靠模型自报**：模型改完文件说「已完成、测试通过」，pi 就结束这一轮，
- * 中间没有任何东西核对那句话。`~/.agents/skills/superpowers/verification-before-completion/`
- * 整篇在用文字要求模型别这么干（"NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION
- * EVIDENCE"），但文字是提示词 —— 模型可以忽略，而且随对话变长衰减（这正是 `core-rules/`
- * 存在的原因）。本扩展把这条纪律从提示词变成代码里的闸。
+ * Change completeness is **self-reported by the model**: the model edits files, says "done,
+ * tests pass", and pi ends the turn — nothing in between verifies that sentence.
+ * `~/.agents/skills/superpowers/verification-before-completion/` spends a whole document
+ * asking the model not to do that ("NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION
+ * EVIDENCE"), but text is a prompt — the model can ignore it, and it decays as the
+ * conversation grows (exactly why `core-rules/` exists). This extension turns that
+ * discipline from a prompt into a gate in code.
  *
- * ## CC 原型（官方文档核实：hooks / hooks-guide / goal）
+ * ## The CC prototype (verified against the official docs: hooks / hooks-guide / goal)
  *
- * **Stop hook（闸）自动触发**：每次 "Claude finishes responding" 都 fire；hook 返回
- * `{"decision":"block","reason":...}` 阻止结束，`reason` 作为下一轮指令注入。防循环两件：
- * 输入带 `stop_hook_active`，且**连续 block 8 次强制放行**（`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`）。
- * hook 三类型：`command`（确定性脚本）/ `prompt`（单轮模型判定，返回 `{ok, reason}`）/
- * `agent`（实验性，带工具子代理）。abort 不触发 Stop；API 错误走 `StopFailure`，也不触发。
+ * **The Stop hook (gate) fires automatically**: on every "Claude finishes responding"; a
+ * `{"decision":"block","reason":...}` result prevents finishing, and `reason` is injected
+ * as the next round's instruction. Two anti-loop measures: the input carries
+ * `stop_hook_active`, and **8 consecutive blocks force a pass**
+ * (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). Three hook types: `command` (deterministic script) /
+ * `prompt` (one-shot model judgment returning `{ok, reason}`) / `agent` (experimental,
+ * a tool-using subagent). abort does not fire Stop; API errors go through `StopFailure`,
+ * also not fired.
  *
- * **`/goal`（评估器）手动设定、之后每轮自动评估**：`/goal <条件>` 设定并立即起一轮；
- * 此后每次回合结束把「条件 + 到目前为止的对话」发给**小快模型**（默认 Haiku，
- * **无工具权限**，"It doesn't run commands or read files independently"）。三裁决：
- * 未达成（继续干，reason 当指导）/ 达成（清除并记录）/ 不可能（清除并记录失败）。
- * 防呆：连续几轮无工具调用 = 无进展 → 停循环、警告、**goal 保留**；后台子代理在跑 →
- * 本轮跳过评估；resume 恢复 goal 但重置轮数计时；`/clear` 新会话清除；条件上限 4000 字符。
+ * **`/goal` (evaluator) is set manually, then auto-evaluates every turn**: `/goal
+ * <condition>` sets it and starts a turn immediately; afterwards each turn end sends "the
+ * condition + the conversation so far" to a **small fast model** (default Haiku, **no tool
+ * permissions**, "It doesn't run commands or read files independently"). Three verdicts:
+ * not met (keep going, reason as guidance) / met (clear and record) / impossible (clear and
+ * record the failure). Guardrails: several consecutive no-tool-call turns = no progress →
+ * stop the loop, warn, **keep the goal**; a background subagent still running → skip this
+ * turn; resume restores the goal but resets turn counting; `/clear`'s new session clears;
+ * condition capped at 4000 chars.
  *
- * ## pi 落点（源码核实，pi 0.87.1）
+ * ## The pi landing spots (source-verified, pi 0.87.1)
  *
  * | CC | pi |
  * |---|---|
- * | `Stop` 事件 | `agent_before_settle`（docs/extensions.md："the final actionable boundary: it can append entries and request one continuation"；`agent-session.js:1142`） |
- * | `decision:"block"` + `reason` | 返回 `{entries:[{type:"custom_message", display:true, …}], continue:true}`（`extensions/runner.js:662` `emitBoundary` → `_commitBoundaryDrafts` → `appendCustomMessageEntry`） |
- * | reason 进模型上下文 | custom_message 以 `role:"custom"` → `convertToLlm` 转 `role:"user"`（`messages.js:89`） |
- * | reason 用户可见（"Stop hook feedback"） | 同一条目 `display:true` + `registerMessageRenderer`（`interactive-mode.js:3046` 只对 display 为真的 custom 消息建组件） |
- * | `stop_hook_active` + 8 次上限 | 数投影里已注入的同类消息条数（见下「为什么不用内存计数器」） |
- * | abort / StopFailure 分流 | `event.outcome !== "completed"` 一律跳过（`agent-session.js:333` 按 stopReason 置值） |
- * | 后台任务未结束跳过评估 | 复用 `recap/subagents.ts` 的 `hasActiveSubagentWork(pi.events)`（pi-subagents 进程内 RPC） |
- * | 小快模型评估器 | 一次独立 `ctx.modelRegistry.complete()`，不带工具（recap / working-indicator 已验证的模式） |
- * | 对话序列化 | `serializeConversation(convertToLlm(投影消息))`，两者均从 pi 包根导出 |
- * | goal 跨 resume 保留 | `pi.appendEntry` + `session_start` 从 `getBranch()` 重建（simple-task / plan-mode 同款） |
- * | `◎ /goal active` 指示 | `ctx.ui.setStatus("verify-goal", …)` |
+ * | `Stop` event | `agent_before_settle` (docs/extensions.md: "the final actionable boundary: it can append entries and request one continuation"; `agent-session.js:1142`) |
+ * | `decision:"block"` + `reason` | return `{entries:[{type:"custom_message", display:true, …}], continue:true}` (`extensions/runner.js:662` `emitBoundary` → `_commitBoundaryDrafts` → `appendCustomMessageEntry`) |
+ * | reason into the model's context | custom_message at `role:"custom"` → `convertToLlm` maps to `role:"user"` (`messages.js:89`) |
+ * | reason visible to the user ("Stop hook feedback") | same entry `display:true` + `registerMessageRenderer` (`interactive-mode.js:3046` only builds a component for custom messages with display true) |
+ * | `stop_hook_active` + 8-strike cap | count same-kind injected messages already in the projection (see "why no in-memory counter" below) |
+ * | abort / StopFailure routing | `event.outcome !== "completed"` is always skipped (`agent-session.js:333` sets it by stopReason) |
+ * | skip evaluation while background work runs | reuse `recap/subagents.ts`'s `hasActiveSubagentWork(pi.events)` (pi-subagents' in-process RPC) |
+ * | small fast model evaluator | one standalone `ctx.modelRegistry.complete()` call, no tools (the pattern recap / working-indicator already proved) |
+ * | conversation serialization | `serializeConversation(convertToLlm(projected messages))`, both exported from the pi package root |
+ * | goal surviving resume | `pi.appendEntry` + `session_start` rebuilt from `getBranch()` (same as simple-task / plan-mode) |
+ * | `◎ /goal active` indicator | `ctx.ui.setStatus("verify-goal", …)` |
  *
- * ## 为什么计数器从投影里数，而不是内存态
+ * ## Why the counters are read from the projection, not memory
  *
- * `agent_start` 在**每次边界续跑时都会再 fire 一次**（`runAgentLoopContinue` 里
- * `emit({type:"agent_start"})`），所以任何挂在 agent_start 上的复位都会在续跑链里把计数
- * 清零、上限失效。从投影里数注入消息则天然分支正确（rewind 后被丢弃的分支不在投影里）、
- * resume 后仍正确、且不需要任何可变状态。我们注入的是 `role:"custom"`（不是 user），
- * 所以它不会把 run 窗口切断 —— 整条续跑链共用一个窗口，正是 CC「同一 turn 内连续 block」
- * 的语义。
+ * `agent_start` fires again **on every boundary continuation** (`emit({type:"agent_start"})`
+ * in `runAgentLoopContinue`), so any reset hung on agent_start would zero the count inside
+ * the continuation chain and the cap would never work. Counting injected messages from the
+ * projection is naturally branch-correct (branches dropped by rewind are absent), still
+ * correct after resume, and needs no mutable state. Our injections are `role:"custom"`
+ * (not user) so they do not cut the run window — the whole continuation chain shares one
+ * window, exactly CC's "consecutive blocks within one turn" semantics.
  *
- * ## 与 CC 的唯一有意偏离
+ * ## The only deliberate deviation from CC
  *
- * CC 的 hook 基础设施**默认不装任何 hook**（用户在 settings.json 里配置启用）。
- * 我们没有 hooks 配置系统这一层，所以闸**默认 block 开启**，触发条件收得极窄
- * （见 gate.ts），并提供 `PI_VERIFY_LOOP=off|notify|block` 一键切换。
- * 理由：触发条件是确定性的，误报代价有上限（默认最多 2 轮续跑）。
+ * CC's hook infrastructure **ships with no hooks installed** (users opt in via
+ * settings.json). We have no hook-config layer, so the gate **defaults to block on**, with
+ * the trigger narrowed very tight (see gate.ts), plus `PI_VERIFY_LOOP=off|notify|block`
+ * for a one-key switch.
+ * Rationale: the trigger is deterministic, and the false-positive cost is bounded (at most
+ * 2 continuation rounds by default).
  *
- * ## 开关
+ * ## Switches
  *
- *   PI_VERIFY_LOOP=off|notify|block   闸的力度，默认 block
- *   PI_VERIFY_LOOP_CAP=<n>            闸的连续拦截上限，默认 2（CC 通用上限是 8）
- *   PI_VERIFY_PATTERN=strict|<regexp>  验证命令识别式；缺省 = 任何 bash 调用都算（见 gate.ts
- *                                      「为什么 verification 是『跑过命令』」）；strict = 只认测试/构建/lint 形状
- *   PI_VERIFY_DOC_EXT=.md,.txt        改这些扩展名不算 mutation（空串 = 不排除）
- *   PI_GOAL_CAP=<n>                   /goal 的续跑上限，默认 8（CC 的数字）
- *   PI_VERIFY_EVALUATOR_MODEL=p/m     评估器模型，缺省找 litellm-any/qwen3.8-flash，再退回当前会话模型
- *   PI_GOAL_CONTEXT_CHARS=<n>         给评估器的对话字符上限，默认 120000
- *   PI_GOAL_TIMEOUT_MS=<n>            评估调用超时，默认 45000
+ *   PI_VERIFY_LOOP=off|notify|block   gate strength, default block
+ *   PI_VERIFY_LOOP_CAP=<n>            consecutive-block cap, default 2 (CC's general cap is 8)
+ *   PI_VERIFY_PATTERN=strict|<regexp> verification-command recognizer; unset = any bash call
+ *                                      counts (see gate.ts "why verification is 'ran a
+ *                                      command'"); strict = test/build/lint shapes only
+ *   PI_VERIFY_DOC_EXT=.md,.txt        editing these extensions is not a mutation (empty = none excluded)
+ *   PI_GOAL_CAP=<n>                   /goal's continuation cap, default 8 (CC's number)
+ *   PI_VERIFY_EVALUATOR_MODEL=p/m     the evaluator model; defaults to litellm-any/qwen3.8-flash,
+ *                                      then the current session model
+ *   PI_GOAL_CONTEXT_CHARS=<n>         the conversation char cap for the evaluator, default 120000
+ *   PI_GOAL_TIMEOUT_MS=<n>            evaluation call timeout, default 45000
  *
- * ## 已知边界（写清楚，别当 bug 修）
+ * ## Known boundaries (documented — do not fix as bugs)
  *
- * - **bash 里的写操作不算 mutation**（`sed -i` / 重定向 / 脚本改文件）。词法判定不做
- *   数据流分析，与 destructive-guard 的口径同级。
- * - **评估器 fail-open**：调用失败 / 超时 / 解析不出裁决 → 放行回合并 notify。
- *   CC 的 hook 失败同样不拦回合；评估器是增强，不该因为自己坏了把 pi 弄停摆。
- * - **评估调用要付 thinking**：本网关路由的 `thinking: {type: enabled}` 是
- *   `gateway/config.yaml` 钉死的，客户端关不掉（models.json 里 qwen3.8-flash 的
- *   `thinkingLevelMap.off` 就是 null），实测一次 3-20s。/goal 是每会话主动选择，成本可见。
- * - 闸只看**本次 run**（最后一条 user 消息之后）：上一轮跑过的测试不能为本轮的改动作证
- *   （verification-before-completion 的铁律是 FRESH evidence）。
+ * - **Writes inside bash do not count as mutations** (`sed -i` / redirects / scripts editing
+ *   files). Lexical judgment does no data-flow analysis — same level as destructive-guard's
+ *   rule.
+ * - **The evaluator fails open**: call failure / timeout / unparsable verdict → the turn
+ *   finishes and a notify fires. CC's hook failure also does not block; the evaluator is an
+ *   enhancement and must not stall pi by breaking itself.
+ * - **The evaluation call pays for thinking**: this gateway's routes pin
+ *   `thinking: {type: enabled}` in `gateway/config.yaml`, which clients cannot turn off
+ *   (qwen3.8-flash's `thinkingLevelMap.off` in models.json is null) — measured 3-20s per
+ *   call. /goal is a per-session opt-in and the cost is visible.
+ * - The gate only looks at **this run** (after the last user message): last turn's test run
+ *   cannot vouch for this turn's change (verification-before-completion's iron rule is FRESH
+ *   evidence).
  */
 
 import type { AgentBeforeSettleEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -124,16 +142,16 @@ import {
 	type GoalState,
 } from "./goal.ts";
 
-/** 评估调用超时（本网关路由带强制 thinking，实测 3-20s，比 recap 的 30s 再宽一点）。 */
+/** The evaluation call's timeout (this gateway's routes force thinking — measured 3-20s; a bit wider than recap's 30s). */
 const DEFAULT_GOAL_TIMEOUT_MS = 45_000;
 
-/** 缺省评估器模型：本机最便宜的一档（qoder 网关的 Qwen3.8-Flash）。 */
+/** The default evaluator model: the cheapest tier on this machine (the qoder gateway's Qwen3.8-Flash). */
 const DEFAULT_EVALUATOR_SPEC = "litellm-any/qwen3.8-flash";
 
 const STATUS_KEY = "verify-goal";
 
 // =============================================================================
-// 配置解析（纯函数，可单测）
+// Config parsing (pure functions, unit-testable)
 // =============================================================================
 
 function parseMode(raw: string | undefined): GateConfig["mode"] {
@@ -168,7 +186,7 @@ function parseVerifyPattern(raw: string | undefined): RegExp | undefined {
 	}
 }
 
-/** 从环境读闸配置。导出供测试。 */
+/** Read the gate config from env. Exported for tests. */
 export function resolveGateConfig(env: NodeJS.ProcessEnv = process.env): GateConfig {
 	return {
 		mode: parseMode(env.PI_VERIFY_LOOP),
@@ -178,7 +196,7 @@ export function resolveGateConfig(env: NodeJS.ProcessEnv = process.env): GateCon
 	};
 }
 
-/** 从环境读 goal 配置。导出供测试。 */
+/** Read the goal config from env. Exported for tests. */
 export function resolveGoalConfig(env: NodeJS.ProcessEnv = process.env): { cap: number; contextChars: number; timeoutMs: number; modelSpec: string } {
 	return {
 		cap: parsePositiveInt(env.PI_GOAL_CAP, DEFAULT_GOAL_CAP),
@@ -188,7 +206,7 @@ export function resolveGoalConfig(env: NodeJS.ProcessEnv = process.env): { cap: 
 	};
 }
 
-/** 评估器用哪个模型：env 指定 → 缺省 flash → 当前会话模型。 */
+/** Which model the evaluator uses: env-specified → default flash → current session model. */
 export function resolveEvaluatorModel(
 	ctx: ExtensionContext,
 	modelSpec: string,
@@ -202,14 +220,14 @@ export function resolveEvaluatorModel(
 	return ctx.model;
 }
 
-/** 注入条目的 details 形状（渲染器与计数器都读它）。 */
+/** The injected entries' details shape (read by both the renderer and the counters). */
 export interface VerifyLoopDetails {
 	kind: InjectKind;
 	at: number;
 }
 
 // =============================================================================
-// 扩展主体
+// The extension body
 // =============================================================================
 
 export default function verifyLoop(pi: ExtensionAPI): void {
@@ -227,11 +245,11 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		try {
 			ctx.ui.setStatus(STATUS_KEY, hasGoal(goal) ? "◎ /goal active" : undefined);
 		} catch {
-			// ctx 在会话替换后会失效（docs/extensions.md）：拿不到就算了，不影响判定。
+			// ctx goes stale after a session swap (docs/extensions.md): losing it is fine — judgment is unaffected.
 		}
 	}
 
-	// ── 会话生命周期 ──────────────────────────────────────────────────────
+	// ── Session lifecycle ──────────────────────────────────────────────────────
 
 	pi.on("session_start", (_event, ctx) => {
 		try {
@@ -246,7 +264,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		goal = emptyGoal();
 	});
 
-	// ── 注入消息的渲染（CC 的 "Stop hook feedback" 行）──────────────────────
+	// ── Rendering the injected messages (CC's "Stop hook feedback" line) ──────
 
 	pi.registerMessageRenderer<VerifyLoopDetails>(VERIFY_LOOP_CUSTOM_TYPE, (message, { outputPad }, theme) => {
 		const kind = message.details?.kind ?? "gate";
@@ -266,7 +284,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		return box;
 	});
 
-	// ── /goal 命令 ─────────────────────────────────────────────────────────
+	// ── The /goal command ──────────────────────────────────────────────────────
 
 	pi.registerCommand("goal", {
 		description: "Set a completion condition evaluated by a separate model after each turn (/goal for status, /goal clear to remove)",
@@ -296,7 +314,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 			persist();
 			updateStatus(ctx);
 
-			// CC："Setting a goal starts a turn immediately, with the condition itself
+			// CC: "Setting a goal starts a turn immediately, with the condition itself
 			// as the directive. You don't need to send a separate prompt."
 			pi.sendUserMessage(buildGoalDirective(goal.condition), {
 				deliverAs: ctx.isIdle() ? undefined : "followUp",
@@ -304,15 +322,15 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		},
 	});
 
-	// ── 边界：先闸后 goal ──────────────────────────────────────────────────
+	// ── The boundary: gate first, goal second ──────────────────────────────────
 
 	pi.on("agent_before_settle", async (event: AgentBeforeSettleEvent, ctx) => {
-		// CC：abort 不触发 Stop，API 错误走 StopFailure —— 两者都不 gate。
+		// CC: abort does not fire Stop; API errors go through StopFailure — neither is gated.
 		if (event.outcome !== "completed") return undefined;
 
 		const messages = event.context.contextMessages as unknown as readonly GateMessage[];
 
-		// 1) 确定性闸（CC 的 command 型 Stop hook）
+		// 1) the deterministic gate (CC's command-type Stop hook)
 		const decision = decideGate(messages, gateConfig);
 		if (decision.action === "block") {
 			const text = renderGateMessage(decision);
@@ -326,7 +344,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 			};
 		}
 
-		// 2) goal 评估（CC 的 prompt 型 Stop hook / /goal）
+		// 2) goal evaluation (CC's prompt-type Stop hook / /goal)
 		if (!hasGoal(goal)) return undefined;
 
 		const gate = decideGoalGate(goal, messages, goalConfig);
@@ -339,13 +357,13 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 			return { entries: [...event.entries, customDraft("goal-halted", renderHaltMessage(goal, gate.streak))] };
 		}
 
-		// CC："If a subagent or a background shell command is still running when a turn
+		// CC: "If a subagent or a background shell command is still running when a turn
 		// ends, Claude Code skips the evaluation for that turn."
 		if (await subagentsBusy()) return undefined;
 
 		const verdict = await evaluate(ctx, messages, goal.condition);
 		if (verdict === undefined) {
-			// fail-open：评估器坏了不拦回合（CC 的 hook 失败同样不拦）。
+			// fail-open: a broken evaluator must not block the turn (CC's hook failure does not block either).
 			if (ctx.hasUI) ctx.ui.notify("[verify-loop] /goal evaluation failed; allowing this turn to finish", "warning");
 			return undefined;
 		}
@@ -367,7 +385,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 		return { entries: [...event.entries, customDraft(kind, renderTerminalMessage(goal, verdict.verdict, verdict.reason))] };
 	});
 
-	// ── 内部 ───────────────────────────────────────────────────────────────
+	// ── Internals ──────────────────────────────────────────────────────────────
 
 	function customDraft(kind: InjectKind, text: string) {
 		return {
@@ -442,7 +460,7 @@ export default function verifyLoop(pi: ExtensionAPI): void {
 	}
 }
 
-/** /goal 设定后立刻起一轮的指令（CC：条件本身就是 directive）。 */
+/** The directive for the turn /goal starts immediately (CC: the condition itself is the directive). */
 export function buildGoalDirective(condition: string): string {
 	return (
 		`/goal completion condition set; work until it is satisfied:

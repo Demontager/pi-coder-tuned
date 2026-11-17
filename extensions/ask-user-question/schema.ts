@@ -1,12 +1,16 @@
 /**
- * schema.ts — ask_user_question 的 TypeBox 参数 schema（只在 pi 运行时加载）。
+ * schema.ts — ask_user_question's TypeBox params schema (loaded only inside
+ * pi's runtime).
  *
- * 刻意**不设 maxLength**：pi 在 execute 之前用 schema 校验参数
- * （pi-ai `validateToolArguments`），header/label 超长会让整次调用直接失败、
- * 白烧一个回合；而 chip 标签截断显示毫无危害，所以长度上限交给
- * validate.ts 的运行时归一化（截断 + 补 `…`），schema 的 description 里
- * 仍然写明软上限教模型。数量约束（1-4 题、每题 2-4 项）**保留在 schema 里**：
- * 悄悄丢掉第 5 个选项会歪曲模型本意，让它拿到明确校验错误去重试才对。
+ * Deliberately **no maxLength**: pi validates the params against the schema
+ * before execute (pi-ai's `validateToolArguments`), and an over-long
+ * header/label would fail the whole call — a burned turn; a clipped chip
+ * label harms nothing, so length caps go to validate.ts's runtime
+ * normalization (clip + `…`), while the schema's descriptions still teach
+ * the model the soft caps. The count limits (1-4 questions, 2-4 options
+ * each) **stay in the schema**: silently dropping a fifth option would
+ * distort the model's intent — a clear validation error to retry on is the
+ * right behavior.
  */
 
 import { Type } from "typebox";

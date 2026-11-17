@@ -1,16 +1,16 @@
 /**
- * Tests for allowlist.ts —— 持久白名单的 IO 层。纯 node，不需要 pi。
+ * Tests for allowlist.ts — the IO layer of the persistent allowlist. Pure node, no pi needed.
  *
  * Run with:  node --test clients/pi/extensions/bash-command-collapse/allowlist.test.ts
  *
- * 断言口径：
- *   - 读写往返：remember → roots()/entries() 一致，落盘的是合法 JSON 且带 version；
- *   - 原子写：不留 .tmp 垃圾；
- *   - 损坏 / 不存在 / 版本不认识 → 降级为空，不抛；
- *   - 危险 scope 永远落不了盘（写入前过滤），手改的危险条目加载时也被过滤；
- *   - forget / clear / reload 语义；
- *   - 单例：同一个 filePath 拿到同一个实例，一边 remember 另一边立刻看见；
- *   - 会话 scope 集合独立于持久白名单，clear 只清会话。
+ * What is asserted:
+ *   - read/write round-trip: remember → roots()/entries() agree, and what lands on disk is valid JSON with a version;
+ *   - atomic write: no .tmp junk left behind;
+ *   - corrupted / missing / unknown version → degrade to empty, never throw;
+ *   - dangerous scopes can never reach disk (pre-write filter), and hand-edited dangerous entries are filtered on load;
+ *   - forget / clear / reload semantics;
+ *   - singleton: the same filePath returns the same instance — one side remembers, the other sees it immediately;
+ *   - session scope set is independent of the persistent allowlist; clear only clears the session.
  */
 
 import assert from "node:assert/strict";
@@ -40,11 +40,11 @@ function tmpFile(): { file: string; dir: string; cleanup: () => void } {
 	};
 }
 
-test("defaultAllowlistPath 在 agent 目录下", () => {
+test("defaultAllowlistPath lives under the agent directory", () => {
 	assert.equal(defaultAllowlistPath("/Users/x/.pi/agent"), "/Users/x/.pi/agent/sandbox-allowlist.json");
 });
 
-test("读写往返：remember 后 roots/entries 一致，落盘是带 version 的合法 JSON", () => {
+test("read/write round-trip: roots/entries agree after remember; what lands on disk is valid JSON with a version", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
@@ -56,7 +56,7 @@ test("读写往返：remember 后 roots/entries 一致，落盘是带 version �
 		assert.equal(entries.length, 1);
 		assert.equal(entries[0]!.path, `${HOME}/Downloads`);
 		assert.equal(entries[0]!.source, "confirm");
-		assert.ok(entries[0]!.addedAt, "要带时间戳");
+		assert.ok(entries[0]!.addedAt, "must carry a timestamp");
 
 		const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
 		assert.equal(onDisk.version, ALLOWLIST_VERSION);
@@ -67,25 +67,25 @@ test("读写往返：remember 后 roots/entries 一致，落盘是带 version �
 	}
 });
 
-test("原子写：不留 .tmp 垃圾", () => {
+test("atomic write: no .tmp junk left behind", () => {
 	const { file, dir, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
 		store.remember([`${HOME}/Downloads`], "confirm", env);
 		const leftovers = fs.readdirSync(dir).filter((n) => n.includes(".tmp"));
-		assert.deepEqual(leftovers, [], `不该留下临时文件：${leftovers.join("、")}`);
+		assert.deepEqual(leftovers, [], `no temp file should be left behind: \${leftovers.join(", ")}${leftovers.join("no temp file should be left behind: ${leftovers.join(\", \")}")}`);
 	} finally {
 		cleanup();
 	}
 });
 
-test("重复 remember 不写第二条、不刷新时间戳", () => {
+test("repeat remember writes no second entry and does not refresh the timestamp", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
 		store.remember([`${HOME}/Downloads`], "confirm", env);
 		const first = store.entries()[0]!.addedAt;
-		assert.deepEqual(store.remember([`${HOME}/Downloads`], "confirm", env), [], "已存在 → 没有新写入");
+		assert.deepEqual(store.remember([`${HOME}/Downloads`], "confirm", env), [], "already present → no new write");
 		assert.equal(store.entries().length, 1);
 		assert.equal(store.entries()[0]!.addedAt, first);
 	} finally {
@@ -93,7 +93,7 @@ test("重复 remember 不写第二条、不刷新时间戳", () => {
 	}
 });
 
-test("尾斜杠与相对形态归一：同一个目录不会记两条", () => {
+test("trailing-slash and relative forms normalize: the same directory is not remembered twice", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
@@ -105,7 +105,7 @@ test("尾斜杠与相对形态归一：同一个目录不会记两条", () => {
 	}
 });
 
-test("文件不存在 → 空白名单，不抛", () => {
+test("missing file → empty allowlist, no throw", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
@@ -116,13 +116,13 @@ test("文件不存在 → 空白名单，不抛", () => {
 	}
 });
 
-test("损坏的 JSON → 降级为空，不抛", () => {
+test("corrupted JSON → degrade to empty, no throw", () => {
 	const { file, cleanup } = tmpFile();
 	try {
-		fs.writeFileSync(file, "{ 这不是 JSON", "utf8");
+		fs.writeFileSync(file, "{ this is not JSON", "utf8");
 		const store = createAllowlistStore(file, env);
 		assert.deepEqual(store.roots(), []);
-		// 降级之后仍能正常写入（覆盖掉损坏的文件）
+		// after degrading, writes still work normally (overwriting the corrupted file)
 		store.remember([`${HOME}/Downloads`], "confirm", env);
 		assert.deepEqual(store.roots(), [`${HOME}/Downloads`]);
 	} finally {
@@ -130,7 +130,7 @@ test("损坏的 JSON → 降级为空，不抛", () => {
 	}
 });
 
-test("版本不认识 → 整体丢弃", () => {
+test("unknown version → dropped wholesale", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		fs.writeFileSync(
@@ -139,13 +139,13 @@ test("版本不认识 → 整体丢弃", () => {
 			"utf8",
 		);
 		const store = createAllowlistStore(file, env);
-		assert.deepEqual(store.roots(), [], "不认识的版本不猜旧格式");
+		assert.deepEqual(store.roots(), [], "unknown version: do not guess the old format");
 	} finally {
 		cleanup();
 	}
 });
 
-test("非对象 / entries 不是数组 → 降级为空", () => {
+test("non-object / non-array entries → degrade to empty", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		fs.writeFileSync(file, JSON.stringify([1, 2, 3]), "utf8");
@@ -157,7 +157,7 @@ test("非对象 / entries 不是数组 → 降级为空", () => {
 	}
 });
 
-test("写入前过滤：危险 scope 永远落不了盘", () => {
+test("pre-write filter: dangerous scopes can never reach disk", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
@@ -166,14 +166,14 @@ test("写入前过滤：危险 scope 永远落不了盘", () => {
 			"confirm",
 			env,
 		);
-		assert.deepEqual(written, [`${HOME}/Downloads`, `${HOME}/.pi/agent`], "只有普通目录能落盘（~/.config、~/.pi 自 2026-09-25 起是普通档）");
+		assert.deepEqual(written, [`${HOME}/Downloads`, `${HOME}/.pi/agent`], "only ordinary directories reach disk (~/.config, ~/.pi are ordinary tier since 2026-09-25)");
 		assert.deepEqual(store.roots(), [`${HOME}/Downloads`, `${HOME}/.pi/agent`]);
 	} finally {
 		cleanup();
 	}
 });
 
-test("加载时过滤：手改塞进来的危险条目被丢掉", () => {
+test("load-time filter: hand-inserted dangerous entries are dropped", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		fs.writeFileSync(
@@ -190,13 +190,13 @@ test("加载时过滤：手改塞进来的危险条目被丢掉", () => {
 			"utf8",
 		);
 		const store = createAllowlistStore(file, env);
-		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "危险条目加载时就被过滤");
+		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "dangerous entries are filtered on load");
 	} finally {
 		cleanup();
 	}
 });
 
-test("加载时丢掉畸形条目与重复条目", () => {
+test("load drops malformed and duplicate entries", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		fs.writeFileSync(
@@ -205,23 +205,23 @@ test("加载时丢掉畸形条目与重复条目", () => {
 				version: ALLOWLIST_VERSION,
 				entries: [
 					null,
-					{ addedAt: "x" }, // 没有 path
+					{ addedAt: "x" }, // no path
 					{ path: "", addedAt: "x" },
 					{ path: `${HOME}/Downloads`, addedAt: "x", source: "confirm" },
-					{ path: `${HOME}/Downloads/`, addedAt: "y", source: "command" }, // 归一后重复
+					{ path: `${HOME}/Downloads/`, addedAt: "y", source: "command" }, // duplicate after normalization
 				],
 			}),
 			"utf8",
 		);
 		const store = createAllowlistStore(file, env);
 		assert.deepEqual(store.roots(), [`${HOME}/Downloads`]);
-		assert.equal(store.entries()[0]!.source, "confirm", "保留第一条");
+		assert.equal(store.entries()[0]!.source, "confirm", "the first entry wins");
 	} finally {
 		cleanup();
 	}
 });
 
-test("source 不认识时归为 confirm", () => {
+test("unknown source falls back to confirm", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		fs.writeFileSync(
@@ -235,45 +235,45 @@ test("source 不认识时归为 confirm", () => {
 	}
 });
 
-test("forget：按解析后的路径精确匹配，返回是否真的移除了", () => {
+test("forget: exact match on the resolved path; returns whether anything was removed", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
 		store.remember([`${HOME}/Downloads`, `${HOME}/projects`], "confirm", env);
-		assert.equal(store.forget(`${HOME}/Downloads/`), true, "尾斜杠归一后能匹配");
+		assert.equal(store.forget(`${HOME}/Downloads/`), true, "matches after trailing-slash normalization");
 		assert.deepEqual(store.roots(), [`${HOME}/projects`]);
-		assert.equal(store.forget(`${HOME}/nope`), false, "不在名单里");
-		assert.deepEqual(store.roots(), [`${HOME}/projects`], "没匹配上就不动文件");
+		assert.equal(store.forget(`${HOME}/nope`), false, "not on the list");
+		assert.deepEqual(store.roots(), [`${HOME}/projects`], "no match leaves the file untouched");
 	} finally {
 		cleanup();
 	}
 });
 
-test("clear：返回清掉的条数，空名单时不写盘", () => {
+test("clear: returns the number removed; writes nothing when the list is empty", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
-		assert.equal(store.clear(), 0, "本来就是空的");
-		assert.equal(fs.existsSync(file), false, "空名单不该凭空造出文件");
+		assert.equal(store.clear(), 0, "was empty to begin with");
+		assert.equal(fs.existsSync(file), false, "an empty allowlist must not conjure a file");
 		store.remember([`${HOME}/Downloads`, `${HOME}/projects`], "confirm", env);
 		assert.equal(store.clear(), 2);
 		assert.deepEqual(store.roots(), []);
-		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).entries, [], "落盘也清空了");
+		assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).entries, [], "on disk cleared too");
 	} finally {
 		cleanup();
 	}
 });
 
-test("reload：丢掉内存缓存，重新读盘（看见外部改动）", () => {
+test("reload: drop the in-memory cache and re-read disk (sees external changes)", () => {
 	const { file, cleanup } = tmpFile();
 	try {
 		const store = createAllowlistStore(file, env);
 		store.remember([`${HOME}/Downloads`], "confirm", env);
-		// 模拟另一个进程 / 手改：直接往文件里加一条
+		// simulate another process / hand edit: append an entry directly to the file
 		const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
 		onDisk.entries.push({ path: `${HOME}/projects`, addedAt: "x", source: "command" });
 		fs.writeFileSync(file, JSON.stringify(onDisk), "utf8");
-		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "没 reload 前还是内存里那份");
+		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "before reload it is still the in-memory copy");
 		store.reload();
 		assert.deepEqual(store.roots(), [`${HOME}/Downloads`, `${HOME}/projects`]);
 	} finally {
@@ -281,59 +281,59 @@ test("reload：丢掉内存缓存，重新读盘（看见外部改动）", () =>
 	}
 });
 
-test("单例：同一个 filePath 拿到同一个实例，一边写另一边立刻看见", () => {
+test("singleton: the same filePath returns the same instance; one side writes and the other sees it immediately", () => {
 	const { file, cleanup } = tmpFile();
 	resetAllowlistStoreCache();
 	try {
 		const a = getAllowlistStore(file, env);
 		const b = getAllowlistStore(file, env);
-		assert.equal(a, b, "同一个路径必须是同一个实例");
+		assert.equal(a, b, "the same path must be the same instance");
 		a.remember([`${HOME}/Downloads`], "confirm", env);
-		assert.deepEqual(b.roots(), [`${HOME}/Downloads`], "bash 侧记住，apply_patch 侧立刻生效");
+		assert.deepEqual(b.roots(), [`${HOME}/Downloads`], "remembered on the bash side, effective immediately on the apply_patch side");
 	} finally {
 		resetAllowlistStoreCache();
 		cleanup();
 	}
 });
 
-test("单例按解析后的路径去重：尾斜杠与 `.` 段拿到同一个实例", () => {
+test("singleton dedupes by resolved path: trailing slash and `.` segments get the same instance", () => {
 	const { file, cleanup } = tmpFile();
 	resetAllowlistStoreCache();
 	try {
 		const a = getAllowlistStore(file, env);
 		const b = getAllowlistStore(`${file}/`, env);
 		const c = getAllowlistStore(path.join(path.dirname(file), ".", path.basename(file)), env);
-		assert.equal(a, b, "尾斜杠归一后是同一个实例");
-		assert.equal(a, c, "`.` 段归一后是同一个实例");
+		assert.equal(a, b, "same instance after trailing-slash normalization");
+		assert.equal(a, c, "same instance after `.` segment normalization");
 	} finally {
 		resetAllowlistStoreCache();
 		cleanup();
 	}
 });
 
-test("单例键是词法的：/var 与 /private/var 两种拼写拿到两个实例（可接受的取舍）", { skip: process.platform !== "darwin" ? "Requires macOS /var symlink" : false }, () => {
-	// 这不是缺陷而是取舍：缓存键用 resolvePath（词法），不跳符号链接。
-	// macOS 上 os.tmpdir() 就是 /var/folders/…，而它的 realpath 是 /private/var/folders/…，
-	// 所以这两种拼写确实会拿到两个实例。但两个扩展算路径的代码完全相同
-	// （PI_SANDBOX_ALLOWLIST 或 join(getAgentDir(), …)），getAgentDir() 又是确定性的，
-	// 同一进程里两边拿到的字符串必然一致 —— 不存在“一边记住另一边看不见”的实际路径。
-	// 这里把边界钉住：将来若改成允许两侧用不同拼写，这条测试会提醒需要改成 realpath 键。
+test("singleton key is lexical: /var and /private/var spellings get two instances (acceptable trade-off)", { skip: process.platform !== "darwin" ? "Requires macOS /var symlink" : false }, () => {
+	// Not a bug but a trade-off: the cache key uses resolvePath (lexical), no symlink hops.
+	// On macOS os.tmpdir() is /var/folders/… while its realpath is /private/var/folders/…,
+	// so these two spellings do get two instances. But the path-computing code on both extension
+	// sides is identical (PI_SANDBOX_ALLOWLIST or join(getAgentDir(), …)), and getAgentDir() is deterministic,
+	// so in one process both sides necessarily get the same string — there is no real path where "one side remembers and the other cannot see".
+	// This pins the boundary down: if it ever changes to allow different spellings on the two sides, this test will flag the need for a realpath key.
 	resetAllowlistStoreCache();
 	const { dir, cleanup } = tmpFile();
 	try {
-		assert.ok(dir.startsWith("/var/") || dir.startsWith("/private/var/"), `本用例依赖 macOS 的 /var 链接：${dir}`);
+		assert.ok(dir.startsWith("/var/") || dir.startsWith("/private/var/"), `this case depends on macOS's /var link: \${dir}${dir}`);
 		const varForm = dir.replace(/^\/private/, "");
 		const privateForm = varForm.startsWith("/private") ? varForm : `/private${varForm}`;
 		const a = getAllowlistStore(path.join(varForm, "x.json"), env);
 		const b = getAllowlistStore(path.join(privateForm, "x.json"), env);
-		assert.notEqual(a, b, "词法键：两种拼写是两个实例（两边代码相同时不会发生）");
+		assert.notEqual(a, b, "lexical key: the two spellings are two instances (cannot happen while both sides share code)");
 	} finally {
 		resetAllowlistStoreCache();
 		cleanup();
 	}
 });
 
-test("会话 scope 集合：add / roots / clear，与持久白名单互不影响", () => {
+test("session scope set: add / roots / clear, independent of the persistent allowlist", () => {
 	const scopes = getSessionScopes();
 	scopes.clear();
 	const { file, cleanup } = tmpFile();
@@ -342,19 +342,19 @@ test("会话 scope 集合：add / roots / clear，与持久白名单互不影响
 		store.remember([`${HOME}/Downloads`], "confirm", env);
 
 		scopes.add([`${HOME}/.config/foo`, `${HOME}/.config/foo/`]);
-		assert.deepEqual(scopes.roots(), [`${HOME}/.config/foo`], "去重 + 去尾斜杠");
-		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "会话豁免不落盘");
+		assert.deepEqual(scopes.roots(), [`${HOME}/.config/foo`], "dedupe + strip trailing slash");
+		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "session exemptions are not persisted");
 
 		scopes.clear();
 		assert.deepEqual(scopes.roots(), []);
-		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "清会话不动持久白名单");
+		assert.deepEqual(store.roots(), [`${HOME}/Downloads`], "clearing the session does not touch the persistent allowlist");
 	} finally {
 		scopes.clear();
 		cleanup();
 	}
 });
 
-test("会话 scope 集合是 globalThis 单例：两次 get 拿到同一份状态", () => {
+test("session scope set is a globalThis singleton: two gets share one state", () => {
 	const a = getSessionScopes();
 	const b = getSessionScopes();
 	a.clear();

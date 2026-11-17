@@ -1,13 +1,18 @@
 /**
- * Tests for prompt-editor.ts — `!` bash 模式在**真编辑器**上的渲染契约。
+ * Tests for prompt-editor.ts — the `!` bash mode's render contract on the
+ * **real editor**.
  *
  * Run with:  node --test clients/pi/extensions/prompt-editor/render.test.ts
  *
- * pi 自己的扩展加载器真的加载 `../prompt-editor.ts`（语法、import 面、session_start 注册都在
- * 覆盖范围内），假的只有编辑器外面的一切：tui 只要 `terminal.rows` 与 `requestRender()`，
- * 主题的 `borderColor` 是恒等函数，keybindings 的 `matches` 一律 false。于是
- * 「gutter 换成 `!`、正文里输入的 `!` 不再显示、光标进不到被摘掉的那一列、点选跨过那一列、
- * 退格删掉 `!` 就退出模式」这条链能被逐行 / 逐光标列断言。纯逻辑另在 `bash-prompt.test.ts`。
+ * pi's own extension loader really loads `../prompt-editor.ts` (syntax, the
+ * import surface, the session_start registration — all covered); faked is
+ * only everything outside the editor: tui needs just `terminal.rows` and
+ * `requestRender()`, the theme's `borderColor` is identity, keybindings'
+ * `matches` is always false. So the chain "gutter swaps to `!`, the typed
+ * `!` no longer shows in the text, the cursor cannot reach the dropped
+ * column, clicks cross it, backspace deletes `!` and leaves the mode" is
+ * asserted row by row / cursor column by cursor column. The pure logic is
+ * in `bash-prompt.test.ts`.
  */
 
 import assert from "node:assert/strict";
@@ -22,19 +27,24 @@ const EXTENSION_PATH = path.join(
 	"..",
 	"prompt-editor.ts",
 );
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 
 /**
- * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
+ * pi's library entry (not the CLI): bundle is the shape `pi` actually runs,
+ * dist is the node build shape.
  *
- * 先从 `pi` 可执行文件反查**真正的安装位置**（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 后者是**扩展包的安装根**，`pi update --extensions` 会用
- * `--config.auto-install-peers=false` 把自动装进去的 `@earendil-works/pi-*` 同伴包剪掉，
- * 于是那份副本只剩空壳（文件都在、import 报 `ERR_MODULE_NOT_FOUND`）。
+ * First back-trace the `pi` executable to the **real install location**
+ * (pnpm/npm shim scripts carry a `# cmd-shim-target=<abs path>` line; npm
+ * on Unix uses a symlink — both are tried), then fall back to the
+ * `~/.pi/agent/npm` copy — the latter is the **extension-package install
+ * root**: `pi update --extensions` trims the auto-installed
+ * `@earendil-works/pi-*` sibling packages with
+ * `--config.auto-install-peers=false`, leaving that copy a hollow shell
+ * (files present, import fails with `ERR_MODULE_NOT_FOUND`).
  *
- * 判定方式是**能不能真 import**，不是路径存不存在 —— 只有真 import 一次才分得清空壳。
- * 全都不行就返回 undefined，调用方整体 skip（不假装通过）。
+ * The check is **whether it really imports**, not whether the path exists —
+ * only an actual import can tell a hollow shell apart. All failing →
+ * undefined; the caller skips wholesale (never fakes a pass).
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -44,17 +54,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 		if (!dir) continue;
 		const shimPath = path.join(dir, "pi");
 		try {
-			// npm 的 shim 是符号链接
+			// npm's shim is a symlink
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / missing: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -67,7 +77,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -121,10 +131,13 @@ function makeWorkspace(): { agentDir: string; projectDir: string; cleanup: () =>
 }
 
 /**
- * 用 pi 自己的加载器加载扩展，再调用它注册的 session_start，抓出编辑器工厂并实例化。
- * 编辑器外面全部是假的：`paddingX: 0` 的 Editor 只需要 `tui.terminal.rows`，
- * 主题只需要一个恒等的 `borderColor`，keybindings 只需要一个永远不命中的 `matches`
- * （Editor 自己的键位走 pi-tui 的全局默认表，所以 Ctrl+A / 退格都是真按真绑定的行为）。
+ * Load the extension with pi's own loader, call its registered
+ * session_start, grab the editor factory and instantiate it.
+ * Everything outside the editor is fake: a `paddingX: 0` Editor only needs
+ * `tui.terminal.rows`, the theme only an identity `borderColor`,
+ * keybindings only a never-matching `matches` (the Editor's own keys take
+ * pi-tui's global default table, so Ctrl+A / backspace behave by their real
+ * bindings).
  */
 async function mountEditor(): Promise<EditorLike> {
 	const workspace = makeWorkspace();
@@ -146,11 +159,11 @@ async function mountEditor(): Promise<EditorLike> {
 			workspace.agentDir,
 			createTestBus(),
 		);
-		assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+		assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 		const extension = loaded.extensions[0];
-		assert.ok(extension, "扩展应该被加载");
+		assert.ok(extension, "the extension should load");
 		const sessionStart = extension.handlers.get("session_start")?.[0];
-		assert.ok(sessionStart, "扩展应该注册 session_start");
+		assert.ok(sessionStart, "the extension should register session_start");
 
 		let factory: ((tui: unknown, theme: unknown, keybindings: unknown) => EditorLike) | undefined;
 		const ctx = {
@@ -163,7 +176,7 @@ async function mountEditor(): Promise<EditorLike> {
 			},
 		};
 		await sessionStart({}, ctx);
-		assert.ok(factory, "session_start 应该注册编辑器工厂");
+		assert.ok(factory, "session_start should register the editor factory");
 
 		return factory(
 			{ terminal: { rows: 40 }, requestRender() {} },
@@ -175,7 +188,7 @@ async function mountEditor(): Promise<EditorLike> {
 	}
 }
 
-/** 去掉 CSI 与 APC（CURSOR_MARKER）转义，剩下纯文本。 */
+/** Strip CSI and APC (CURSOR_MARKER) escapes — plain text is left. */
 function plainLines(lines: string[]): string[] {
 	return lines.map((line) =>
 		line
@@ -184,7 +197,7 @@ function plainLines(lines: string[]): string[] {
 	);
 }
 
-/** Editor.handleMouse 要的完整事件形状；x / y 是组件内坐标。 */
+/** The full event shape Editor.handleMouse wants; x / y are component-internal coordinates. */
 function mouseClick(x: number, y: number): Record<string, unknown> {
 	return {
 		type: "click",
@@ -202,63 +215,63 @@ function mouseClick(x: number, y: number): Record<string, unknown> {
 	};
 }
 
-test("普通输入：gutter 是 ❯，正文原样", { skip, timeout: 30_000 }, async () => {
+test("plain input: gutter is ❯, text verbatim", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("hello");
 
 	const lines = plainLines(editor.render(40));
-	assert.ok(lines[1]?.startsWith("❯ hello"), `第一行正文应是 "❯ hello"：${JSON.stringify(lines[1])}`);
-	assert.equal(lines[1]?.length, 40, "每行都要满宽（gutter + contentWidth）");
-	assert.equal(lines[0]?.length, 40, "上边框也要满宽");
+	assert.ok(lines[1]?.startsWith("❯ hello"), `the first text row should be "❯ hello": ${JSON.stringify(lines[1])}`);
+	assert.equal(lines[1]?.length, 40, "every row must be full width (gutter + contentWidth)");
+	assert.equal(lines[0]?.length, 40, "the top border is full width too");
 });
 
-test("`!` 开头：gutter 换成 !，正文里输入的 ! 不再显示", { skip, timeout: 30_000 }, async () => {
+test("a `!` start: gutter becomes !, the typed ! no longer shows", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("!ls -la");
 
 	const lines = plainLines(editor.render(40));
-	assert.ok(lines[1]?.startsWith("! ls -la"), `gutter 应是 "! " 且正文紧接其后：${JSON.stringify(lines[1])}`);
-	assert.equal(lines[1]?.includes("!ls"), false, "正文里不能再出现那个 `!`");
-	assert.equal(lines[1]?.length, 40, "摘掉一列后要补回满宽");
-	assert.equal(lines[0]?.length, 40, "上边框不受影响");
+	assert.ok(lines[1]?.startsWith("! ls -la"), `the gutter should be "! " with the text right behind: ${JSON.stringify(lines[1])}`);
+	assert.equal(lines[1]?.includes("!ls"), false, "the `!` must not appear inside the text");
+	assert.equal(lines[1]?.length, 40, "the dropped column is padded back to full width");
+	assert.equal(lines[0]?.length, 40, "the top border is unaffected");
 });
 
-test("`!!`（不进上下文）只藏第一个 !，第二个留在正文里可见", { skip, timeout: 30_000 }, async () => {
+test("`!!` (not-entering-context) hides only the first ! — the second stays visible in the text", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("!!ls");
 
 	const lines = plainLines(editor.render(40));
-	assert.ok(lines[1]?.startsWith("! !ls"), `第二个 "!" 要留在正文里：${JSON.stringify(lines[1])}`);
+	assert.ok(lines[1]?.startsWith("! !ls"), `the second "!" stays in the text: ${JSON.stringify(lines[1])}`);
 	assert.equal(lines[1]?.length, 40);
 });
 
-test("正文只剩 `!` 时按退格退出模式：gutter 自己变回 ❯", { skip, timeout: 30_000 }, async () => {
+test("with only `!` left, backspace exits the mode: the gutter returns to ❯ on its own", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("!");
-	assert.ok(plainLines(editor.render(40))[1]?.startsWith("! "), "先进入 bash 模式");
+	assert.ok(plainLines(editor.render(40))[1]?.startsWith("! "), "enter bash mode first");
 
 	editor.handleInput("\x7f"); // backspace
-	assert.equal(editor.getText(), "", "退格删掉了那个 `!`");
+	assert.equal(editor.getText(), "", "backspace deleted that `!`");
 	assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
 	assert.ok(
 		plainLines(editor.render(40))[1]?.startsWith("❯ "),
-		"退出模式后 gutter 自然回到 ❯",
+		"after leaving the mode the gutter is back to ❯",
 	);
 });
 
-test("Ctrl+A 把光标挡在隐藏的 `!` 之后：继续打字不会顶掉 bash 模式", { skip, timeout: 30_000 }, async () => {
+test("Ctrl+A keeps the cursor behind the hidden `!`: typing on does not break bash mode", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("!ls");
 
 	editor.handleInput("\x01"); // ctrl+a
-	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "光标不该落到被摘掉的那一列");
+	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "the cursor must not land on the dropped column");
 
 	editor.handleInput("c");
-	assert.equal(editor.getText(), "!cls", "插入点在第 1 列之后，`!` 还在最前面");
-	assert.ok(plainLines(editor.render(40))[1]?.startsWith("! cls"), "仍然是 bash 模式的画法");
+	assert.equal(editor.getText(), "!cls", "the insertion point stays after column 1, `!` still leads");
+	assert.ok(plainLines(editor.render(40))[1]?.startsWith("! cls"), "the bash-mode drawing is kept");
 });
 
-test("普通正文的 Ctrl+A 不受影响：光标可以到第 0 列", { skip, timeout: 30_000 }, async () => {
+test("plain text's Ctrl+A is unaffected: the cursor may reach column 0", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("ls");
 
@@ -266,18 +279,18 @@ test("普通正文的 Ctrl+A 不受影响：光标可以到第 0 列", { skip, t
 	assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
 });
 
-test("点选：正文左移一列后坐标仍然对得上（点 gutter 也会被挡回第 1 列）", { skip, timeout: 30_000 }, async () => {
+test("click: with the text shifted one column left the coordinates still match (a gutter click is pushed back to column 1)", { skip, timeout: 30_000 }, async () => {
 	const editor = await mountEditor();
 	editor.setText("!ls");
-	editor.render(40); // handleMouse 依赖最近一次 render 的宽度与行数
+	editor.render(40); // handleMouse relies on the latest render's width and row count
 
-	// 可见正文：gutter 占 x=0/1，`l` 在 x=2，`s` 在 x=3
+	// the visible text: the gutter takes x=0/1, `l` sits at x=2, `s` at x=3
 	editor.handleMouse(mouseClick(3, 1));
-	assert.deepEqual(editor.getCursor(), { line: 0, col: 2 }, "点在 `s` 上 → 光标在 `s` 之前");
+	assert.deepEqual(editor.getCursor(), { line: 0, col: 2 }, "a click on `s` → the cursor goes before `s`");
 
 	editor.handleMouse(mouseClick(2, 1));
-	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "点在 `l` 上 → 光标在 `l` 之前");
+	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "a click on `l` → the cursor goes before `l`");
 
 	editor.handleMouse(mouseClick(0, 1));
-	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "点 gutter（隐藏列）被挡回第 1 列");
+	assert.deepEqual(editor.getCursor(), { line: 0, col: 1 }, "a click on the gutter (the hidden column) is pushed back to column 1");
 });

@@ -1,13 +1,18 @@
 /**
- * Tests for render.ts — 代码块去围栏的纯逻辑（行渲染 + 原型补丁）。
+ * Tests for render.ts — the fenceless code block's pure logic (row
+ * rendering + the prototype patch).
  *
  * Run with:  node --test clients/pi/extensions/fenceless-code-block/render.test.ts
  *
- * 被测模块不 import pi / pi-tui（量度、折行、Markdown 类都是注入的），所以这里喂假实现：
- * ASCII = 1 列、CJK 全角 = 2 列（口径与 pi-tui 的 visibleWidth 一致）；折行是朴素的按列硬切
- * （输入不含 ANSI，正好等价于 wrapTextWithAnsi 在"没有可断词"情形下的结果）；"Markdown 类"
- * 只是个带 theme 字段和 renderToken 的假类，用来验证补丁的接线（转发、幂等、读实例上的主题）。
- * 真实的端到端链路（pi 自己的加载器 → pi 自己的渲染组件）在 `index.test.ts`。
+ * The module under test imports no pi / pi-tui (measure, wrap, and the
+ * Markdown class are all injected), so fakes are fed here: ASCII = 1
+ * column, CJK full-width = 2 (the same rule as pi-tui's visibleWidth);
+ * wrapping is a naive column cut (the input has no ANSI — equivalent to
+ * wrapTextWithAnsi's "no breakable words" result); the "Markdown class" is
+ * a fake with a theme field and renderToken, verifying the patch's wiring
+ * (forwarding, idempotence, reading the theme off the instance).
+ * The real end-to-end chain (pi's own loader → pi's own render component)
+ * is in `index.test.ts`.
  */
 
 import assert from "node:assert/strict";
@@ -17,11 +22,11 @@ import { installFencelessCodeBlocks, renderCodeBlockLines } from "./render.ts";
 
 const ESC = "\u001b";
 const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, "");
-/** CJK 全角区间（够这几条用例用；口径与 pi-tui 的 visibleWidth 一致）。 */
+/** The CJK full-width ranges (enough for these cases; the same rule as pi-tui's visibleWidth). */
 const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/;
 const charWidth = (ch: string): number => (WIDE.test(ch) ? 2 : 1);
 const measure = (text: string): number => [...stripAnsi(text)].reduce((sum, ch) => sum + charWidth(ch), 0);
-/** 朴素折行：按列硬切。输入不含 ANSI，够用。 */
+/** A naive wrap: a hard cut by columns. No ANSI in the input — sufficient. */
 const wrap = (text: string, width: number): string[] => {
 	if (measure(text) <= width) return [text];
 	const pieces: string[] = [];
@@ -42,44 +47,44 @@ const wrap = (text: string, width: number): string[] => {
 };
 
 describe("renderCodeBlockLines", () => {
-	it("围栏不参与：正文按缩进铺开", () => {
+	it("no fences involved: the body lays out at the indent", () => {
 		assert.deepEqual(renderCodeBlockLines("a\nbb", 10, { measure, wrap }), ["  a", "  bb"]);
 	});
 
-	it("行尾不补白：补白交给 pi 的 Markdown.render()，这里只保证不超过 width", () => {
+	it("no tail padding: padding is pi's Markdown.render()'s job — here only width is guaranteed", () => {
 		const lines = renderCodeBlockLines("a", 10, { measure, wrap });
-		assert.deepEqual(lines, ["  a"], "末尾不该有我们加的空格");
+		assert.deepEqual(lines, ["  a"], "no spaces we added at the tail");
 		for (const line of lines) assert.ok(measure(line) <= 10);
 	});
 
-	it("不注入任何自己的转义（没有底色、没有额外的 SGR）", () => {
+	it("no escapes of our own injected (no background, no extra SGR)", () => {
 		for (const line of renderCodeBlockLines("a\nbb", 10, { measure, wrap })) {
-			assert.equal(line.includes(ESC), false, "没有高亮时返回的应该是纯文本");
+			assert.equal(line.includes(ESC), false, "no highlight → plain text returned");
 		}
 	});
 
-	it("长行自己先折，每行都不超过 width（外层不会再有第二次折行）", () => {
+	it("long rows wrap here first — every row within width (the outer layer wraps no second time)", () => {
 		const lines = renderCodeBlockLines("xxxxxxxxxx", 6, { measure, wrap });
 		assert.deepEqual(lines, ["  xxxx", "  xxxx", "  xx"]);
 		for (const line of lines) assert.ok(measure(line) <= 6);
 	});
 
-	it("缩进放不下时丢缩进，行宽仍然不超过 width", () => {
+	it("the indent drops when it cannot fit — the row still stays within width", () => {
 		const lines = renderCodeBlockLines("abcdef", 3, { measure, wrap, indent: "    " });
 		assert.deepEqual(lines, ["abc", "def"]);
 		for (const line of lines) assert.ok(measure(line) <= 3);
 	});
 
-	it("空代码块 / 高亮返回空数组都至少留一行", () => {
-		assert.deepEqual(renderCodeBlockLines("", 4, { measure, wrap }), ["  "], "空代码块留一行，只带缩进");
+	it("an empty code block / an empty highlight output still leaves one row", () => {
+		assert.deepEqual(renderCodeBlockLines("", 4, { measure, wrap }), ["  "], "an empty code block leaves one row — indent only");
 		assert.deepEqual(
 			renderCodeBlockLines("a", 4, { measure, wrap, highlight: () => [] }),
 			["  a"],
-			"高亮没产出时退回纯文本，不能一行都不画",
+			"empty highlight output falls back to plain text — never zero rows",
 		);
 	});
 
-	it("语言标签与正文一起交给高亮函数", () => {
+	it("the language tag goes to the highlight function with the body", () => {
 		const seen: Array<[string, string | undefined]> = [];
 		const lines = renderCodeBlockLines("const x = 1;", 40, {
 			measure,
@@ -91,16 +96,16 @@ describe("renderCodeBlockLines", () => {
 			},
 		});
 		assert.deepEqual(seen, [["const x = 1;", "js"]]);
-		assert.deepEqual(lines, ["  <hl>const x = 1;</hl>"], "着色行原样保留，不再包一层");
+		assert.deepEqual(lines, ["  <hl>const x = 1;</hl>"], "highlighted rows pass through verbatim — no extra wrapping");
 	});
 
-	it("没有高亮函数时用兜底着色（等价官方渲染器的 else 分支）", () => {
+	it("no highlight function → the fallback styling (equivalent to the official renderer's else branch)", () => {
 		assert.deepEqual(renderCodeBlockLines("a", 8, { measure, wrap, fallbackStyle: (text) => `[${text}]` }), ["  [a]"]);
 	});
 
-	it("CJK 按两列计：折行按列，不按字符", () => {
+	it("CJK counts two columns: wrapping goes by columns, not chars", () => {
 		assert.deepEqual(renderCodeBlockLines("中文中文", 10, { measure, wrap }), ["  中文中文"]);
-		// 可用宽度 6 列时装不下 8 列正文：切成 6 + 2。
+		// 6 usable columns cannot hold an 8-column body: cut to 6 + 2.
 		assert.deepEqual(renderCodeBlockLines("中文中文", 8, { measure, wrap }), ["  中文中", "  文"]);
 	});
 });
@@ -109,7 +114,7 @@ interface FakeCalls {
 	forwarded: unknown[][];
 }
 
-/** 假 Markdown 类：renderToken 记下参数并返回可辨认的文本。 */
+/** A fake Markdown class: renderToken records its args and returns recognizable text. */
 function makeFakeMarkdown(theme: Record<string, unknown> = {}) {
 	const calls: FakeCalls = { forwarded: [] };
 	class FakeMarkdown {
@@ -126,7 +131,7 @@ function makeFakeMarkdown(theme: Record<string, unknown> = {}) {
 }
 
 describe("installFencelessCodeBlocks", () => {
-	it("只接管 code token：其它 token 连参数一起原样转给内置渲染器", () => {
+	it("only code tokens are taken over: other tokens forward verbatim with their args", () => {
 		const { FakeMarkdown, calls } = makeFakeMarkdown();
 		assert.equal(installFencelessCodeBlocks({ Markdown: FakeMarkdown, measure, wrap }), true);
 
@@ -136,7 +141,7 @@ describe("installFencelessCodeBlocks", () => {
 		assert.deepEqual(calls.forwarded, [[{ type: "paragraph" }, 12, "space", context]]);
 	});
 
-	it("code token 渲染成无围栏的行，并把 lang 交给实例主题上的高亮", () => {
+	it("a code token renders into fenceless rows, and lang reaches the highlight on the instance theme", () => {
 		const { FakeMarkdown } = makeFakeMarkdown({
 			codeBlockIndent: "  ",
 			highlightCode: (code: string, lang?: string) => [`<${lang}>${code}`],
@@ -148,20 +153,20 @@ describe("installFencelessCodeBlocks", () => {
 		]);
 	});
 
-	it("采信实例 theme 上的 codeBlockIndent", () => {
+	it("the instance theme's codeBlockIndent is honored", () => {
 		const { FakeMarkdown } = makeFakeMarkdown({ codeBlockIndent: "    " });
 		installFencelessCodeBlocks({ Markdown: FakeMarkdown, measure, wrap });
 		assert.deepEqual(new FakeMarkdown().renderToken({ type: "code", text: "a" }, 6), ["    a"]);
 	});
 
-	it("装了两次只包一层（/reload 幂等）", () => {
+	it("installed twice, wrapped once (/reload idempotent)", () => {
 		const { FakeMarkdown } = makeFakeMarkdown({ codeBlockIndent: "  " });
 		assert.equal(installFencelessCodeBlocks({ Markdown: FakeMarkdown, measure, wrap }), true);
 		assert.equal(installFencelessCodeBlocks({ Markdown: FakeMarkdown, measure, wrap }), false);
 		assert.deepEqual(new FakeMarkdown().renderToken({ type: "code", text: "a" }, 4), ["  a"]);
 	});
 
-	it("nextType 不是 space 时补一个空行", () => {
+	it("a non-space nextType gets a blank row appended", () => {
 		const { FakeMarkdown } = makeFakeMarkdown({ codeBlockIndent: "  " });
 		installFencelessCodeBlocks({ Markdown: FakeMarkdown, measure, wrap });
 
@@ -169,7 +174,7 @@ describe("installFencelessCodeBlocks", () => {
 		assert.deepEqual(new FakeMarkdown().renderToken({ type: "code", text: "a" }, 3, "paragraph"), ["  a", ""]);
 	});
 
-	it("原型没有 renderToken 时什么都不做、不抛", () => {
+	it("a prototype without renderToken → nothing happens, no throw", () => {
 		const Markdown = { prototype: {} as Record<string | symbol, unknown> };
 		assert.equal(installFencelessCodeBlocks({ Markdown, measure, wrap }), false);
 		assert.equal(Object.keys(Markdown.prototype).length, 0);

@@ -1,16 +1,19 @@
 /**
- * Tests for working-indicator/index.ts — 「长提示词异步请模型压成一句话」这条链路。
+ * Tests for working-indicator/index.ts — the "overlong prompt asynchronously asks the model to
+ * compress it to one line" path.
  *
  * Run with:  node --test clients/pi/extensions/working-indicator/index.test.ts
  *
- * pi 自己的扩展加载器真的加载 `index.ts`（所以 `./summary-request.ts` 的 import、
- * 事件注册面都在覆盖范围内），假的是扩展外面的一切：ctx（录制 `setWorkingMessage`
- * 与 `modelRegistry.complete`）和事件总线的另一端。模型调用是手动 resolve 的
- * promise，于是「旧请求回来时新提示词已经就位」这类时序能被精确摆出来。
+ * pi's own extension loader really loads `index.ts` (so the `./summary-request.ts` import and
+ * the registered event surface are covered); everything outside the extension is faked: ctx
+ * (recording `setWorkingMessage` and `modelRegistry.complete`) and the other end of the event
+ * bus. Model calls are manually resolved promises, so timings like "the old request returns
+ * after the new prompt is already in place" can be staged exactly.
  *
- * 终端宽度：`process.stdout.columns` 在测试进程里是 undefined，`terminalWidth()` 退回
- * 80；于是可用宽度 = min(40 - 2, 76 - 34 - 1 - 2) = 38 列，触发线就是 38 列（默认倍数 1，
- * 放不下一列就请求）。用例里的长提示词都远超它、短提示词都远低于它。
+ * Terminal width: `process.stdout.columns` is undefined in the test process, so
+ * `terminalWidth()` falls back to 80; the available width becomes min(40 - 2, 76 - 34 - 1 - 2)
+ * = 38 columns and the trigger line is 38 (default ratio 1 — one column over and it requests).
+ * The long prompts in these cases are far above it, the short ones far below.
  */
 
 import assert from "node:assert/strict";
@@ -28,30 +31,34 @@ import {
 } from "./spinner-frames.ts";
 
 /**
- * 摘要失败重试的延时（与下面写进 `PI_WORKING_SUMMARY_RETRY_MS` 的值一致）。用例靠它
- * 分两半断言：「延时内不该重试」/「延时后重试了一次」。300ms 比默认 3s 快一个数量级，
- * 又足够宽裕，不会被慢机器上的调度抖动搔成假阴性。
+ * Retry delay for a failed summary (matches the `PI_WORKING_SUMMARY_RETRY_MS` value set below).
+ * Cases assert in two halves on it: "no retry inside the delay" / "one retry after". 300ms is
+ * an order of magnitude faster than the 3s default, yet comfortable enough that slow-machine
+ * scheduling jitter cannot flake it.
  */
 const RETRY_DELAY_MS = 300;
-// index.ts 的重试延时是**模块级常量**，必须在扩展第一次被加载之前设置（pi 的加载器
-// 只会读一次）；下面所有用例共用这个值。
+// index.ts's retry delay is a **module-level constant** — it must be set before the extension is first loaded (pi's loader
+// reads it only once); every case below shares this value.
 process.env.PI_WORKING_SUMMARY_RETRY_MS = String(RETRY_DELAY_MS);
 
 const EXTENSION_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
-const SKIP = "找不到本机 pi 的库入口（装过 pi 才有）";
+const SKIP = "could not find the local pi library entry (requires an installed pi)";
 
 /**
- * pi 的库入口（非 CLI）：bundle 是 `pi` 实际跑的形态，dist 是 node 构建形态。
+ * pi's library entry (not the CLI): bundle is the shape `pi` actually runs, dist is the node
+ * build shape.
  *
- * 先从 `pi` 可执行文件反查**真正的安装位置**（pnpm/npm 的 shim 脚本里留有
- * `# cmd-shim-target=<绝对路径>`；npm 在 Unix 上则是符号链接，两种都试），再退回
- * `~/.pi/agent/npm` 那份副本 —— 后者是**扩展包的安装根**，`pi update --extensions` 会用
- * `--config.auto-install-peers=false` 把自动装进去的 `@earendil-works/pi-*` 同伴包剪掉，
- * 于是那份副本只剩空壳（文件都在、import 报 `ERR_MODULE_NOT_FOUND`；2026-09 升
- * pi-subagents 0.68.0 时实测踩到）。
+ * First back-track from the `pi` executable to **the real install location** (pnpm/npm shim
+ * scripts keep a `# cmd-shim-target=<abs path>` line; npm is a symlink on Unix — both tried),
+ * then fall back to the `~/.pi/agent/npm` copy — the latter is **the extension packages'
+ * install root**, and `pi update --extensions` prunes the auto-installed `@earendil-works/pi-*`
+ * companions with `--config.auto-install-peers=false`, leaving that copy a hollow shell (files
+ * present, imports fail with `ERR_MODULE_NOT_FOUND`; hit for real upgrading pi-subagents
+ * 0.68.0 in 2026-09).
  *
- * 判定方式是**能不能真 import**，不是路径存不存在 —— 只有真 import 一次才分得清空壳。
- * 全都不行就返回 undefined，调用方整体 skip（不假装通过）。
+ * The check is **whether it really imports**, not whether the path exists — only an actual
+ * import distinguishes the hollow shell. If all fail → undefined, and the caller skips
+ * wholesale (never fakes a pass).
  */
 async function findPiLibraryEntry(): Promise<string | undefined> {
 	const candidates: string[] = [];
@@ -61,17 +68,17 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 		if (!dir) continue;
 		const shimPath = path.join(dir, "pi");
 		try {
-			// npm 的 shim 是符号链接
+			// npm's shim is a symlink
 			const real = fs.realpathSync(shimPath);
 			if (real !== shimPath) candidates.push(path.join(path.dirname(real), "index.js"));
 		} catch {
-			// 不是符号链接 / 不存在：看下面的 shim 脚本
+			// not a symlink / does not exist: look at the shim script below
 		}
 		try {
 			const match = /^# cmd-shim-target=(.+)$/m.exec(fs.readFileSync(shimPath, "utf8"));
 			if (match?.[1]) candidates.push(path.join(path.dirname(match[1].trim()), "index.js"));
 		} catch {
-			// 读不到这个 shim：跳过
+			// cannot read this shim: skip it
 		}
 	}
 
@@ -84,7 +91,7 @@ async function findPiLibraryEntry(): Promise<string | undefined> {
 			await import(pathToFileURL(candidate).href);
 			return candidate;
 		} catch {
-			// 空壳副本：换下一个候选
+			// a hollow-shell copy: try the next candidate
 		}
 	}
 	return undefined;
@@ -117,34 +124,34 @@ function createTestBus(): TestBus {
 	};
 }
 
-/** 一次 `modelRegistry.complete` 调用的记录。 */
+/** The record of one `modelRegistry.complete` call. */
 interface CompleteCall {
-	/** 请求提示词（user 消息里的文本）。 */
+	/** The request prompt (the user message's text). */
 	prompt: string;
 	maxTokens: number | undefined;
 	temperature: number | undefined;
-	/** 手动放行这次调用。 */
+	/** Manually release this call. */
 	resolve: (text: string) => void;
-	/** 让这次调用失败（模型报错 / 超时）。 */
+	/** Make this call fail (model error / timeout). */
 	reject: (error: Error) => void;
 }
 
 interface Recorder {
 	completes: CompleteCall[];
-	/** 每次 `setWorkingMessage(<string>)` 记一条。 */
+	/** One record per `setWorkingMessage(<string>)`. */
 	workingMessages: string[];
-	/** 无参 `setWorkingMessage()`（回合结束恢复默认）次数。 */
+	/** Count of no-arg `setWorkingMessage()` calls (restoring the default at turn end). */
 	resets: number;
 }
 
 interface ContextOptions {
-	/** 主题 `fg` 实现；缺省恒等（保持既有布局用例的宽度口径）。 */
+	/** The theme `fg` implementation; defaults to identity (keeps the width accounting of the existing layout cases). */
 	themeFg?: (color: string, text: string) => string;
-	/** 每次 `setWorkingIndicator` 记一条（`undefined` = 无参调用，即恢复 pi 默认帧）。 */
+	/** One record per `setWorkingIndicator` (`undefined` = the no-arg call, i.e. restore pi's default frames). */
 	onIndicator?: (options: { frames?: string[]; intervalMs?: number } | undefined) => void;
 }
 
-/** 取请求上下文里的 user 文本（请求体形状由 `summary-request.ts` 决定）。 */
+/** The user text inside a request context (the body shape is owned by `summary-request.ts`). */
 function promptTextOf(context: unknown): string {
 	const messages = (context as { messages?: Array<{ content?: Array<{ text?: string }> }> }).messages ?? [];
 	return messages.map((message) => message.content?.map((block) => block.text ?? "").join("") ?? "").join("");
@@ -199,7 +206,7 @@ interface LoadedExtension {
 	errors: Array<{ path: string; error: string }>;
 }
 
-/** 用 pi 自己的加载器加载本扩展（`./summary-request.ts` 等 import 也一起验证）。 */
+/** Load this extension with pi's own loader (verifying `./summary-request.ts` imports too). */
 async function loadExtension(workspace: { agentDir: string; projectDir: string }): Promise<LoadedExtension> {
 	const pi = (await import(pathToFileURL(piEntry as string).href)) as {
 		discoverAndLoadExtensions: (
@@ -215,7 +222,7 @@ async function loadExtension(workspace: { agentDir: string; projectDir: string }
 		workspace.agentDir,
 		createTestBus(),
 	);
-	assert.deepEqual(loaded.errors, [], "pi 的扩展加载器不应该报错");
+	assert.deepEqual(loaded.errors, [], "pi's extension loader must not error");
 	assert.equal(loaded.extensions.length, 1);
 	const extension = loaded.extensions[0];
 	assert.ok(extension);
@@ -232,34 +239,34 @@ function handlersOf(extension: LoadedExtension): {
 	const agentStart = extension.handlers.get("agent_start")?.[0];
 	const agentSettled = extension.handlers.get("agent_settled")?.[0];
 	const shutdown = extension.handlers.get("session_shutdown")?.[0];
-	assert.ok(input, "应该注册了 input");
-	assert.ok(agentStart, "应该注册了 agent_start");
-	assert.ok(agentSettled, "应该注册了 agent_settled");
-	assert.ok(shutdown, "应该注册了 session_shutdown");
+	assert.ok(input, "should have registered input");
+	assert.ok(agentStart, "should have registered agent_start");
+	assert.ok(agentSettled, "should have registered agent_settled");
+	assert.ok(shutdown, "should have registered session_shutdown");
 	return { input, agentStart, agentSettled, shutdown };
 }
 
-/** 等谓词成立；超时把「在等什么」一并报出来。 */
+/** Wait for the predicate; a timeout reports what it was waiting on. */
 async function waitFor(predicate: () => boolean, what: string, timeoutMs = 5_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
-	throw new Error(`等不到：${what}（超时 ${timeoutMs}ms）`);
+	throw new Error(`timed out waiting for: ${what} (${timeoutMs}ms)`);
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** 远超 76 列触发线的多行中文提示词。 */
+/** A multi-line prompt far beyond the 38-column trigger line. */
 const LONG_PROMPT = [
-	"帮我优化一下 working 行尾的提示词摘要",
-	"现在长提示词被生硬地截断，看不出在干什么",
-	"希望超过可显示宽度时让模型压成一句话",
-	"而且这个请求要和主任务并行，不要互相影响",
+	"optimize the prompt summary at the working line's tail",
+	"long prompts get clipped mid-word right now and you cannot tell what is running",
+	"want the model to compress them into one line when they exceed the display width",
+	"and this request must run in parallel with the main task, not interfere with it",
 ].join("\n");
 
-test("长提示词异步请求一次摘要，回来后替换行尾原文；请求不阻塞主回合", { skip, timeout: 30_000 }, async () => {
+test("a long prompt asynchronously requests one summary, then replaces the row-tail original; the request does not block the main turn", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -270,43 +277,43 @@ test("长提示词异步请求一次摘要，回来后替换行尾原文；请�
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
 
-		assert.equal(recorder.completes.length, 1, "长提示词应该发一次摘要请求");
+		assert.equal(recorder.completes.length, 1, "a long prompt should send one summary request");
 		const call = recorder.completes[0];
 		assert.ok(call);
-		// 请求里带上了算好的目标长度（38 列可用 × 0.9 = 34）与列宽口径。
+		// the request carries the computed target length (38 available × 0.9 = 34) and the column accounting.
 		assert.match(call.prompt, /34 display columns/);
 		assert.match(call.prompt, /CJK\/full-width character counts as 2 columns/);
-		// 压平后的原文整段都在（多行 → 一句）。
-		assert.ok(call.prompt.includes("帮我优化一下 working 行尾的提示词摘要"));
-		// 不传 temperature：本机这些路由在 0 温度下会退化成停不下来的长思考（实测）。
+		// the flattened original is embedded whole (multi-line → one sentence).
+		assert.ok(call.prompt.includes("optimize the prompt summary at the working line's tail"));
+		// no temperature passed: these routes degenerate into unstoppable long thinking at 0 (measured).
 		assert.equal(call.temperature, undefined);
-		// maxTokens 必须容下强制 thinking（网关给这些路由写死了 thinking: enabled，关不掉）。
-		assert.ok((call.maxTokens ?? 0) >= 512, `maxTokens 应给 thinking 留足份额，实际 ${call.maxTokens}`);
+		// maxTokens must leave room for forced thinking (the gateway hard-codes thinking: enabled on these routes).
+		assert.ok((call.maxTokens ?? 0) >= 512, `maxTokens must leave room for thinking; got ${call.maxTokens}`);
 
-		// 摘要还没回来：先显示的是截断后的原文。
+		// the summary has not come back yet: the truncated original shows first.
 		const before = recorder.workingMessages.at(-1) ?? "";
 		assert.match(before, /✦ /);
-		assert.ok(!before.includes("模型压缩"), "模型还没回包时不该凭空出现摘要");
+		assert.ok(!before.includes("Condense the long prompt"), "no summary may appear out of thin air before the model replies");
 
-		call.resolve("把行尾长提示词交给模型压成一句话");
+		call.resolve("Condense the long prompt at the tail into one line");
 
 		await waitFor(
-			() => (recorder.workingMessages.at(-1) ?? "").includes("把行尾长提示词交给模型压成一句话"),
-			"摘要替换成模型返回的一句话",
+			() => (recorder.workingMessages.at(-1) ?? "").includes("Condense the long prompt at the tail into one line"),
+			"the summary is replaced by the model's one-liner",
 		);
 		const after = recorder.workingMessages.at(-1) ?? "";
-		assert.ok(after.includes("✦ "), "摘要仍带 `✦ ` 前缀");
-		assert.ok(!after.includes("希望超过可显示宽度时"), "摘要应该顶掉原文，而不是两者并存");
+		assert.ok(after.includes("✦ "), "the summary still carries the `✦ ` prefix");
+		assert.ok(!after.includes("want the model to"), "the summary should replace the original, not coexist with it");
 
 		await agentSettled({}, ctx);
-		assert.equal(recorder.resets, 1, "回合结束应恢复 pi 默认文案");
+		assert.equal(recorder.resets, 1, "the turn's end should restore pi's default text");
 		await shutdown({}, ctx);
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("请求不阻塞 input：模型永不回包时 input handler 也立刻返回", { skip, timeout: 30_000 }, async () => {
+test("the request does not block input: the input handler returns immediately even when the model never replies", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -317,10 +324,10 @@ test("请求不阻塞 input：模型永不回包时 input handler 也立刻返�
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
 		const elapsed = Date.now() - startedAt;
-		assert.equal(recorder.completes.length, 1, "请求已发出");
-		assert.ok(elapsed < 500, `input handler 不能等模型（耗时 ${elapsed}ms）`);
+		assert.equal(recorder.completes.length, 1, "the request has been sent");
+		assert.ok(elapsed < 500, `the input handler must not wait on the model (took ${elapsed}ms)`);
 
-		// 请求一直挂着也不影响后续事件：回合照常结束。
+		// a hung request does not affect later events: the turn ends normally.
 		await handlersOf(extension).agentSettled({}, ctx);
 		await shutdown({}, ctx);
 	} finally {
@@ -328,7 +335,7 @@ test("请求不阻塞 input：模型永不回包时 input handler 也立刻返�
 	}
 });
 
-test("短提示词不请求；同一条消息重复 input 也不重复请求", { skip, timeout: 30_000 }, async () => {
+test("a short prompt does not request; a repeated input of the same message does not re-request", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -338,44 +345,44 @@ test("短提示词不请求；同一条消息重复 input 也不重复请求", {
 		await input({ text: "hi", source: "interactive" }, ctx);
 		await agentStart({}, ctx);
 		await delay(50);
-		assert.equal(recorder.completes.length, 0, "短提示词整段放得下，不该请求");
+		assert.equal(recorder.completes.length, 0, "a short prompt fits whole — must not request");
 
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 1, "第一次长提示词请求");
-		// 扩展命令的 sendUserMessage 会让同一条消息走两次 input。
+		await waitFor(() => recorder.completes.length === 1, "the first long-prompt request");
+		// an extension command's sendUserMessage runs the same message through input twice.
 		await input({ text: LONG_PROMPT, source: "extension" }, ctx);
 		await delay(50);
-		assert.equal(recorder.completes.length, 1, "同一条文本重复触发不该重新请求");
+		assert.equal(recorder.completes.length, 1, "a repeated fire of the same text must not request again");
 
-		// 换一条真正不同的长提示词才会发第二次。
-		await input({ text: `${LONG_PROMPT}（第二版）`, source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 2, "新提示词的第二次请求");
-		assert.ok(recorder.completes[1]?.prompt.includes("（第二版）"));
+		// only a genuinely different long prompt sends a second request.
+		await input({ text: `${LONG_PROMPT} (v2)`, source: "interactive" }, ctx);
+		await waitFor(() => recorder.completes.length === 2, "the second request for the new prompt");
+		assert.ok(recorder.completes[1]?.prompt.includes(" (v2)"));
 
-		// 会话被替换后，同一条文本必须重新请求（去重键不能跨会话留着）。
+		// after a session replace, the same text must request again (the dedupe key must not survive).
 		await shutdown({}, ctx);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 3, "新会话里的同一条提示词");
+		await waitFor(() => recorder.completes.length === 3, "the same prompt in a new session");
 	} finally {
 		workspace.cleanup();
 	}
 });
 
-test("触发线就是可用宽度：39 列（放不下一列）请求，38 列（刚好放得下）不请求", { skip, timeout: 30_000 }, async () => {
+test("the trigger line is the available width: 39 columns (one over) requests, 38 (exactly fits) does not", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { input, agentStart, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const ctx = createContext(recorder);
-		// 测试进程里终端宽度退回 80 → 摘要可用 38 列（推导见文件头注释）。
+		// terminal width falls back to 80 in the test process → 38 available columns (derivation in the file header).
 		await input({ text: "a".repeat(38), source: "interactive" }, ctx);
 		await agentStart({}, ctx);
 		await delay(50);
-		assert.equal(recorder.completes.length, 0, "刚好放得下不该请求");
+		assert.equal(recorder.completes.length, 0, "exactly fitting must not request");
 
 		await input({ text: "a".repeat(39), source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 1, "放不下一列就该请求");
+		await waitFor(() => recorder.completes.length === 1, "one column over should request");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -383,7 +390,7 @@ test("触发线就是可用宽度：39 列（放不下一列）请求，38 列�
 	}
 });
 
-test("新提示词作废旧请求：旧摘要回来也不会顶掉新的", { skip, timeout: 30_000 }, async () => {
+test("a new prompt voids the old request: a late old summary never displaces the new one", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -392,22 +399,22 @@ test("新提示词作废旧请求：旧摘要回来也不会顶掉新的", { ski
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "第一条提示词的请求");
-		await input({ text: `${LONG_PROMPT} 改成模型压缩`, source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 2, "第二条提示词的请求");
+		await waitFor(() => recorder.completes.length === 1, "the first prompt's request");
+		await input({ text: `${LONG_PROMPT} with model compression`, source: "interactive" }, ctx);
+		await waitFor(() => recorder.completes.length === 2, "the second prompt's request");
 
-		// 旧请求后回来：必须被丢弃（abort + 序号两道护栏）。
-		recorder.completes[0]?.resolve("第一条的摘要");
+		// the old request returning late must be dropped (abort + generation guards).
+		recorder.completes[0]?.resolve("first prompt's summary");
 		await delay(50);
 		assert.ok(
-			!recorder.workingMessages.some((message) => message.includes("第一条的摘要")),
-			"过期摘要绝不能显示",
+			!recorder.workingMessages.some((message) => message.includes("first prompt's summary")),
+			"a stale summary must never display",
 		);
 
-		recorder.completes[1]?.resolve("第二条的摘要");
+		recorder.completes[1]?.resolve("second prompt's summary");
 		await waitFor(
-			() => (recorder.workingMessages.at(-1) ?? "").includes("第二条的摘要"),
-			"当前提示词的摘要",
+			() => (recorder.workingMessages.at(-1) ?? "").includes("second prompt's summary"),
+			"the current prompt's summary",
 		);
 
 		await shutdown({}, ctx);
@@ -416,7 +423,7 @@ test("新提示词作废旧请求：旧摘要回来也不会顶掉新的", { ski
 	}
 });
 
-test("摘要超长只截断、不追问：成功返回后不会二次请求", { skip, timeout: 30_000 }, async () => {
+test("an overlong summary is only truncated, never re-asked: a successful reply never triggers a second request", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -425,19 +432,19 @@ test("摘要超长只截断、不追问：成功返回后不会二次请求", { 
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "摘要请求");
-		const overlong = "这是一段远超可用宽度的模型摘要".repeat(20);
+		await waitFor(() => recorder.completes.length === 1, "the summary request");
+		const overlong = "This is a model summary far wider than the available width. ".repeat(20);
 		recorder.completes[0]?.resolve(overlong);
 
 		await waitFor(
 			() => (recorder.workingMessages.at(-1) ?? "").includes("…"),
-			"超长摘要被截断补省略号",
+			"the overlong summary is truncated with an ellipsis",
 		);
 		const message = recorder.workingMessages.at(-1) ?? "";
-		assert.ok(!message.includes("这是一段远超可用宽度的模型摘要这是一段"), "超长摘要应被截掉大半");
-		// 等过一个 1s tick，确认没有任何「第二次请求」。
+		assert.ok(!message.includes("This is a model summary far wider than the available width. This is a"), "an overlong summary should lose most of its body");
+		// wait out a 1s tick to confirm no "second request" ever happens.
 		await delay(1_200);
-		assert.equal(recorder.completes.length, 1, "回来的摘要再长也不重试");
+		assert.equal(recorder.completes.length, 1, "an overlong reply still does not retry");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -445,7 +452,7 @@ test("摘要超长只截断、不追问：成功返回后不会二次请求", { 
 	}
 });
 
-test("首次失败静默退回截断后的原文，延时后自动重试一次；重试成功就换上摘要", { skip, timeout: 30_000 }, async () => {
+test("a first failure silently falls back to the truncated original, then auto-retries once after the delay; a successful retry swaps in the summary", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -454,22 +461,22 @@ test("首次失败静默退回截断后的原文，延时后自动重试一次�
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		await waitFor(() => recorder.completes.length === 1, "the summary request");
 		recorder.completes[0]?.reject(new Error("boom"));
 
-		// 重试还在延时里：这一格先退回截断后的原文（不空着、也不急着重新发）。
+		// the retry is still inside its delay: the cell falls back to the truncated original (not blank, not re-requested early).
 		await delay(Math.floor(RETRY_DELAY_MS / 3));
 		const fallback = recorder.workingMessages.at(-1) ?? "";
-		assert.ok(fallback.includes("✦ "), "失败后仍显示摘要段（这里是截断后的原文）");
-		assert.ok(fallback.includes("帮我优化"), "原文前缀还在");
-		assert.equal(recorder.completes.length, 1, "延时未到不该重试");
+		assert.ok(fallback.includes("✦ "), "the summary segment still shows after a failure (the truncated original here)");
+		assert.ok(fallback.includes("optimize the prompt"), "the original's prefix is still there");
+		assert.equal(recorder.completes.length, 1, "must not retry before the delay is up");
 
-		await waitFor(() => recorder.completes.length === 2, "失败后的自动重试");
-		assert.equal(recorder.completes[1]?.prompt, recorder.completes[0]?.prompt, "重试问的是同一个问题");
-		recorder.completes[1]?.resolve("把行尾长提示词交给模型压成一句话");
+		await waitFor(() => recorder.completes.length === 2, "the automatic retry after a failure");
+		assert.equal(recorder.completes[1]?.prompt, recorder.completes[0]?.prompt, "the retry asks the same question");
+		recorder.completes[1]?.resolve("Condense the long prompt at the tail into one line");
 		await waitFor(
-			() => (recorder.workingMessages.at(-1) ?? "").includes("把行尾长提示词交给模型压成一句话"),
-			"重试回来的摘要上屏",
+			() => (recorder.workingMessages.at(-1) ?? "").includes("Condense the long prompt at the tail into one line"),
+			"the retry's summary reaches the screen",
 		);
 
 		await shutdown({}, ctx);
@@ -478,7 +485,7 @@ test("首次失败静默退回截断后的原文，延时后自动重试一次�
 	}
 });
 
-test("空回复（只出了 thinking、没有正文）也算失败：同样重试一次", { skip, timeout: 30_000 }, async () => {
+test("an empty reply (thinking only, no body) also counts as failure: retried the same way", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -487,13 +494,13 @@ test("空回复（只出了 thinking、没有正文）也算失败：同样重�
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "摘要请求");
-		recorder.completes[0]?.resolve(""); // 清洗后空串（真实场景：只出了 thinking）
+		await waitFor(() => recorder.completes.length === 1, "the summary request");
+		recorder.completes[0]?.resolve(""); // cleans to empty (real-world case: only thinking came back)
 
-		await waitFor(() => recorder.completes.length === 2, "空回复后的自动重试");
+		await waitFor(() => recorder.completes.length === 2, "the automatic retry after an empty reply");
 		assert.ok(
-			(recorder.workingMessages.at(-1) ?? "").includes("帮我优化"),
-			"空回复什么都没换上，仍是截断后的原文",
+			(recorder.workingMessages.at(-1) ?? "").includes("optimize the prompt"),
+			"the empty reply swapped nothing in — still the truncated original",
 		);
 
 		await shutdown({}, ctx);
@@ -502,7 +509,7 @@ test("空回复（只出了 thinking、没有正文）也算失败：同样重�
 	}
 });
 
-test("重试也失败就彻底放弃：每个提示词最多两次请求", { skip, timeout: 30_000 }, async () => {
+test("a second failure gives up for good: at most two requests per prompt", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -511,14 +518,14 @@ test("重试也失败就彻底放弃：每个提示词最多两次请求", { ski
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		await waitFor(() => recorder.completes.length === 1, "the summary request");
 		recorder.completes[0]?.reject(new Error("boom-1"));
-		await waitFor(() => recorder.completes.length === 2, "失败后的自动重试");
+		await waitFor(() => recorder.completes.length === 2, "the automatic retry after a failure");
 		recorder.completes[1]?.reject(new Error("boom-2"));
 
 		await delay(RETRY_DELAY_MS * 2);
-		assert.equal(recorder.completes.length, 2, "第二次失败后不再重试");
-		assert.ok((recorder.workingMessages.at(-1) ?? "").includes("帮我优化"), "仍显示截断后的原文");
+		assert.equal(recorder.completes.length, 2, "no more retries after the second failure");
+		assert.ok((recorder.workingMessages.at(-1) ?? "").includes("optimize the prompt"), "still the truncated original");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -526,7 +533,7 @@ test("重试也失败就彻底放弃：每个提示词最多两次请求", { ski
 	}
 });
 
-test("新提示词作废待重试的那次：不会为旧提示词补发", { skip, timeout: 30_000 }, async () => {
+test("a new prompt voids the pending retry: nothing is re-sent for the old prompt", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -535,18 +542,18 @@ test("新提示词作废待重试的那次：不会为旧提示词补发", { ski
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "第一条提示词的请求");
+		await waitFor(() => recorder.completes.length === 1, "the first prompt's request");
 		recorder.completes[0]?.reject(new Error("boom"));
 
-		// 先等失败落地、重试定时器真的排上，再换提示词 —— 否则被下面的 `seq` 护栏挡住了，
-		// 根本没机会验证「待重试的那次会被取消」。
+		// let the failure land and the retry timer actually get armed before switching prompts — otherwise the `seq` guard below blocks it
+		// and there is no chance to verify "the pending retry gets cancelled".
 		await delay(Math.floor(RETRY_DELAY_MS / 6));
-		await input({ text: `${LONG_PROMPT}（第二版）`, source: "interactive" }, ctx);
-		await waitFor(() => recorder.completes.length === 2, "新提示词的请求");
-		assert.ok(recorder.completes[1]?.prompt.includes("（第二版）"));
+		await input({ text: `${LONG_PROMPT} (v2)`, source: "interactive" }, ctx);
+		await waitFor(() => recorder.completes.length === 2, "the new prompt's request");
+		assert.ok(recorder.completes[1]?.prompt.includes(" (v2)"));
 
 		await delay(RETRY_DELAY_MS * 2);
-		assert.equal(recorder.completes.length, 2, "旧提示词的待重试定时器应该被清掉");
+		assert.equal(recorder.completes.length, 2, "the old prompt's pending-retry timer should be cleared");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -554,7 +561,7 @@ test("新提示词作废待重试的那次：不会为旧提示词补发", { ski
 	}
 });
 
-test("回合结束作废待重试的那次：不会在回合外补发请求", { skip, timeout: 30_000 }, async () => {
+test("a turn end voids the pending retry: no request goes out outside a turn", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -563,14 +570,14 @@ test("回合结束作废待重试的那次：不会在回合外补发请求", { 
 		const ctx = createContext(recorder);
 		await input({ text: LONG_PROMPT, source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.completes.length === 1, "摘要请求");
+		await waitFor(() => recorder.completes.length === 1, "the summary request");
 		recorder.completes[0]?.reject(new Error("boom"));
 
-		// 同上：先让重试定时器排上，再结束回合（`agentSettled` → `stopActivity` → 清定时器）。
+		// same as above: let the retry timer arm, then end the turn (`agentSettled` → `stopActivity` → timer cleared).
 		await delay(Math.floor(RETRY_DELAY_MS / 6));
-		await agentSettled({}, ctx); // 回合结束 → stopActivity → 清掉待重试的定时器
+		await agentSettled({}, ctx); // turn end → stopActivity → the pending retry timer cleared
 		await delay(RETRY_DELAY_MS * 2);
-		assert.equal(recorder.completes.length, 1, "回合结束后不该再有重试");
+		assert.equal(recorder.completes.length, 1, "no retry should fire after the turn ends");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -579,10 +586,10 @@ test("回合结束作废待重试的那次：不会在回合外补发请求", { 
 });
 
 // ---------------------------------------------------------------------------
-// spinner 幻彩帧（`spinner-frames.ts` + index.ts 的三个安装时机）
+// spinner rainbow frames (`spinner-frames.ts` + index.ts's three install moments)
 // ---------------------------------------------------------------------------
 
-/** 七色假主题；`colors` 就地改就是「换肤」（`theme.fg` 的 live proxy 替身）。 */
+/** A seven-color fake theme; mutating `colors` in place IS "the skin swap" (a stand-in for `theme.fg`'s live proxy). */
 function createMutableTheme(): { colors: Record<string, string>; fg: (color: string, text: string) => string } {
 	const colors: Record<string, string> = Object.fromEntries(
 		SPINNER_COLOR_TOKENS.map((token, index) => [token, `<c${index}>`]),
@@ -590,10 +597,10 @@ function createMutableTheme(): { colors: Record<string, string>; fg: (color: str
 	return { colors, fg: (color, text) => `${colors[color] ?? `<${color}>`}${text}` };
 }
 
-/** 一次 `setWorkingIndicator` 调用的记录（`undefined` = 无参调用，即恢复 pi 默认帧）。 */
+/** The record of one `setWorkingIndicator` call (`undefined` = the no-arg call, i.e. restore pi's default frames). */
 type IndicatorCall = { frames?: string[]; intervalMs?: number } | undefined;
 
-test("回合开始装上幻彩帧表：十帧盲文 × 七色、间隔 80ms、每色 19 帧（≈1.5s）", { skip, timeout: 30_000 }, async () => {
+test("turn start installs the rainbow table: ten braille frames × seven colors, 80ms interval, 19 frames per color (≈1.5s)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -606,10 +613,10 @@ test("回合开始装上幻彩帧表：十帧盲文 × 七色、间隔 80ms、�
 		await agentStart({}, ctx);
 
 		const installed = calls.at(-1);
-		assert.ok(installed, "agent_start 应该装一次 indicator");
+		assert.ok(installed, "agent_start should install the indicator once");
 		assert.equal(installed.intervalMs, SPINNER_INTERVAL_MS);
 		const frames = installed.frames as string[];
-		// 帧表周期 = lcm(10, 19 × 7) = 1330：既是一轮调色板的整数倍，也是盲文圈长的整数倍（回绕不跳色）。
+		// table period = lcm(10, 19 × 7) = 1330: an integer multiple of both one palette lap and the braille revolution (no color jump at wraparound).
 		assert.equal(frames.length, 1330);
 		assert.equal(frames.length % (DEFAULT_FRAMES_PER_COLOR * SPINNER_COLOR_TOKENS.length), 0);
 		assert.equal(frames.length % SPINNER_FRAMES.length, 0);
@@ -631,36 +638,36 @@ test("回合开始装上幻彩帧表：十帧盲文 × 七色、间隔 80ms、�
 	}
 });
 
-test("换主题后一秒内重装帧表：指纹没变不重装、变了才重装", { skip, timeout: 30_000 }, async () => {
+test("within a second of a theme change the table is reinstalled: unchanged fingerprint → no reinstall, changed → reinstall", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { agentStart, shutdown } = handlersOf(extension);
 		const messageUpdate = extension.handlers.get("message_update")?.[0];
-		assert.ok(messageUpdate, "应该注册了 message_update");
+		assert.ok(messageUpdate, "should have registered message_update");
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const theme = createMutableTheme();
 		const calls: IndicatorCall[] = [];
 		const ctx = createContext(recorder, { themeFg: theme.fg, onIndicator: (o) => calls.push(o) });
 
 		await agentStart({}, ctx);
-		assert.equal(calls.length, 1, "回合开始装一次");
+		assert.equal(calls.length, 1, "installed once at turn start");
 
-		// 主题没变：每个流式 delta 都跑的 refresh 不该反复重装（重装会复位动画相位）。
+		// theme unchanged: the refresh that runs on every streaming delta must not keep reinstalling (a reinstall resets the animation phase).
 		await messageUpdate({ assistantMessageEvent: { type: "text_delta", delta: "hi" } }, ctx);
 		await messageUpdate({ assistantMessageEvent: { type: "text_delta", delta: "!" } }, ctx);
-		assert.equal(calls.length, 1, "指纹没变就不该重装");
+		assert.equal(calls.length, 1, "an unchanged fingerprint must not reinstall");
 
-		// 换肤：下一次 refresh 现读到的新颜色让指纹变化 → 重装。
+		// skin swap: the next refresh re-reads the new colors, the fingerprint changes → reinstall.
 		theme.colors.accent = "<new-accent>";
 		await messageUpdate({ assistantMessageEvent: { type: "text_delta", delta: "?" } }, ctx);
-		assert.equal(calls.length, 2, "换肤后应该重装一次");
+		assert.equal(calls.length, 2, "a skin swap should reinstall once");
 		const refreshed = calls[1]?.frames?.[0] as string;
-		assert.ok(refreshed.startsWith("<new-accent>"), `新帧表应该用新主题的颜色，实际 ${refreshed}`);
+		assert.ok(refreshed.startsWith("<new-accent>"), `the new table should use the new theme's colors; got ${refreshed}`);
 
-		// 再刷新也不会重复装。
+		// further refreshes do not reinstall again.
 		await messageUpdate({ assistantMessageEvent: { type: "text_delta", delta: "?" } }, ctx);
-		assert.equal(calls.length, 2, "同主题下不该再装");
+		assert.equal(calls.length, 2, "must not reinstall under the same theme");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -668,13 +675,13 @@ test("换主题后一秒内重装帧表：指纹没变不重装、变了才重�
 	}
 });
 
-test("问卷结束时补装彩帧（ask-user-question 的冻结会把它换成 pi 默认帧）", { skip, timeout: 30_000 }, async () => {
+test("questionnaire end reinstalls the rainbow (ask-user-question's freeze replaced it with pi's default frames)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { agentStart, shutdown } = handlersOf(extension);
 		const toolEnd = extension.handlers.get("tool_execution_end")?.[0];
-		assert.ok(toolEnd, "应该注册了 tool_execution_end");
+		assert.ok(toolEnd, "should have registered tool_execution_end");
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const theme = createMutableTheme();
 		const calls: IndicatorCall[] = [];
@@ -683,13 +690,13 @@ test("问卷结束时补装彩帧（ask-user-question 的冻结会把它换成 p
 		await agentStart({}, ctx);
 		const afterStart = calls.length;
 
-		// 别的工具结束不碰 indicator（每次工具结束都重装会把动画相位按工具调用切碎）。
+		// a non-questionnaire tool's end must not touch the indicator (reinstalling on every tool end would chop the animation phase by tool call).
 		await toolEnd({ toolCallId: "1", toolName: "bash" }, ctx);
-		assert.equal(calls.length, afterStart, "非问卷工具不该重装");
+		assert.equal(calls.length, afterStart, "a non-questionnaire tool must not reinstall");
 
-		// 问卷结束：补装一次彩帧（questionnaire 的 finally 已经无参恢复成 pi 默认帧）。
+		// questionnaire end: reinstall the rainbow once (the questionnaire's finally already restored pi's default frames with a no-arg call).
 		await toolEnd({ toolCallId: "2", toolName: "ask_user_question" }, ctx);
-		assert.equal(calls.length, afterStart + 1, "问卷结束应该补装");
+		assert.equal(calls.length, afterStart + 1, "questionnaire end should reinstall");
 		assert.equal((calls.at(-1)?.frames as string[]).length, 1330);
 
 		await shutdown({}, ctx);
@@ -698,20 +705,20 @@ test("问卷结束时补装彩帧（ask-user-question 的冻结会把它换成 p
 	}
 });
 
-test("单色主题（NO_COLOR / 恒等 fg）不下发帧表，而是无参交回 pi 默认 spinner", { skip, timeout: 30_000 }, async () => {
+test("a monochrome theme (NO_COLOR / identity fg) issues no table — it hands control back to pi's default spinner with a no-arg call", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { agentStart, shutdown } = handlersOf(extension);
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const calls: IndicatorCall[] = [];
-		// 不传 themeFg：既有 fake ctx 的恒等主题，七个色槽取出来是同一个颜色。
+		// no themeFg passed: the existing fake ctx's identity theme resolves all seven slots to the same color.
 		const ctx = createContext(recorder, { onIndicator: (o) => calls.push(o) });
 
 		await agentStart({}, ctx);
 
-		assert.equal(calls.length, 1, "仍然要交回一次控制权");
-		assert.equal(calls[0], undefined, "单色主题应恢复 pi 默认帧而不是装一张假动画");
+		assert.equal(calls.length, 1, "control must still be handed back once");
+		assert.equal(calls[0], undefined, "a monochrome theme should restore pi's default frames, not install a fake animation");
 
 		await shutdown({}, ctx);
 	} finally {
@@ -720,36 +727,36 @@ test("单色主题（NO_COLOR / 恒等 fg）不下发帧表，而是无参交回
 });
 
 // =============================================================================
-// 弹窗期间冻结重绘（ui_prompt_start / ui_prompt_end）
+// freeze repaints during dialogs (ui_prompt_start / ui_prompt_end)
 // =============================================================================
 
-test("弹窗开始：spinner 冻结成单帧、读秒定时器停（1.2s 内无新文案）", { skip, timeout: 30_000 }, async () => {
+test("dialog start: the spinner freezes to a single frame and the seconds timer stops (no new message within 1.2s)", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { input, agentStart, agentSettled, shutdown } = handlersOf(extension);
 		const promptStart = extension.handlers.get("ui_prompt_start")?.[0];
-		assert.ok(promptStart, "应该注册了 ui_prompt_start");
+		assert.ok(promptStart, "should have registered ui_prompt_start");
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const calls: IndicatorCall[] = [];
 		const ctx = createContext(recorder, { onIndicator: (o) => calls.push(o) });
 
-		await input({ text: "跑一个长命令", source: "interactive" }, ctx);
+		await input({ text: "run a long command", source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.workingMessages.length >= 1, "回合开始后的第一条文案");
+		await waitFor(() => recorder.workingMessages.length >= 1, "the first message after the turn starts");
 
 		await promptStart({}, ctx);
 
-		// 冻结帧：单帧盲文全集字符（与 ask-user-question 同字），accent 上色。
+		// the frozen frame: a single full-block braille char (same char as ask-user-question), accent-colored.
 		const frozen = calls.at(-1);
-		assert.ok(frozen?.frames, "弹窗开始应装冻结帧");
-		assert.equal(frozen.frames.length, 1, "单帧才能停掉 Loader 的 80ms 动画定时器");
-		assert.ok(frozen.frames[0].endsWith("⠿"), "冻结帧应是盲文全集字符");
+		assert.ok(frozen?.frames, "dialog start should install the frozen frame");
+		assert.equal(frozen.frames.length, 1, "only a single frame stops the Loader's 80ms animation timer");
+		assert.ok(frozen.frames[0].endsWith("⠿"), "the frozen frame should be the full-block braille char");
 
-		// 定时器已停：等过一个 TICK（1s）也不该有新文案。
+		// timers stopped: no new message should appear across a whole TICK (1s).
 		const countAtFreeze = recorder.workingMessages.length;
 		await delay(1_200);
-		assert.equal(recorder.workingMessages.length, countAtFreeze, "弹窗期间读秒定时器不该再出文案");
+		assert.equal(recorder.workingMessages.length, countAtFreeze, "the seconds timer must not emit messages during the dialog");
 
 		await agentSettled({}, ctx);
 		await shutdown({}, ctx);
@@ -758,36 +765,36 @@ test("弹窗开始：spinner 冻结成单帧、读秒定时器停（1.2s 内无�
 	}
 });
 
-test("弹窗结束：重装幻彩帧表、重启读秒、立即补刷一次", { skip, timeout: 30_000 }, async () => {
+test("dialog end: reinstall the rainbow table, restart the seconds timer, refresh once immediately", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
 		const { input, agentStart, agentSettled, shutdown } = handlersOf(extension);
 		const promptStart = extension.handlers.get("ui_prompt_start")?.[0];
 		const promptEnd = extension.handlers.get("ui_prompt_end")?.[0];
-		assert.ok(promptStart && promptEnd, "应该注册了 ui_prompt_start / ui_prompt_end");
+		assert.ok(promptStart && promptEnd, "should have registered ui_prompt_start / ui_prompt_end");
 		const recorder: Recorder = { completes: [], workingMessages: [], resets: 0 };
 		const calls: IndicatorCall[] = [];
-		// 用可区分的七色主题：默认恒等主题是单色的，`spinnerPalette` 会返回 null 帧表
-		// （恢复时走无参调用），测不到「重装 1330 帧幻彩」这一步。
+		// a distinguishable seven-color theme: the default identity theme is monochrome and `spinnerPalette` returns a null table
+		// (restoration then takes the no-arg call), so the "reinstall the 1330-frame rainbow" step would be untestable.
 		const theme = createMutableTheme();
 		const ctx = createContext(recorder, { themeFg: theme.fg, onIndicator: (o) => calls.push(o) });
 
-		await input({ text: "跑一个长命令", source: "interactive" }, ctx);
+		await input({ text: "run a long command", source: "interactive" }, ctx);
 		await agentStart({}, ctx);
-		await waitFor(() => recorder.workingMessages.length >= 1, "回合开始后的第一条文案");
+		await waitFor(() => recorder.workingMessages.length >= 1, "the first message after the turn starts");
 
 		await promptStart({}, ctx);
 		await promptEnd({}, ctx);
 
-		// 帧表重装成 1330 帧幻彩（覆盖掉单帧冻结帧）。恢复时的立即 refresh 受 lastMessage
-		// 去重保护：弹窗只持续几毫秒、文案没变就不重发 —— 那是设计行为，不是 bug。
+		// the table is reinstalled to the 1330-frame rainbow (overwriting the single frozen frame). The resume-time immediate refresh is guarded by the lastMessage
+		// dedupe: a dialog lasting milliseconds with unchanged text does not re-emit — designed behavior, not a bug.
 		const restored = calls.at(-1);
-		assert.equal((restored?.frames as string[] | undefined)?.length, 1330, "应重装完整幻彩帧表");
+		assert.equal((restored?.frames as string[] | undefined)?.length, 1330, "the full rainbow table should be reinstalled");
 
-		// 定时器重启：再过 1.2s 应继续出文案。
+		// the timer restarted: messages should resume within another 1.2s.
 		const countAfterResume = recorder.workingMessages.length;
-		await waitFor(() => recorder.workingMessages.length > countAfterResume, "恢复后读秒定时器继续走", 3_000);
+		await waitFor(() => recorder.workingMessages.length > countAfterResume, "the seconds timer keeps running after resume", 3_000);
 
 		await agentSettled({}, ctx);
 		await shutdown({}, ctx);
@@ -796,7 +803,7 @@ test("弹窗结束：重装幻彩帧表、重启读秒、立即补刷一次", { 
 	}
 });
 
-test("回合外的弹窗（无 agent_start）：冻结不崩、结束不起定时器", { skip, timeout: 30_000 }, async () => {
+test("a dialog outside a turn (no agent_start): freeze does not crash, resume starts no timer", { skip, timeout: 30_000 }, async () => {
 	const workspace = makeWorkspace();
 	try {
 		const extension = await loadExtension(workspace);
@@ -808,13 +815,13 @@ test("回合外的弹窗（无 agent_start）：冻结不崩、结束不起定�
 		const calls: IndicatorCall[] = [];
 		const ctx = createContext(recorder, { onIndicator: (o) => calls.push(o) });
 
-		// 没有 agent_start：ctxRef 为 null、turnStartedAt 为 null。
+		// no agent_start: ctxRef is null, turnStartedAt is null.
 		await promptStart({}, ctx);
-		assert.equal(calls.length, 1, "仍应装一次冻结帧");
+		assert.equal(calls.length, 1, "the frozen frame should still be installed once");
 		await promptEnd({}, ctx);
-		// 不该凭空起读秒定时器：等过一个 TICK 也没有文案。
+		// no seconds timer may materialize out of nothing: nothing appears across a TICK.
 		await delay(1_200);
-		assert.equal(recorder.workingMessages.length, 0, "回合外不该有读秒文案");
+		assert.equal(recorder.workingMessages.length, 0, "no seconds-tick message outside a turn");
 
 		await shutdown({}, ctx);
 	} finally {

@@ -1,15 +1,17 @@
 /**
  * Bash Command Collapse Extension
  *
- * 把 bash 工具调用的显示改成用户 2026-09-21 定的形状：命令最多两行（`Run ` 前缀、
- * 行尾溢出换一个 `…`），结果挂在同一棵树下面（`│ ` 续段、`└ ` 只出现一次）。
- * 纯显示层：发给模型的 tool call 参数、session 记录里的原文完全不变。
+ * Reshapes the display of bash tool calls to the form the user specified on 2026-09-21: at most two
+ * lines for the command (`Run ` prefix, overflow at end of line becomes a single `…`), and the result
+ * hangs under the same tree (`│ ` continuation, `└ ` appears exactly once). Purely a display layer:
+ * the tool-call arguments sent to the model and the raw text in the session record are unchanged.
  *
- * ## 目标形状（用户给的样例）
+ * ## Target shape (sample provided by the user)
  *
- * `Run ` 替代 pi 内置的 `$ `；命令最多 **2 个视觉行**，第 2 行**不管溢出多少字符都只把
- * 末尾换成 `…`**（不推进第 3 行）；命令本身更长时在第 2 行下面补一行 `… +N lines`。
- * 这两行的起始列都对齐 `Run ` 里 `n` 那一列（第 3 列）。
+ * `Run ` replaces pi's built-in `$ `; the command gets at most **2 visual lines**, and line 2 **only
+ * replaces its tail with `…` no matter how much overflows** (never advances to a 3rd line); when the
+ * command itself is longer, a `… +N lines` marker is added under line 2. Both lines start aligned to
+ * the `n` column of `Run ` (column 3).
  *
  * ```
  * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
@@ -17,132 +19,156 @@
  *   … +1 lines
  * ```
  *
- * 这是**执行中**的形态：续行与 `… +N lines` 用等宽空格缩进。命令一执行完，这些行的
- * 前缀就换成 `│ `（树接上了），并在 `Run ` 下面开始挂结果：
+ * That is the **in-flight** shape: continuation lines and `… +N lines` use fixed-width space indent.
+ * Once the command finishes, those lines' prefixes switch to `│ ` (the tree connects) and results
+ * start hanging under `Run `:
  *
  * ```
  * Run cd /Users/bachi/Library/pnpm/store/v11/links/@earendil-works/pi-cod
  * │ ing-agent/0.86.0/5813aee6dbf81477902199f3db54e13ab115c8902b3ab00a
  * │ … +1 lines
  * │ … (20 earlier lines, ctrl+o to expand)
- * └ 第一行实质输出
- *   第二行输出
+ * └ first substantive output line
+ *   second output line
  *   Took 2.4s
  * ```
  *
- * `└ ` **只出现一次**，就在除截断提示（`… (N earlier lines, ctrl+o to expand)`）以外的
- * **第一行实质输出**上；它下面的内容行（后续输出、warnings、`Took Xs` 页脚、没有输出时
- * 的 `(no output)`）一律用等宽缩进（`  `）对齐正文列、不再画竖线 —— 树在 `└` 那里
- * 就“落地”了。`└ ` 与它后面的正文之间有 `└ ` 自带的那一个空格。
+ * `└ ` **appears exactly once**, on the **first substantive output line** — everything except the
+ * truncation hint (`… (N earlier lines, ctrl+o to expand)`); content lines below it (further output,
+ * warnings, the `Took Xs` footer, `(no output)` when there is none) all use fixed-width indent (`  `)
+ * to align to the body column and draw no vertical bar — the tree "lands" at `└`. There is one space
+ * between `└ ` and the body after it, supplied by `└ ` itself.
  *
- * **`│` / `└` 是结构符，不是正文**：整棵树的竖线与拐角统一 `muted`，各自**自成一段**
- * SGR（`styleCommandLine` 把前缀的颜色单独闭合在正文之前，`prefixTreeLines` 也只给前缀
- * 上色）—— 前缀绝不继承后面那个 token 的颜色（命令续行后面可能是 string / path / comment
- * 等任意 token，曾经路径那行的 `│` 就跟着 path 色飘了）。
+ * **`│` / `└` are structural glyphs, not body text**: the whole tree's verticals and corners are
+ * uniformly `muted`, each forming **its own SGR segment** (`styleCommandLine` closes the prefix's
+ * color before the body, `prefixTreeLines` likewise colors only the prefix) — a prefix never
+ * inherits the color of the token after it (a command continuation line can be followed by string /
+ * path / comment tokens of any kind; the `│` on a path line once drifted along with the path color).
  *
- * **只有 `Run` 这个词加粗**（`toolTitle` 正常色 + bold），行尾那格间距与整条命令正文一律
- * 不加粗 —— 加粗是 `\x1b[1m…\x1b[22m`，必须紧贴这个词，包住整个前缀会让间距看着变宽
- *（见 `styleCommandPrefix`）。
+ * **Only the word `Run` is bold** (`toolTitle` normal color + bold); the space after it and the
+ * whole command body are not bold — bold is `\x1b[1m…\x1b[22m` and must hug that word; wrapping the
+ * whole prefix would make the trailing gap look wider (see `styleCommandPrefix`).
  *
- * `Run `（4 列）比原来的 `$ `（2 列）宽 2 列，所以首行的折行预算要按 4 列扣 ——
- * `renderCommandLines` 的 `firstRowBudget` 与续行缩进都从 `COMMAND_PROMPT` /
- * `COMMAND_CHAIN` 现算，别写死数字。
+ * `Run ` (4 columns) is 2 columns wider than the old `$ ` (2 columns), so the first line's wrap
+ * budget must be charged 4 columns — `renderCommandLines`' `firstRowBudget` and the continuation
+ * indent are both computed live from `COMMAND_PROMPT` / `COMMAND_CHAIN`; no hardcoded numbers.
  *
- * ## 折叠视图：break-all 硬折行 + 行尾 `…` + `… +N lines`
+ * ## Collapsed view: break-all hard wrap + end-of-line `…` + `… +N lines`
  *
- * 折行规则是 CSS `word-break: break-all` 那一套：按列预算逐个 grapheme 填充，**装满到
- * 恰好放不下为止再断**，断点就在行末，不管它落在单词/路径中间。实现见 `hardWrapRows`。
+ * The wrap rule is the CSS `word-break: break-all` model: fill grapheme by grapheme up to the
+ * column budget, **break exactly when the next one does not fit**, wherever the break lands — word
+ * or path middle alike. See `hardWrapRows`.
  *
- * 为什么不用 pi-tui 的 `wrapTextWithAnsi`：它是**贪心词折行 + 长词按列断开**，装不进当前行
- * 剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上 `Run cp <78 列路径>` 渲染成
- * `Run cp` 单独一行 + 路径从中间断成两截：行尾白白空着几十列（就是“提前折行”那个难看的
- * 样子），命令和它的参数还被拆开。硬折行则把每行填满。
+ * Why not pi-tui's `wrapTextWithAnsi`: it is **greedy word wrap + hard split of overlong words** — a
+ * word that does not fit the rest of the current line is **moved wholesale to the next line** and
+ * then split. Measured on a 79-column terminal, `Run cp <78-col path>` rendered as `Run cp` alone on
+ * a line plus the path split mid-string across two lines: dozens of columns wasted at line end (the
+ * ugly "early wrap" look), and the command separated from its argument. Hard wrap fills every line.
  *
- * 中间试过第三条路（commit 9024c26）：不折行、装不下就把行尾截成 `…`。它不提前折行，
- * 但一条长命令只剩一行可见内容、后面全丢；现在这条“2 行 + 行尾 `…` + `… +N lines`”
- * 是用户指定的折中：**溢出多少都只吃最后 1 行**，行数恒定可预期。
+ * A third path was tried in between (commit 9024c26): no wrap at all — truncate the line tail to `…`
+ * when it does not fit. It avoids early wrap, but a long command left only one visible line and lost
+ * the rest; the current "2 lines + end `…` + `… +N lines`" is the compromise the user picked:
+ * **no matter the overflow it only eats the last 1 line**, and the line count stays predictable.
  *
- * 行数预算（`limit`，`DEFAULT_LINES = 2`）按**视觉行**算而不是源行：一条超长单行命令占满
- * 整个预算而不是刷十几行，而短行的多行命令（heredoc 等）仍然显示前 2 条源行 —— 两种情况
- * 都不会失控。`… +N lines` 里的 N 只数**整条源行**（第 2 行之后每条还没轮到的源行算 1，
- * 已经折出来但没放下的碎片也各算 1），不做 token 估算 —— 精确、一眼能对上行数。
- * 展开态（ctrl+o）用同一套硬折行规则，只是不限行数 —— 折行规则必须一致，否则展开态又会
- * 出现“提前折行”。
+ * The line budget (`limit`, `DEFAULT_LINES = 2`) counts **visual lines**, not source lines: one
+ * overlong single-line command fills the whole budget instead of painting a dozen rows, while a
+ * multi-line command of short lines (heredocs etc.) still shows its first 2 source lines — neither
+ * case runs away. The N in `… +N lines` counts **whole source lines** only (every source line not
+ * reached after line 2 counts as 1, and fragments already wrapped but not placed count as 1 each) —
+ * no token estimation; exact and checkable at a glance. The expanded state (ctrl+o) uses the same
+ * hard-wrap rules, just without a line limit — the wrap rules must match, or expanded would show
+ * "early wrap" again.
  *
- * 语法高亮（`styleCommandLine`）跟着折行走：token 偏移是**源行坐标**，折行碎片也带自己在
- * 源行里的起点偏移（`WrappedRow.start`，前缀不参与折行、所以不用换算），两边同坐标直接
- * 比对就对上号 —— 少了这个偏移，续行的颜色会整体错位。
+ * Syntax highlighting (`styleCommandLine`) follows the wrap: token offsets are **source-line**
+ * coordinates, and wrapped fragments carry their own start offset within the source line
+ * (`WrappedRow.start`; the prefix does not participate in wrapping, so no conversion needed) — both
+ * sides compare in the same coordinates and line up; without that offset, continuation lines'
+ * colors would all shift.
  *
- * ## 输出预览行数（pi 写死 5 行，这里改成 3 行）
+ * ## Output preview line count (pi hardcodes 5; changed here to 3)
  *
- * pi 把 bash 输出的预览行数写死在 `core/tools/renderers/bash.js` 的
- * `const BASH_PREVIEW_LINES = 5`：模块私有常量，既没从包里导出，也不在
- * `BashToolOptions` 里，`docs/settings.md` 里也没有对应设置项 —— **没有全局配置可改**，
- * 只能在扩展里后处理（`withPreviewLimit` / `trimPreviewLines`）。
+ * pi hardcodes the bash output preview at `const BASH_PREVIEW_LINES = 5` in
+ * `core/tools/renderers/bash.js`: a module-private constant, not exported from the package, not in
+ * `BashToolOptions`, and with no corresponding setting in `docs/settings.md` — **no global config to
+ * change**, so it can only be post-processed in the extension (`withPreviewLimit` /
+ * `trimPreviewLines`).
  *
- * 做法是拿 pi 渲好的组件做后处理而不是重写整个 resultRenderer，这样 pi 的语义
- *（截断页脚剔除、warnings、`Took Xs`、展开态、图片）全部保留，我们只动预览那一段。
- * 两个关键点：① **逐 child 渲染**而不是拿平铺行数组（平铺数组里分不清哪几行是预览）；
- * ② 裁掉的行数必须补进提示行的计数，否则「隐藏了多少行」就谎了 —— pi 给了提示行就
- * 在它那行**原地改数字**（保住 pi 的配色与真实键名），pi 没给（输出刚好 ≤ 5 行）
- * 就自建一行，否则那 1~2 行会静默消失。
+ * The approach is post-processing pi's rendered component rather than rewriting the whole
+ * resultRenderer, so all of pi's semantics survive (truncation-footer culling, warnings, `Took Xs`,
+ * expanded state, images); only the preview section is touched. Two key points: ① **render child by
+ * child** rather than taking the flattened line array (in a flat array you cannot tell which rows
+ * are the preview); ② trimmed line counts must be folded into the hint line's count or "how many
+ * lines were hidden" lies — when pi emitted a hint line, rewrite its number **in place** (preserving
+ * pi's colors and the real key name); when pi did not (output ≤ 5 lines), build one ourselves,
+ * otherwise those 1-2 lines silently disappear.
  *
- * 展开态（ctrl+o）自动不受影响：那时 pi 用的是 `new Text(...)` 而不是预览组件，
- * 鸭子判定直接跳过，完整输出一行不裁。
+ * The expanded state (ctrl+o) is automatically unaffected: pi then uses `new Text(...)` instead of
+ * the preview component, the duck check skips it, and the full output is never trimmed.
  *
- * ## 输出树形 gutter（`│` 续段 / `└` 只出现一次）
+ * ## Output tree gutter (`│` continuations / a single `└`)
  *
- * 命令执行完，续行从纯缩进换成 `│ `，结果挂在同一棵树下 —— 命令在上、输出在下，层次一眼
- * 可辨。`└ ` 在**整块结果里只出现一次**，就在第一行实质输出上（用户 2026-09-21 定的形状：
- * `└` 不再落在最后一行）。细节与三个不能想当然的点见 `prefixTreeLines`。
+ * When the command finishes, continuation lines switch from bare indent to `│ ` and results hang
+ * under the same tree — command on top, output below, the hierarchy readable at a glance. `└ `
+ * appears **once in the whole result**, on the first substantive output line (shape set by the user
+ * on 2026-09-21: `└` no longer lands on the last line). Details and three non-obvious points are in
+ * `prefixTreeLines`.
  *
- * 实现挂在 `withPreviewLimit` 里（它本来就要逐 child 找出「哪个子组件是输出」，gutter 用
- * 的是同一条判定）。三个刻意的设计决定：
- *   ① **展开态（ctrl+o）不加 gutter、也不裁行** —— 展开态要的就是原样完整输出。
- *   ② **`└ ` 必须在所有 child 的行都走完后统一上**（`prefixTreeLines(out)` 最后调一次），
- *     不能逐 child 各画一棵树：那样 warnings / `Took` 段会再长出一个 `└ `，屏幕上就有两行
- *     带拐角符的内容（实测踩过）。空行仍保持为空行 —— 失败状态那句 `\n\n` 除外，见下节。
- *   ③ 输出段按 `width - 2` 渲染（`GUTTER_WIDTH`），否则挂上前缀必超宽；结果里的其他段落
- *     （warnings / `Took`）pi 是按整宽渲染的，在更宽的终端里会把 2 列顶出边缘 —— 已知
- *     小瑕疵，只在「超长 warnings + 宽终端」下可见（`Took Xs` 这类短行不受影响）。
+ * Implemented inside `withPreviewLimit` (it already had to walk child by child to find "which child
+ * is the output"; the gutter uses the same check). Three deliberate design decisions:
+ *   ① **No gutter and no trimming in expanded state (ctrl+o)** — expanded means verbatim full output.
+ *   ② **`└ ` must be applied once over all children's lines** (`prefixTreeLines(out)` called once at
+ *     the end), not one tree per child: warnings / `Took` sections would grow another `└ ` and the
+ *     screen would show two cornered content lines (observed in testing). Blank lines stay blank —
+ *     except the `\n\n` before the failure status, see the next section.
+ *   ③ The output section renders at `width - 2` (`GUTTER_WIDTH`) or adding the prefix overflows; other
+ *     sections of the result (warnings / `Took`) are rendered by pi at full width and would stick out
+ *     2 columns on wider terminals — a known cosmetic quirk, only visible with "overlong warnings +
+ *     wide terminal" (short lines like `Took Xs` are unaffected).
  *
- * ## 失败状态（`Command exited with code N` / ... timed out ... / ... aborted）
+ * ## Failure status (`Command exited with code N` / ... timed out ... / ... aborted)
  *
- * 用户 2026-09-21 提的两件事：提示要染成 error 色，且提示上面那两行空行不能把树断开。
- * 这两件事的根源是同一个：**pi 把失败状态当成普通输出拼在结果正文末尾**，不是独立字段、
- * `details` 里也没有标记（`core/tools/bash.ts` 三处 `throw new Error(appendStatus(text, status))`，
- * `appendStatus` 就是 `` `${text}\n\n${status}` `` —— 注意它平时那个 `text ? … : ""` 三元在这里
- * 永远是“有 text”那一支，因为 `formatOutput` 已先把空输出换成了 `(no output)`）。
- * 结果正文逐行 `theme.fg("toolOutput", …)` 后 join，于是：
- *   - 状态行与输出同色（默认 gray）—— 要红只能**按文本形态认出来再换色**（
- *     `isFailureStatusLine` + `colorizeFailureStatus`，在 `prefixTreeLines` 里做，
- *     因为那里已经是“最终行数组”）；
- *   - 状态前面那句 `\n\n` 在非展开态下会渲染成**两行空行**（`\n\n` → 两个空行），夹在
- *     预览与提示之间就是用户说的“断层两层”（展开态因为 Text 折行而看不到）。
- *     `trimPreviewLines` 把状态与其前的空行一起摘下来单独处理：空行不画、状态当作预览
- *     里**必得占一格**的一行（否则它会被预览裁掉 —— 实测过：状态被裁掉后整块只剩
- *     一条 `│ … (N earlier lines)` 加两行空行），最后把状态放回尾部。摘空行是**连着摘**的：
- *     输出自己那些尾部空行（`printf "a\n\n\n"`）一并吃掉，否则它们会同样撑开断层 ——
- *     尾部的空行没有信息量，腾出来的预算换成真正的输出行更值。
+ * Two things the user asked for on 2026-09-21: the notice should be error-colored, and the two blank
+ * lines above it must not break the tree. Both have the same root cause: **pi welds the failure
+ * status into the output body** — not a separate field, and `details` carries no marker
+ * (`core/tools/bash.ts` throws `throw new Error(appendStatus(text, status))` in three places, and
+ * `appendStatus` is `` `${text}\n\n${status}` `` — note its usual `text ? … : ""` ternary always
+ * takes the "has text" branch here, because `formatOutput` already replaced empty output with
+ * `(no output)`). The result body is `theme.fg("toolOutput", …)`ed line by line and joined, so:
+ *   - the status line shares the output color (gray by default) — to turn it red it must be
+ *     **recognized by text shape and recolored** (`isFailureStatusLine` + `colorizeFailureStatus`,
+ *     done in `prefixTreeLines`, where the final line array already exists);
+ *   - the `\n\n` before the status renders as **two blank lines** in collapsed state (`\n\n` → two
+ *     empty lines), and sandwiched between preview and hint that is the "two-layer break" the user
+ *     saw (invisible in expanded state because Text wraps). `trimPreviewLines` lifts the status
+ *     together with the blank lines before it out for separate handling: the blanks are not drawn,
+ *     and the status is treated as a line **guaranteed one slot** of the preview (otherwise it would
+ *     be trimmed away — observed: with the status trimmed, the whole block shrank to one
+ *     `│ … (N earlier lines)` plus two blank lines), then the status goes back at the tail. Blanks
+ *     are lifted **contiguously**: trailing blank lines owned by the output itself
+ *     (`printf "a\n\n\n"`) are eaten along too, or they would open the same break — trailing blank
+ *     lines carry no information and the freed budget is better spent on real output lines.
  *
- * 形状上结果是「详情跟在正文后、两格缩进对齐」，与 `Took` / warnings 同一套：
+ * The resulting shape is "details follow the body, aligned with a two-cell indent", same family as
+ * `Took` / warnings:
  *
  * ```
  * Run for f in a b; do echo "-- $f"; done; exit 2
  * └ -- a
  *   -- b
- *   Command exited with code 2      ← 红色（error 槽）
+ *   Command exited with code 2      ← red (error slot)
  * ```
  *
- * **两道判定缺一不可**：`context.isError`（真是错的那次）+ 整行等于上面三个形态之一。
- * 只看形态会把 `echo "Command exited with code 2"` 的正常输出也染红、还会在它排在末尾时
- * 被当成状态摘走（回归测试盯的就是这条）；只看 `isError` 则会把整个输出正文染红。
+ * **Both checks are required**: `context.isError` (this run really errored) + the whole line matching
+ * one of the three shapes above. Shape alone would also redden the normal output of
+ * `echo "Command exited with code 2"`, and would lift it as a status when it happens to sit at the
+ * tail (the regression test watches exactly that); `isError` alone would redden the entire output body.
  *
- * ## 耗时页脚门槛（短命令不画 `Took`）
+ * ## Duration-footer threshold (short commands draw no `Took`)
  *
- * pi 内置的结果渲染器**无条件**在末尾画一行 `Took X.Xs`（`state.startedAt` 有值就画），
- * 而它是个**独占一行**的页脚：对绝大多数几十毫秒的命令来说只是白占一行高度，还额外带进
- * 一行分隔空行（页脚是 `new Text("\n" + …)`，那个前导 `\n` 就是正文与页脚之间的空白行）：
+ * pi's built-in result renderer draws a `Took X.Xs` line at the end **unconditionally** (whenever
+ * `state.startedAt` is set), and it is a **full-line footer**: for the vast majority of
+ * tens-of-milliseconds commands it just wastes one row of height, plus an extra separator blank line
+ * (the footer is `new Text("\n" + …)`, and that leading `\n` is the blank row between body and footer):
  *
  * ```
  * $ echo hello
@@ -151,209 +177,252 @@
  *  Took 0.1s
  * ```
  *
- * 所以**短命令整条页脚都不画**（连那行分隔空行一起）—— 区块变成「命令行 + 输出 +
- * 下边界空行」，一行都不浪费。门槛默认 2000ms（常量 `DEFAULT_MIN_TIME_FOOTER_MS`），
- * `PI_BASH_MIN_TIME_MS` 启动时可改，`0` = 永远显示（等于关掉这个优化）。
+ * So for **short commands the whole footer is dropped** (including its separator blank line) — the
+ * block becomes "command line + output + bottom boundary blank", wasting no row. The threshold
+ * defaults to 2000ms (constant `DEFAULT_MIN_TIME_FOOTER_MS`); `PI_BASH_MIN_TIME_MS` changes it at
+ * startup, and `0` = always show (disables the optimization).
  *
- * 判定用**真实耗时** `endedAt - startedAt`（与 pi 画那个数字用的是同一个量），不去解析
- * 页脚上的文本 —— 文本是 `(ms / 1000).toFixed(1)` 四舍五入过的，拿它判会出现「显示 2.0s
- * 其实只跑了 1.96s」这类边界偏差。门槛 >= 耗时即隐藏，所以能看见的数字必然 >= 2.0s，
- * 不会出现自相矛盾的 `Took 1.9s`。
+ * The check uses the **real duration** `endedAt - startedAt` (the same quantity pi prints), not the
+ * footer's text — that text is `(ms / 1000).toFixed(1)`, rounded, so judging by it produces edge
+ * cases like "shows 2.0s but actually ran 1.96s". The rule is hide when threshold >= elapsed, so any
+ * number that can appear is necessarily >= 2.0s — a self-contradicting `Took 1.9s` cannot occur.
  *
- * 流式模式（`PI_BASH_STREAM=on`）下执行期中那个 `Elapsed X.Xs` 走同一条判定（同一个页脚，
- * 只是文案跟着 `isPartial` 变）：短命令执行期间不会闪出那一行，跑过 2s 才出现 ——
- * 正好是「值得看一眼」的时刻。非流式（默认）下只在执行结束时判一次，正是用户要的语义。
+ * In streaming mode (`PI_BASH_STREAM=on`) the `Elapsed X.Xs` during execution goes through the same
+ * check (same footer, wording follows `isPartial`): short commands never flash that line, and it
+ * appears only after 2s — exactly the "worth a glance" moment. In non-streaming (default) the check
+ * runs once at end of execution, which is the semantics the user wanted.
  *
- * 实现挂在 `withPreviewLimit` 里（它本来就要逐 child 渲染、也本来就把 warnings / `Took`
- * 当「非输出 child」透传），判定见 `isTimeFooterChild`：末位 + 文本形态两条缺一不可。
+ * Implemented inside `withPreviewLimit` (it already renders child by child and already passes
+ * warnings / `Took` through as "non-output children"); the check is `isTimeFooterChild`: last
+ * position + text shape, both required.
  *
- * ## bash 命令语法高亮（轻量版）
+ * ## bash command syntax highlighting (lightweight)
  *
- * 命令行按 shell 词法上色：命令名 `syntaxFunction`、选项 `-x/--xxx` `syntaxKeyword`、
- * 引号串与路径 `syntaxString`、`$VAR`/`NAME=` 赋值 `syntaxVariable`、`|`/`&&`/重定向
- * `syntaxOperator`、`#` 注释 `syntaxComment`，`Run ` 前缀用 `toolTitle`（正常色，不用
- * dim）。配色走主题的 `syntax*` 槽（和 markdown 代码块同一套），所以换主题自动跟着变。
- * 默认开，`PI_BASH_HIGHLIGHT=off` 回到「整行 toolTitle 粗体」—— 刻意**没有**
- * `/bash-highlight` 指令：纯观感开关，env 一个入口就够，没必要再占一条斜杠指令。
+ * Command lines are colored by shell lexing: command name `syntaxFunction`, options `-x/--xxx`
+ * `syntaxKeyword`, quoted strings and paths `syntaxString`, `$VAR`/`NAME=` assignments
+ * `syntaxVariable`, `|`/`&&`/redirections `syntaxOperator`, `#` comments `syntaxComment`, and the
+ * `Run ` prefix uses `toolTitle` (normal color, not dim). Colors go through the theme's `syntax*`
+ * slots (same family as markdown code blocks), so they follow theme changes automatically. On by
+ * default; `PI_BASH_HIGHLIGHT=off` returns to "whole line toolTitle bold" — deliberately **no**
+ * `/bash-highlight` command: a pure visual toggle needs only the env entry point, not a slash command.
  *
- * 参照 `@sting8k/pi-droid-styling` 的 `tool-tags/bash.ts`：它同样是**手写 shell 分词器**
- *（`tokenizeShellLinePreservingText` + `colorShellWord`），只在分词失败（引号没闭合）时
- * 才退回 pi 导出的 `highlightCode(line, "bash")`。这里不采它的退回路径 —— `highlightCode`
- * 返回的是**带 ANSI 的整行**，而本扩展的折行是 break-all 硬折行、必须「先折纯文本、
- * 后上色」（反过来会把 SGR 序列从中间切断，见 renderCall 里的注释），带 ANSI 的行没法
- * 再喂给 `hardWrapRows`。所以分词失败就退回单色粗体，而不是换一个高亮器。
+ * Modeled on `@sting8k/pi-droid-styling`'s `tool-tags/bash.ts`, which is likewise a **hand-written
+ * shell tokenizer** (`tokenizeShellLinePreservingText` + `colorShellWord`) and only falls back to
+ * pi's exported `highlightCode(line, "bash")` when tokenization fails (unclosed quote). That
+ * fallback path is not adopted here — `highlightCode` returns a **whole line with ANSI**, while this
+ * extension's wrap is break-all hard wrap and must "wrap plain text first, color after" (doing it the
+ * other way cuts SGR sequences in half — see the comment in renderCall); an ANSI-carrying line
+ * cannot feed `hardWrapRows`. So a tokenization failure falls back to single-color bold instead of
+ * a different highlighter.
  *
- * 对齐办法：token 偏移是**源行**坐标，折行碎片是**折行后**坐标且带自己的起点偏移 ——
- * `styleCommandLine` 把 token 与正文都换算到源行坐标比较，偏移换算的三步（碎片自带
- * `start`、第 2 片起减 head 宽度、行尾 `…` 只在纯文本上放）见 `renderCommandLines`。
- * 三条要点：
- *   ① 一个 token 被折行切成两半时，两半是同一种颜色 —— 视觉上无碍。
- *   ② 引号状态**跨源行**保留（`openQuote`），所以多行字符串（`git commit -m "…\n…"`）
- *     的第二行不会被当成命令重新分词。heredoc 正文没有这个待遇（`<<EOF` 不是引号），
- *     会按命令行上色 —— 无害，只是不准。
- *   ③ 被折叠掉的行不参与上色（也根本不进渲染路径）。
-
-## 输出正文的独立颜色（扩展 token `bashOutput`）
-
-pi 的内置 bash 结果渲染器把输出正文写死成 `theme.fg("toolOutput", line)` —— 那是**所有
-工具输出共用的槽**（read / grep / ls 的正文、`…` 占位符都吃它），想只调 bash 输出的颜色
-就得绕开它。做法是在**委托给内置渲染器的那个同步窗口**里把主题的 `toolOutput` 临时指向
-`bashOutput`（`withBashOutputColor()`），于是只有输出正文换色 —— 命令行（`toolTitle` +
-自绘语法高亮）、折叠提示（`muted` / `dim`）、树形 gutter（`muted`）、`Took Xs` 页脚
-（`muted`）一律不受影响，其他工具的输出也完全不受影响（它们的渲染器不在这个窗口里跑）。
-
-注意**传给 `renderResult` 的那个 theme 参数是没用的**：pi 的 bash 渲染器签名把第二个
-theme 参数写成 `_theme` 后根本不用它，输出行是用**模块级 theme 单例**上的色。
-那个单例（`Proxy` → `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`）
-与扩展拿到的渲染器参数是同一个对象，所以改它的 `fgColors` 表就是改渲染器看到的色值。
-
-`bashOutput` 是本仓库自造的 token（pi 官方 schema 里没有，与 `toolDiffAddedBg` 那两个
-同一条路：TypeBox 校验对未知 key 放行、`createTheme()` 把它们收进前景表）。**主题没定义它
-就什么都不做**（探测方式是真调一次 `getFgAnsi()`，pi 对未知 token 抛
-`Unknown theme color: …`），所以内置主题与 pi-coder-summer-night / pi-coder-catppuccin 照旧走 `toolOutput`，
-目前只有 `pi-coder-ayu.json` 定义了这个 token。展开态（ctrl+o）同样是输出正文，一并生效。
-
-## 整块没有底色、没有 boundary 空行
+ * Alignment: token offsets are **source-line** coordinates; wrap fragments are **post-wrap**
+ * coordinates and carry their own start offset — `styleCommandLine` converts both tokens and body to
+ * source-line coordinates before comparing; the three steps of offset conversion (the fragment's own
+ * `start`, subtracting head width from the 2nd fragment on, the line-end `…` going on plain text
+ * only) are in `renderCommandLines`. Three points:
+ *   ① When a token is cut in two by wrapping, both halves keep the same color — visually fine.
+ *   ② Quote state persists **across source lines** (`openQuote`), so the second line of a multi-line
+ *     string (`git commit -m "…\n…"`) is not re-tokenized as a command. Heredoc bodies get no such
+ *     treatment (`<<EOF` is not a quote) and are colored as a command line — harmless, just imprecise.
+ *   ③ Collapsed-away lines do not participate in coloring (they never enter the render path).
  *
- * bash 块**完全不带底色**（用户 2026-09-21 定的）：pending 的 `toolPendingBg`、成功的
- * `toolSuccessBg`、失败的 `toolErrorBg` 三种底都不画，块里就是普通正文，与周围的 transcript
- * 连成一片。状态改由首行那颗圆点的颜色表达（见下节）—— 底色没了不等于状态信息丢了。
+ * ## Independent color for the output body (extension token `bashOutput`)
  *
- * 实现上是**主动不去画**，不是画上再擦掉：`renderShell: "self"` 之下 pi 本来就不再给整块套
- * bgFn（`selfRenderContainer` 是个纯 `Container`，只有默认 shell 那条路才套），所以只要我们
- * 自己不套，块就是干净的。于是 `Box` 的 `bgFn` 传 `undefined`（`new Box(0, 0)`），
- * `stateBgFn` 整个函数删掉 —— 它当初存在的唯一理由就是「把 pi 在默认 shell 下会套的那层
- * 底色补回来」，现在不需要了。
+ * pi's built-in bash result renderer hardcodes the output body as `theme.fg("toolOutput", line)` —
+ * that is **the shared slot for all tool output** (read / grep / ls bodies and `…` placeholders all
+ * eat it), so tuning bash output's color alone requires bypassing it. The trick: inside the
+ * **synchronous window where we delegate to the built-in renderer**, temporarily point the theme's
+ * `toolOutput` at `bashOutput` (`withBashOutputColor()`) — then only the output body changes color;
+ * the command line (`toolTitle` + self-drawn syntax highlight), the collapse hints (`muted` / `dim`),
+ * the tree gutter (`muted`), and the `Took Xs` footer (`muted`) are all unaffected, and other tools'
+ * output is untouched (their renderers do not run inside this window).
  *
- * ★ **只去 bash 的**：其他工具（read / grep / edit / write / task_* …）走的是 pi 自己的渲染
- * 路径，`contentBox` 与 bgFn 完全不受本扩展影响 —— 本扩展只注册 `bash` 这一个工具的渲染器，
- * 改的也只是自己返回的那两个组件。
+ * Note that **the theme parameter passed to `renderResult` is useless**: pi's bash renderer signature
+ * names the second theme parameter `_theme` and never uses it — output lines are colored via the
+ * **module-level theme singleton**. That singleton (`Proxy` →
+ * `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`) is the same object the
+ * extension receives as a renderer parameter, so mutating its `fgColors` table changes the value the
+ * renderer sees.
  *
- * 上下 boundary 空行同理一并去掉：底色的上下内边距本来是本扩展自己画回来的（命令行上面一行、
- * 整块最后一行下面一行，两行都是染了底色的空行 —— `Box.applyBg` 会把每行补满到 width 再上色），
- * 但 bash 调用连着来时那样会把屏幕撑得很稀。现在整块只剩「命令行 + 结果」本身：命令就是块的
- * 第 1 行、结果就是最后一行，一行空白都不加。
+ * `bashOutput` is a token invented by this repo (not in pi's official schema — same route as the two
+ * `toolDiffAddedBg`-style tokens: TypeBox validation lets unknown keys pass and `createTheme()`
+ * collects them into the foreground table). **If a theme does not define it, nothing happens** (the
+ * probe is one real `getFgAnsi()` call — pi throws `Unknown theme color: …` on unknown tokens), so
+ * built-in themes and pi-coder-summer-night / pi-coder-catppuccin keep using `toolOutput`; currently
+ * only `pi-coder-ayu.json` defines this token. The expanded state (ctrl+o) is output body too and is
+ * likewise affected.
  *
- * **中间本来就是紧贴的**（命令与输出之间不留空行）—— 那是更早一轮刻意去掉的（命令与结果
- * 是两个独立 Box，各自的 `paddingY` 会叠成三行空白）。
+ * ## No background fill and no boundary blank lines for the whole block
  *
- * 命令行那格左内边距不再是空格，换成了状态圆点（见下节）。
+ * The bash block carries **no background at all** (set by the user on 2026-09-21): none of pending's
+ * `toolPendingBg`, success's `toolSuccessBg`, or failure's `toolErrorBg` is painted — the block is
+ * ordinary body text, continuous with the surrounding transcript. State is conveyed by the color of
+ * the dot on the first line (see the next section) — losing the background does not lose status
+ * information.
  *
- * ## 命令行首行的状态圆点（`•`）
+ * Implementation-wise this is **actively not painting**, not painting and then erasing: under
+ * `renderShell: "self"`, pi no longer wraps the whole block in bgFn anyway (`selfRenderContainer` is
+ * a plain `Container`; only the default-shell path wraps one), so as long as we do not wrap one
+ * ourselves the block is clean. Hence `Box`'s `bgFn` gets `undefined` (`new Box(0, 0)`), and
+ * `stateBgFn` was deleted wholesale — its only reason to exist was "paint back the background pi
+ * would have applied under the default shell", which is no longer needed.
  *
- * 命令行**首行**的前面一颗圆点 `•`（U+2022，1 列宽），颜色按这次 bash 调用的状态走
- *（用户 2026-09-21 定；最初是 `▎`，随后按观感换成 `•`，**着色逻辑一字未动**）：
+ * ★ **Only bash loses it**: other tools (read / grep / edit / write / task_* …) go through pi's own
+ * render path — `contentBox` and bgFn are entirely unaffected by this extension, which only registers
+ * a renderer for the single `bash` tool and only changes the two components it returns itself.
+ *
+ * The top and bottom boundary blank lines went away for the same reason: the background's vertical
+ * padding had been painted back by this extension itself (one blank line above the command line, one
+ * below the block's last line — both were bg-colored blank rows, since `Box.applyBg` pads each row
+ * to width before coloring), but back-to-back bash calls stretched the screen far too airy. Now the
+ * whole block is just "command line + result" itself: the command is the block's first row and the
+ * result is its last — not a single blank row is added.
+ *
+ * **The middle was always flush** (no blank line between command and output) — that was removed in an
+ * earlier round on purpose (command and result are two separate Boxes whose `paddingY` would stack
+ * into three blank rows).
+ *
+ * The command line's left-padding cell is no longer a space — it became the state dot (next section).
+ *
+ * ## The state dot on the command line's first row (`•`)
+ *
+ * A dot `•` (U+2022, 1 column wide) sits in front of the command's **first row**, colored by this
+ * bash call's state (set by the user on 2026-09-21; originally `▎`, then swapped to `•` for looks —
+ * the **coloring logic did not change by one character**):
  *
  * ```
  * • Run ls …path…
  *    python abc.py…
  * ```
  *
- *   - **执行中（pending）** → `dim`（暗灰）
- *   - **执行成功** → `toolDiffAdded`（diff 新增行的绿）
- *   - **执行失败** → `toolDiffRemoved`（diff 删除行的红）
+ *   - **Running (pending)** → `dim` (dark gray)
+ *   - **Finished OK** → `toolDiffAdded` (the green of diff added-lines)
+ *   - **Finished failed** → `toolDiffRemoved` (the red of diff removed-lines)
  *
- * **只有 `Run ` 这一行前面有**：续行（`│ ` / 两格缩进）、`… +N lines` 标记、以及整棵结果树
- *（`└ ` / 两格缩进）前面都不画 —— 圆点是「这一次 bash 调用」的状态灯，不是整块的边框。
+ * **Only the `Run ` line gets it**: continuation lines (`│ ` / two-cell indent), the `… +N lines`
+ * marker, and the whole result tree (`└ ` / two-cell indent) get nothing — the dot is the status
+ * light of *this one bash call*, not a border of the block.
  *
- * 挂法：调用侧的 `Box` 用 `paddingX: 0`，左边距那两格**由扩展自己画**（`withHeadBar`）：
- * 首行是 `•` + 一个空格，其余行是两个空格。于是圆点落在**列 0**、`Run` 在列 2、所有正文在
- * 列 4，而续行 / 结果树的 `│` `└` 也在列 2 —— 与命令行同列，正文也彼此对齐。
+ * Mounting: the caller's `Box` uses `paddingX: 0`, and those two left-margin cells **are painted by
+ * the extension itself** (`withHeadBar`): first row is `•` + one space, the rest are two spaces. So
+ * the dot lands on **column 0**, `Run` on column 2, all body text on column 4, and the `│` `└` of
+ * continuation lines / the result tree also sit on column 2 — same column as the command line, with
+ * body aligned to body.
  *
- * ★ **这两格整体是「正文右移一列」换来的**（用户 2026-09-21 第二轮定的观感：原来 `▎Run …`
- * 里 `Run` 顶着状态符太挤，现在 `• Run …`）。同一次改动把**结果侧也一起右移了一列**
- *（`withPreviewLimit` 里的 `contentWidth = width - GUTTER_WIDTH - 1`），否则命令行在列 2、
- * 结果树在列 0，两截会错开。改左边距时**两边必须一起改**，`INDENT_WIDTH` 就是这两个 1。
+ * ★ **These two cells were bought by "shift body right one column"** (the user's second-round look
+ * call on 2026-09-21: `▎Run …` had `Run` jammed against the state glyph; now `• Run …`). The same
+ * change **shifted the result side one column right too** (`contentWidth = width - GUTTER_WIDTH - 1`
+ * in `withPreviewLimit`), otherwise the command line at column 2 and the result tree at column 0
+ * would be offset. When changing the left margin **both sides must change together** —
+ * `INDENT_WIDTH` is those two 1s.
  *
- * `Box` 的 `paddingX` 是 0，所以孩子拿到的是整宽，两边各自把用掉的列扣回去
- *（`renderCall` 的 `width - 3`、`withPreviewLimit` 的 `width - 3`）。圆点只挂**首行**
- *（`renderCall` 里按索引 0 处理），`invalid arg` / 空命令那条 `wrapTextWithAnsi` 分支同样。
+ * `Box`'s `paddingX` is 0, so children receive the full width and each side deducts the columns it
+ * spent (`width - 3` in `renderCall`, `width - 3` in `withPreviewLimit`). The dot goes on the
+ * **first row only** (handled by index 0 in `renderCall`), including the `invalid arg` / empty
+ * command `wrapTextWithAnsi` branch.
  *
- * 三个槽位 pi 一直都有（`toolDiffAdded` / `toolDiffRemoved` / `dim` 都是 schema 里的必需
- * token），所以不像 `bashOutput` 那样需要存在性探测；取的是**前景** ANSI（`getFgAnsi`），
- * 后面补一个 `\x1b[39m`，颜色不会洇到后面的 `Run` 上。
+ * All three slots exist in pi's schema unconditionally (`toolDiffAdded` / `toolDiffRemoved` / `dim`
+ * are all required tokens), so unlike `bashOutput` no existence probe is needed; what is taken is the
+ * **foreground** ANSI (`getFgAnsi`), followed by a `\x1b[39m`, so the color cannot bleed onto the
+ * `Run` after it.
  *
- * 用法：
- *   /bash-preview             查看输出预览行数
- *   /bash-preview 5           输出预览改成 5 行（1-50）
- *   /bash-preview off         恢复 pi 内置的 5 行预览
- *   /bash-timeout             查看 bash 执行期限（默认 / 上限 / env 覆盖）
+ * Usage:
+ *   /bash-preview             show the output-preview line count
+ *   /bash-preview 5           change the output preview to 5 lines (1-50)
+ *   /bash-preview off         restore pi's built-in 5-line preview
+ *   /bash-timeout             show the bash execution deadline (default / cap / env overrides)
  *
- * 折叠固定开启、保留 2 个视觉行 + 行尾 `…` / `… +N lines`（原先的 `/bash-collapse`
- * 指令已删除）；树形缩进固定开启（`PI_BASH_TREE` 已废弃），流式只剩 `PI_BASH_STREAM=on`。
+ * Collapse is fixed on, keeping 2 visual lines + end `…` / `… +N lines` (the old `/bash-collapse`
+ * command was deleted); the tree indent is fixed on (`PI_BASH_TREE` is retired), and streaming keeps
+ * only `PI_BASH_STREAM=on`.
  *
- * 附带第五个职责：**短命令不画耗时页脚** —— 默认执行时长 < 2s 就把 `Took 0.1s` 那一行
- *（连它的前导分隔空行）整个去掉，详见上面「耗时页脚门槛」一节。`PI_BASH_MIN_TIME_MS`
- * 可改门槛，`0` = 永远显示。
+ * Side responsibility number five: **no duration footer on short commands** — when the execution ran
+ * < 2s by default, the `Took 0.1s` line (and its leading separator blank) is removed wholesale; see
+ * the "duration-footer threshold" section above. `PI_BASH_MIN_TIME_MS` changes the threshold, `0` =
+ * always show.
  *
- * 附带第四个职责：把 bash **输出预览**从 pi 内置的 5 行改成 3 行
- *（`BASH_PREVIEW_LINES` 是 pi 的模块私有常量，没导出也没设置项，只能后处理，
- * 详见下面「输出预览行数」一节）。`/bash-preview` 可改。
+ * Side responsibility number four: change the bash **output preview** from pi's built-in 5 lines to
+ * 3 (`BASH_PREVIEW_LINES` is a module-private constant of pi — not exported and not a setting, so
+ * only post-processing works; see the "output preview line count" section below). `/bash-preview`
+ * adjusts it.
  *
- * 附带第三个职责：给每条 bash 命令**强制一个执行期限**（默认 120s、上限 600s，
- * 照抄 Claude Code 的 BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS 策略，详见下面
- * CLAUDE_CODE_DEFAULT_TIMEOUT_MS 那块的注释）。pi 内置 bash 的 timeout 无默认值，
- * 不注入就会无限期等下去。
+ * Side responsibility number three: give every bash command a **mandatory execution deadline**
+ * (default 120s, cap 600s — a copy of Claude Code's BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS
+ * policy, see the comment block at CLAUDE_CODE_DEFAULT_TIMEOUT_MS below). pi's built-in bash timeout
+ * has no default; without the injection it would wait forever.
  *
- * 附带第二个职责：把 bash 工具调用的屏幕显示改成**非流式**（默认，对齐 opencode / codex）。
- * pi **没有**任何设置项能做到这件事（settings.md 里 Shell 一节只有 shellPath /
- * shellCommandPrefix / npmCommand）。而且这里有**两条独立的流式机制**，必须分别处理：
+ * Side responsibility number two: make the on-screen display of bash tool calls **non-streaming**
+ * (the default, aligned with opencode / codex). pi has **no** setting that can do this (the Shell
+ * section of settings.md only has shellPath / shellCommandPrefix / npmCommand). And there are **two
+ * independent streaming mechanisms** here that must be handled separately:
  *
- * （1）**输出流式**：内置 bash 的 execute 每收到 stdout/stderr 数据就 onUpdate() 一份快照，
- *     节流 100ms（renderers/bash.js 的 BASH_UPDATE_THROTTLE_MS），经 tool_execution_update
- *     事件到 TUI（interactive-mode.js）当 partial 结果重画一遍。
- *     关掉的办法：把 onUpdate 传成 undefined —— execute 里每个更新点都有
- *     `if (!onUpdate) return` 守卫，于是全程零更新。渲染器不受影响：组件在
- *     `tool_execution_start` 就已创建（与更新无关），最终显示走 `tool_execution_end` →
- *     `updateResult(result, isPartial=false)`，所以压掉 partial 只是少了中间帧，
- *     结束那一次照常出（5 行预览 + 展开提示 + 截断提示 + "Took Xs"）。
+ * (1) **Output streaming**: the built-in bash execute calls onUpdate() with a snapshot each time
+ *     stdout/stderr data arrives, throttled to 100ms (BASH_UPDATE_THROTTLE_MS in renderers/bash.js),
+ *     which reaches the TUI (interactive-mode.js) via the tool_execution_update event and repaints a
+ *     partial result. How it is turned off: pass onUpdate as undefined — every update point in
+ *     execute is guarded by `if (!onUpdate) return`, so the whole run produces zero updates. The
+ *     renderer is unaffected: the component is created at `tool_execution_start` (unrelated to
+ *     updates), and the final display goes through `tool_execution_end` → `updateResult(result,
+ *     isPartial=false)`, so suppressing partials only drops the intermediate frames — the final one
+ *     still appears as usual (5-line preview + expand hint + truncation hint + "Took Xs").
  *
- * （2）**命令文本流式**：模型生成工具调用时参数是流式的（json 事件里能看到 toolcall_delta
- *     一片一片到：`{"command": "echo a` / `; sleep 0` / `.3; echo` …），pi 每收一片就
- *     updateArgs() → updateDisplay() → 重画一次 renderCall，于是命令一个字一个字冒出来。
- *     这条与（1）**完全无关**，光压 onUpdate 管不到它。
+ * (2) **Command-text streaming**: while the model generates the tool call, its arguments stream in
+ *     (visible in the json events as toolcall_delta pieces arriving bit by bit: `{"command": "echo a`
+ *     / `; sleep 0` / `.3; echo` …); on each piece pi calls updateArgs() → updateDisplay() → repaints
+ *     renderCall once, so the command appears letter by letter. This is **completely unrelated** to
+ *     (1); suppressing onUpdate cannot touch it.
  *
- *     关掉的办法是把两个时间点**分开**处理（对齐 codex / opencode）：
- *       时间点一：命令字符全收完（`context.argsComplete`）→ renderCall 一次性出完整命令；
- *       时间点二：命令执行完 → renderResult 把结果补刷到命令下面。
- *     具体做法：renderCall 在「args 可能还在流」（`!argsComplete && isPartial === true`）时
- *     返回**零行组件**（连占位行都不画）。
- *     注意不能**只**用 isPartial 当阈值：isPartial 要等 final 结果才置 false，单用它会把
- *     命令也压到结果之后，退化成「全等到结果才一次性出」。
- *     （setArgsComplete() 在 assistant message_end 时调，比 tool_execution_start 早 ~60ms，
- *     正好是“命令收完”这个语义点。）
- *     也不能**只**用 argsComplete：它只在实时流里置位，`/resume` 等历史重建路径从不调
- *     setArgsComplete（见 renderCall 里的详细说明），单用它会让恢复出来的 bash 块
- *     只剩输出、命令行整行消失（这就是曾经的 resume bug）。
- *     另外零行组件不会画出空盒子：Box.render 开头有 `childLines.length === 0 → []` 守卫
- *     （paddingY 是在这之后才加的）。
+ *     The way to turn it off is to **separate the two points in time** (aligned with codex /
+ *     opencode):
+ *       point one: command characters all received (`context.argsComplete`) → renderCall emits the
+ *       complete command at once;
+ *       point two: command finished → renderResult repaints the result under the command.
+ *     Concretely: renderCall returns a **zero-line component** (not even a placeholder row) while
+ *     "args may still be streaming" (`!argsComplete && isPartial === true`).
+ *     Note it cannot be gated on isPartial **alone**: isPartial only goes false at the final result,
+ *     so using it alone would hold the command back until after the result, degenerating into
+ *     "everything waits for the result".
+ *     (setArgsComplete() is called at assistant message_end, ~60ms earlier than tool_execution_start —
+ *     exactly the "command fully received" semantic point.)
+ *     Nor on argsComplete **alone**: it is only set in the live stream; `/resume` and other history
+ *     rebuild paths never call setArgsComplete (see the detailed note in renderCall), so using it
+ *     alone would leave resumed bash blocks with only output and no command line at all (that was
+ *     once the resume bug).
+ *     A zero-line component also paints no empty box: Box.render begins with a
+ *     `childLines.length === 0 → []` guard (paddingY is added only after it).
  *
- * 实测证据：
- *   - `pi -p --mode json` 跑真实 pi 数事件，同一条
- *     `echo a; sleep 0.35; echo b; sleep 0.35; echo c`：扩展加载时 `tool_execution_update` = **0**，
- *     `--no-extensions` 跑内置 bash 时 = **4**；两种情况的 tool result 都是 `"a\nb\nc\n"`。
- *   - 直接调包根导出的 createBashToolDefinition 数 onUpdate 次数：传 onUpdate = 4 次
- *     （1 次初始空更新 + 3 份输出快照），传 undefined = 0 次，final result 逐字节相同。
- *   - **执行耗时不受影响**：同一条 `echo a; sleep 0.5; echo b`，流式平均 545ms / 非流式
- *     平均 566ms（各跑 3 次，差 21ms 在噪声内）。所谓“变慢”是非流式的固有代价：
- *     以前第一块输出 ~100ms 就冒出来了，现在整个命令跑完才显示，感知延迟 = 命令全时长。
- *   - `echo hello` 的真实时间线：toolcall_start → toolcall_end 197ms（args 流式，模型侧）、
- *     toolcall_end → tool_execution_start 63ms、tool_execution_start → end 只 31ms。
- *     即“等了一下”的主体是模型在生成 tool call，不是命令执行。
+ * Measured evidence:
+ *   - `pi -p --mode json` on real pi counting events for the same
+ *     `echo a; sleep 0.35; echo b; sleep 0.35; echo c`: with the extension loaded
+ *     `tool_execution_update` = **0**; with `--no-extensions` running built-in bash = **4**; the tool
+ *     result is `"a\nb\nc\n"` in both cases.
+ *   - Calling the package root's exported createBashToolDefinition directly and counting onUpdate
+ *     calls: with onUpdate = 4 calls (1 initial empty update + 3 output snapshots); with undefined =
+ *     0 calls; the final result is byte-identical.
+ *   - **Execution time unaffected**: same `echo a; sleep 0.5; echo b` — streaming average 545ms,
+ *     non-streaming average 566ms (3 runs each; the 21ms delta is noise). The perceived "slower" is
+ *     the inherent cost of non-streaming: the first output chunk used to appear at ~100ms, now
+ *     nothing shows until the command completes — perceived latency = full command duration.
+ *   - The real timeline of `echo hello`: toolcall_start → toolcall_end 197ms (args streaming,
+ *     model side), toolcall_end → tool_execution_start 63ms, tool_execution_start → end only 31ms.
+ *     I.e. the bulk of the "wait" is the model generating the tool call, not command execution.
  *
- * 为什么必须放在本扩展里而不是新开一个 bash-stream.ts：跨扩展的同名工具注册是
- * **first registration per name wins**（runner.js getAllRegisteredTools 的注释原文，
- * 按扩展加载顺序即文件名顺序遍历）。本文件排在前面，新开的那个会被**静默忽略**。
+ * Why this must live in this extension instead of a new bash-stream.ts: same-name tool registration
+ * across extensions is **first registration per name wins** (verbatim from the comment in runner.js's
+ * getAllRegisteredTools, which iterates in extension load order = file-name order). This file sorts
+ * earlier, so a new one would be **silently ignored**.
  *
- * 非流式的代价（刻意的，别顺手"优化"）：
- *   - 命令收完到执行完之间**没有进度反馈**（只有那行命令，没有输出、没有计时）。
- *     `renderResult` 里的每秒计时器只在 `options.isPartial` 时才起
- *     （`if (state.startedAt !== undefined && options.isPartial && !state.interval)`），
- *     没有 partial 就永远不起，也没有 "Elapsed" 跳动，直到结束才补上
- *     「输出 + Took 12.3s」。命令通常很短所以可接受；真要盯长任务就 `PI_BASH_STREAM=on`。
- *   - 发给模型的内容**完全不变**：onUpdate 只喂显示层（tool_execution_update →
- *     tool-execution.js 的 isPartial），既不进 session 落盘也不进 tool result，
- *     execute 的返回值一字不差；renderCall 也只改显示，tool call 参数与 session 原文不动。
+ * The cost of non-streaming (deliberate — do not "optimize" it away):
+ *   - **No progress feedback** between "command fully received" and "command finished" (just the
+ *     command line — no output, no timer). The per-second timer in `renderResult` only starts when
+ *     `options.isPartial` (`if (state.startedAt !== undefined && options.isPartial &&
+ *     !state.interval)`); without partial it never starts and no "Elapsed" ticks — the
+ *     "output + Took 12.3s" arrives only at the end. Commands are usually short, so this is
+ *     acceptable; to watch a long task, use `PI_BASH_STREAM=on`.
+ *   - What is sent to the model is **completely unchanged**: onUpdate only feeds the display layer
+ *     (tool_execution_update → isPartial in tool-execution.js); it neither lands in the session on
+ *     disk nor in the tool result, and execute's return value is byte-identical; renderCall likewise
+ *     only changes display — tool-call arguments and session text are untouched.
  */
 
 import type { BashToolOptions, ExtensionAPI, ThemeColor, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -379,112 +448,130 @@ import {
 import { getAllowlistStore, getSessionScopes, type AllowlistStore } from "./bash-command-collapse/allowlist.ts";
 
 /**
- * 命令行**折叠态**保留的**视觉行**数（硬折行后一条超长单行命令也最多占这么多行）。
+ * How many **visual lines** the command line keeps in **collapsed** state (a hard-wrapped overlong
+ * single-line command occupies at most this many).
  *
- * 2 是用户定的观感：第 1 行装到满，第 2 行溢出多少都截成 `…`；命令本身更长时
- * 第 2 行下面再补一行 `… +N lines` 标记。详见文件头「命令行：2 行 + `Run ` 前缀」一节。
+ * 2 is the look the user picked: line 1 fills to the brim, line 2 truncates any overflow to `…`;
+ * when the command itself is longer, a `… +N lines` marker is added under line 2. See the file
+ * header section "command line: 2 lines + `Run ` prefix".
  */
 const DEFAULT_LINES = 2;
 
 /**
- * 命令行前缀。老观感是 pi 内置的 `$ `，现在是 `Run `（见文件头「命令行：2 行 + `Run `
- * 前缀」）。首行用它、续行用 `COMMAND_CHAIN`（两者对**正文列**的影响不同，折行与预算
- * 都按各自那套算）。
+ * The command-line prefix. The old look was pi's built-in `$ `; now `Run ` (see the file header
+ * "command line: 2 lines + `Run ` prefix"). First line uses it, continuation lines use
+ * `COMMAND_CHAIN` (the two affect the **body column** differently — wrapping and budget are each
+ * computed against their own).
  */
 const COMMAND_PROMPT = "Run ";
 /**
- * 结构符（`Run ` 命令行的续行 `│ `、结果的 `└ ` / `│ `）的主题槽 —— **`muted`**。
+ * Theme slot for the structural glyphs (`│ ` continuations of the `Run ` command line, `└ ` / `│ `
+ * in the result) — **`muted`**.
  *
- * 为什么不是 `toolTitle`（`Run ` 那一版用的）：命令行的续行与结果树里的拐角符是**同一棵
- * 树**的两段，颜色必须一致；`Run ` 是标题、用 `toolTitle` 正常色，树用 `muted` —— 与结果
- * 侧的 `└ `（`prefixTreeLines`）取同一个槽，于是 `Run ` / `│` / `└ ` 三层各就各位：
- * 前缀亮、结构灰。
+ * Why not `toolTitle` (what the `Run ` line uses): the command line's continuations and the result
+ * tree's corner are two segments of **the same tree** and must share a color; `Run ` is the title
+ * and takes `toolTitle` normal color, while the tree takes `muted` — the same slot as the result
+ * side's `└ ` (`prefixTreeLines`). Thus `Run ` / `│` / `└ ` each take their place: prefix bright,
+ * structure gray.
  */
 const COMMAND_CHAIN_COLOR = "muted";
 /**
- * 树形 gutter 的竖线行：命令还没结束时的续行、执行完的续行、输出/命令的截断提示都用它
- *（见文件头「输出树形 gutter」）。2 列。
+ * The tree-gutter vertical-bar row: used by continuation lines before the command ends, continuation
+ * lines after it finishes, and output/command truncation hints (see the file header "output tree
+ * gutter"). 2 columns.
  */
 const COMMAND_CHAIN = "│ ";
-/** 纯缩进（2 列）：命令执行中还没接上树时的续行、结果树里 `└ ` 之后的正文续行。 */
+/** Pure indent (2 columns): continuation lines before the tree connects while the command runs, and body continuations after `└ ` in the result tree. */
 const COMMAND_INDENT = "  ";
-/** 行尾溢出标记（命令行最后一行末尾、截断提示行行首共用）。 */
+/** End-of-line overflow marker (shared by the last command line's tail and the head of truncation-hint lines). */
 const ELLIPSIS = "…";
 
 /**
- * 输出预览保留的行数（pi 内置是 5，这里改成 3）。
+ * Line count kept by the output preview (pi's built-in is 5; changed here to 3).
  *
- * pi 把行数写死在 `core/tools/renderers/bash.js` 的 `const BASH_PREVIEW_LINES = 5`：
- * 模块私有常量，既没从包里导出（`index.d.ts` 里没有），也不在 `BashToolOptions`
- * 里，`docs/settings.md` 里也没有任何对应的设置项 —— 所以没有全局配置可改，
- * 只能在扩展里后处理。详见文件头「输出预览行数」一节。
+ * pi hardcodes the count at `const BASH_PREVIEW_LINES = 5` in `core/tools/renderers/bash.js` — a
+ * module-private constant, neither exported (`index.d.ts` lacks it) nor in `BashToolOptions`, and
+ * `docs/settings.md` has no setting for it — so there is no global config to change and the only
+ * option is post-processing in the extension. See the file header "output preview line count".
  */
 const DEFAULT_OUTPUT_PREVIEW_LINES = 3;
 
 /**
- * 耗时页脚的展示门槛（毫秒）：执行时长**短于**它就不画 `Took 0.1s` 那一行。
+ * Display threshold for the duration footer (milliseconds): executions **shorter** than it do not
+ * draw the `Took 0.1s` line.
  *
- * pi 内置 `renderResult` 无条件在结果末尾画一行 `Took X.Xs`（`state.startedAt` 有值就画），
- * 而它是个独占一行的页脚（外加自己那行前导空行）—— 对几十毫秒的命令来说纯属白占两行。
- * 详见文件头「耗时页脚门槛」一节。
+ * pi's built-in `renderResult` unconditionally draws a `Took X.Xs` line at the result's end
+ * (whenever `state.startedAt` is set), and it is a full-line footer (plus its own leading blank
+ * line) — pure waste of two rows for tens-of-milliseconds commands. See the file header
+ * "duration-footer threshold".
  *
- * `PI_BASH_MIN_TIME_MS` 启动时可改；`0` 是合法值 = 永远显示（等于关掉这个优化）。
+ * `PI_BASH_MIN_TIME_MS` adjusts it at startup; `0` is a legal value = always show (disables the
+ * optimization).
  */
 const DEFAULT_MIN_TIME_FOOTER_MS = 2000;
 
 /**
- * 第三个职责：给每条 bash 命令**强制一个执行期限**（照抄 Claude Code 的策略）。
+ * Responsibility number three: enforce an **execution deadline** on every bash command (copied from
+ * Claude Code's policy).
  *
- * 为什么必须有：pi 的内置 bash `timeout` 是可选参数且**无默认值**（schema 描述原文
- * "Timeout in seconds (optional, no default timeout)"，settings.md 里也没有任何全局
- * 工具超时项），所以模型不传 timeout 时，一条不退出的命令会让 pi **无限期等下去**。
- * 而本扩展默认非流式（onUpdate 被摘掉），内置渲染器的 `Elapsed` 计时器只在
- * `isPartial` 时才起（renderers/bash.js），于是屏幕上「进程卡死」与「纯粹耗时」
- * 长得一模一样 —— 既不会自己脱困，也看不出该不该等。
+ * Why it is mandatory: pi's built-in bash `timeout` is an optional parameter with **no default**
+ * (the schema description literally says "Timeout in seconds (optional, no default timeout)", and
+ * settings.md has no global tool timeout either), so when the model passes no timeout, a command
+ * that never exits leaves pi **waiting forever**. And because this extension is non-streaming by
+ * default (onUpdate stripped), the built-in renderer's `Elapsed` timer only starts under `isPartial`
+ * (renderers/bash.js) — so on screen "process hung" and "merely slow" look identical: it neither
+ * recovers on its own nor shows whether waiting is warranted.
  *
- * Claude Code 的做法（从 v2.1.268 二进制里扒出的原文，JS 是内嵌的）：
- *   var xRo=120000, ARo=600000;                       // 默认 2min / 上限 10min
- *   wCe(env)  → BASH_DEFAULT_TIMEOUT_MS 否则 xRo       // 默认
- *   i7e(env)  → Math.max(BASH_MAX_TIMEOUT_MS 否则 ARo, wCe(env))   // 上限=max(配置,默认)
- *   Math.min(z || Xe(), Be())                          // 模型传的 timeout **静默 clamp**
- * 工具描述里还把数字告诉模型："You may specify an optional timeout in milliseconds
- * (up to ${max}ms…). By default, your command will timeout after ${default}ms…"。
- * 注意它的单位是 ms，pi 的 bash 参数是**秒**，所以下面统一除 1000。
+ * Claude Code's approach (verbatim from the v2.1.268 binary, where the JS is embedded):
+ *   var xRo=120000, ARo=600000;                       // default 2min / cap 10min
+ *   wCe(env)  → BASH_DEFAULT_TIMEOUT_MS else xRo       // default
+ *   i7e(env)  → Math.max(BASH_MAX_TIMEOUT_MS else ARo, wCe(env))   // cap=max(configured,default)
+ *   Math.min(z || Xe(), Be())                          // model-passed timeout **silently clamped**
+ * The tool description also tells the model the numbers: "You may specify an optional timeout in
+ * milliseconds (up to ${max}ms…). By default, your command will timeout after ${default}ms…".
+ * Note its unit is ms while pi's bash parameter is **seconds**, so everything below divides by 1000.
  *
- * env 变量名沿用 Claude Code 的（BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS），
- * 这样两边行为一致、迁移过来的配置直接可用；跟 Claude Code 一样在**调用时**读
- * process.env（不是模块加载时），所以运行时改 env 也生效。
+ * The env names reuse Claude Code's (BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS), so behavior
+ * matches on both sides and migrated configs work directly; like Claude Code, process.env is read
+ * **at call time** (not module load), so changing env at runtime takes effect.
  *
- * 超时后 pi 自己会 `killProcessTree(pid)`（整棵进程树，孙进程一起清）并把
- * "Command timed out after N seconds" 连同已有输出一起返回给模型 —— 这一步不用我们管。
- * 代价（与 Claude Code 同）：合法的长命令（大 build、长跑测试）会被默认期限杀掉，
- * 模型必须自己传更大的 timeout（上限 10min），或者用 env 抬高默认值。
+ * After the timeout, pi itself calls `killProcessTree(pid)` (the whole process tree, grandchildren
+ * included) and returns "Command timed out after N seconds" with the accumulated output to the
+ * model — that part is not ours to handle. The cost (same as Claude Code): legitimate long commands
+ * (big builds, long test runs) get killed by the default deadline; the model must pass a larger
+ * timeout itself (cap 10min) or raise the default via env.
  *
- * **对标审计（对 v2.1.268 二进制逐项核过，别凭文档印象怀疑下面的数值）**：
- * Claude Code 的 env 白名单里只有三个 `BASH_*` 是它自己的 —— `BASH_DEFAULT_TIMEOUT_MS` /
- * `BASH_MAX_TIMEOUT_MS` / `BASH_MAX_OUTPUT_LENGTH`（其余 `BASH_ARGC` / `BASH_SOURCE` 等
- * 都是 bash 自身的内部变量）。前两个就是上面那两个，已对齐；第三个**不采**：它只
- * 控制输出回读窗口（官方原文 "on its own only sizes the read-back window"），而 pi 的
- * 截断是“保留最后 2000 行 / 50KB + 全文写临时文件”，两者机制不同且 pi 的
- * `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES` 是模块常量、扩展改不了。
- * 已知差异（刻意的，不要“顺手对齐”）：
- *   ① **单位**：Claude Code 的 timeout 参数是 ms，pi 是秒 —— 所以 env 读 ms、内部除 1000，
- *     工具描述也用秒（不改 pi 的参数单位，否则会跟它自己的 schema 矛盾）。
- *   ② **非法值**：Claude Code 的 `z || Xe()` 会把**负数**原样透传（负数是 truthy），
- *     我们则把 `<=0` / 非有限值一律归到默认 —— 因为 pi 的 `resolveTimeoutMs` 对 `<=0`
- *     会直接 throw，不归就会把工具调用变成硬报错。NaN 两边行为一致（都落默认）。
- *   ③ **超时语义**：pi 是 throw（tool result 带 isError=true）+ 已积累输出，
- *     Claude Code 是普通结果 + 超时注释 —— 改不了（throw 发生在 `base.execute` 内部）。
- *   ④ Claude Code 的第 2/3 层（`run_in_background` + `BashOutput`/`KillShell`（新名
- *     `TaskOutput`/`TaskStop`）+ `/bashes` + Ctrl+B，以及 `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS`
- *     到点不杀、自动转后台）**未实现**：pi 没有对应物，要做得新增三个工具 + 进程登记表。
- *   ⑤ pi 自己的硬上限 `MAX_TIMEOUT_MS = 2_147_483_647`（≈24.8 天）远高于我们 clamp 的
- *     600s，所以不会撞上 pi 的报错。
+ * **Parity audit (checked item by item against the v2.1.268 binary — do not second-guess the numbers
+ * below from documentation impressions)**:
+ * Claude Code's env allowlist contains exactly three `BASH_*` of its own —
+ * `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` / `BASH_MAX_OUTPUT_LENGTH` (the rest like
+ * `BASH_ARGC` / `BASH_SOURCE` are bash's own internals). The first two are the pair above, aligned;
+ * the third is **not adopted**: it only sizes the output read-back window (official wording: "on its
+ * own only sizes the read-back window"), while pi's truncation is "keep last 2000 lines / 50KB +
+ * write the full output to a temp file" — different mechanisms, and pi's `DEFAULT_MAX_LINES` /
+ * `DEFAULT_MAX_BYTES` are module constants the extension cannot change.
+ * Known differences (deliberate — do not "align" them):
+ *   ① **Units**: Claude Code's timeout parameter is ms, pi's is seconds — so env is read as ms and
+ *     divided by 1000 internally, and the tool description speaks seconds (do not change pi's
+ *     parameter unit; it would contradict its own schema).
+ *   ② **Invalid values**: Claude Code's `z || Xe()` passes **negative** numbers through verbatim
+ *     (negatives are truthy); we normalize `<=0` / non-finite to the default — because pi's
+ *     `resolveTimeoutMs` throws outright on `<=0`, and not normalizing would turn the tool call
+ *     into a hard error. NaN behaves identically on both sides (falls to default).
+ *   ③ **Timeout semantics**: pi throws (tool result carries isError=true) with accumulated output;
+ *     Claude Code returns a normal result plus a timeout note — cannot be changed (the throw
+ *     happens inside `base.execute`).
+ *   ④ Claude Code's layers 2/3 (`run_in_background` + `BashOutput`/`KillShell` (new names
+ *     `TaskOutput`/`TaskStop`) + `/bashes` + Ctrl+B, and `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS`
+ *     auto-backgrounding instead of killing) are **unimplemented**: pi has no counterparts;
+ *     building them means three new tools + a process registry.
+ *   ⑤ pi's own hard cap `MAX_TIMEOUT_MS = 2_147_483_647` (~24.8 days) is far above our 600s clamp,
+ *     so it cannot trip pi's error.
  */
 const CLAUDE_CODE_DEFAULT_TIMEOUT_MS = 120_000;
 const CLAUDE_CODE_MAX_TIMEOUT_MS = 600_000;
 
-/** 读 env 里的毫秒值；非正数/非数字一律当未配置（与 Claude Code 的 `!isNaN(r)&&r>0` 一致）。 */
+/** Read a millisecond value from env; non-positive/non-numeric values count as unset (matches Claude Code's `!isNaN(r)&&r>0`). */
 function readTimeoutEnvMs(name: string): number | undefined {
 	const raw = process.env[name]?.trim();
 	if (!raw) return undefined;
@@ -492,22 +579,23 @@ function readTimeoutEnvMs(name: string): number | undefined {
 	return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-/** 默认期限（秒）。 */
+/** Default deadline (seconds). */
 function defaultTimeoutSeconds(): number {
 	return (readTimeoutEnvMs("BASH_DEFAULT_TIMEOUT_MS") ?? CLAUDE_CODE_DEFAULT_TIMEOUT_MS) / 1000;
 }
 
-/** 期限上限（秒）：Claude Code 是 `Math.max(配置上限, 默认)`，抬高默认时上限跟着抬。 */
+/** Deadline cap (seconds): Claude Code is `Math.max(configured cap, default)` — raising the default raises the cap along. */
 function maxTimeoutSeconds(): number {
 	return Math.max(readTimeoutEnvMs("BASH_MAX_TIMEOUT_MS") ?? CLAUDE_CODE_MAX_TIMEOUT_MS, readTimeoutEnvMs("BASH_DEFAULT_TIMEOUT_MS") ?? CLAUDE_CODE_DEFAULT_TIMEOUT_MS) / 1000;
 }
 
 /**
- * 算出这次执行的**有效期限（秒）**，即 Claude Code 那句 `Math.min(z || default, max)`：
- *   - 模型没传 / 传了非法值（0、负数、NaN、字符串）→ 落到默认期限；
- *   - 传了超过上限的值 → **静默 clamp 到上限**（不报错；Claude Code 同款行为，
- *     它这个静默 clamp 是已知 issue #83824，这里照抄以保持两边一致）。
- * 顺带避开 pi 的硬报错：内置 resolveTimeoutMs 对 <=0 / 非有限值会直接 throw。
+ * Compute the **effective deadline (seconds)** for this run — Claude Code's `Math.min(z || default,
+ * max)`:
+ *   - model passed nothing / an invalid value (0, negative, NaN, string) → fall to the default;
+ *   - passed a value above the cap → **silently clamp to the cap** (no error; same behavior as
+ *     Claude Code — its silent clamp is known issue #83824, copied here for parity).
+ * Also avoids pi's hard error: the built-in resolveTimeoutMs throws outright on <=0 / non-finite.
  */
 function effectiveTimeoutSeconds(requested: unknown): number {
 	const max = maxTimeoutSeconds();
@@ -516,10 +604,10 @@ function effectiveTimeoutSeconds(requested: unknown): number {
 	return Math.min(requestedSeconds, max);
 }
 
-/** grapheme 分段器（pi-tui 没导出它自己的实例，所以本地建一个；Node 内置 Intl.Segmenter）。 */
+/** Grapheme segmenter (pi-tui does not export its own instance, so build one locally; Node's built-in Intl.Segmenter). */
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-/** 一条折行碎片：正文本身（**不含前缀**）、它在**源行**里的字符偏移、以及自己那行的前缀。 */
+/** One wrapped fragment: the body itself (**no prefix**), its character offset in the **source line**, and its own row's prefix. */
 interface WrappedRow {
 	text: string;
 	start: number;
@@ -527,31 +615,37 @@ interface WrappedRow {
 }
 
 /**
- * **break-all 硬折行**：按列预算逐个 grapheme 填充，装满就断 —— 类似 CSS 的
- * `word-break: break-all`，不管断点是不是单词/路径中间。**不丢内容**：碎片拼起来就是
- * 原文（下一步怎么摆、怎么截由调用方决定）。
+ * **break-all hard wrap**: fill grapheme by grapheme up to the column budget and break exactly when
+ * full — like CSS `word-break: break-all`, regardless of whether the break lands mid-word/mid-path.
+ * **No content is dropped**: the fragments reassemble into the original (how they are placed or
+ * truncated next is the caller's decision).
  *
- * 为什么不用 pi-tui 的 `wrapTextWithAnsi`：它是**贪心词折行 + 长词按列断开**，一个装不进
- * 当前行剩余空间的词会被**整块挑到下一行**再去断 —— 实测 79 列终端上 `Run cp <78 列路径>`
- * 渲染成 `Run cp` 单独一行 + 路径从中间断成两截：行尾白白空着几十列（就是“提前折行”那个
- * 难看的样子），命令和它的参数还被拆开。硬折行则把每行填满，`Run ` 后面直接跟命令正文。
+ * Why not pi-tui's `wrapTextWithAnsi`: it is **greedy word wrap + hard split of overlong words** — a
+ * word that does not fit the rest of the current line is **moved wholesale to the next line** and
+ * then split. Measured on a 79-column terminal, `Run cp <78-col path>` rendered as `Run cp` alone on
+ * a line plus the path split mid-string across two lines: dozens of columns wasted at line end (the
+ * ugly "early wrap" look), and the command separated from its argument. Hard wrap fills every line,
+ * with command body directly after `Run `.
  *
- * **前缀按行算**：第 1 行是 `firstPrefix`（`Run `），其余行是 `linePrefix`（`│ ` 或两格
- * 缩进）—— 预算是**扣掉该行前缀宽度之后**的正文预算，所以挂上前缀永远正好占满一行，不会
- * 顶出 gutter 一格（`Run ` 4 列、`│ ` 2 列，两种前缀下正文错一列是刻意的：首行跟着
- * `Run ` 走，续行对齐到 `Run ` 的 `n` 列）。
+ * **Prefixes are per-row**: row 1 is `firstPrefix` (`Run `), the rest are `linePrefix` (`│ ` or
+ * two-cell indent) — the budget is the body budget **after deducting that row's prefix width**, so a
+ * row with its prefix fills exactly one line and never sticks a column past the gutter (`Run ` is 4
+ * columns, `│ ` is 2; the body being off by one column between the two prefixes is deliberate: the
+ * first row follows `Run `, continuations align to `Run `'s `n` column).
  *
- * **带偏移**（`WrappedRow.start`）：命令高亮靠它把「先折行、后上色」接起来 —— token 偏移
- * 是**源行**坐标、碎片是**折行后**坐标，没有这个区间就对不上号（详见 `styleCommandLine`）。
+ * **Carries offsets** (`WrappedRow.start`): command highlighting relies on it to splice "wrap first,
+ * color after" together — token offsets are **source-line** coordinates while fragments are
+ * **post-wrap** coordinates, and without this span they cannot be matched (see `styleCommandLine`).
  *
- * 按 grapheme 而不是按列硬切：emoji / 组合字符的 segment 长度 ≠ 1 个字符，按字符下标切会把
- * 它们切成两半。宽字符（CJK 等，2 列）装不进剩下的 1 列时在它**前面**断行（行尾留 1 列
- * 空白）—— 一个 grapheme 不可分。
+ * Wraps by grapheme, not by column-cutting characters: emoji / combining characters have segment
+ * length ≠ 1 char, and cutting by char index would split them in half. A wide character (CJK etc.,
+ * 2 columns) that cannot fit the remaining 1 column breaks **before** itself (leaving 1 blank
+ * column at line end) — a grapheme is indivisible.
  *
- * @param firstPrefix 第 1 行的前缀（`Run `）
- * @param linePrefix  其余行的前缀（`│ ` / 两格缩进）
- * @param firstRowBudget 第 1 行的**整行**预算（含前缀；timeout 后缀已经从里面扣过了）
- * @param restRowBudget  其余行的**整行**预算
+ * @param firstPrefix prefix of row 1 (`Run `)
+ * @param linePrefix  prefix of the remaining rows (`│ ` / two-cell indent)
+ * @param firstRowBudget **whole-line** budget of row 1 (prefix included; the timeout suffix was already deducted)
+ * @param restRowBudget  **whole-line** budget of the remaining rows
  */
 function hardWrapRows(text: string, firstPrefix: string, linePrefix: string, firstRowBudget: number, restRowBudget: number): WrappedRow[] {
 	const rows: WrappedRow[] = [];
@@ -562,8 +656,8 @@ function hardWrapRows(text: string, firstPrefix: string, linePrefix: string, fir
 	let budget = Math.max(1, firstRowBudget - visibleWidth(firstPrefix));
 	for (const { segment, index } of graphemeSegmenter.segment(text)) {
 		const w = visibleWidth(segment);
-		// rowWidth > 0 守卫：单个 grapheme 比整行预算还宽时（极窄终端）也得放下，
-		// 否则会产生空行死循环
+		// the rowWidth > 0 guard: a single grapheme wider than the whole row budget (extremely
+		// narrow terminal) must still be placed, or this would loop forever on empty rows
 		if (rowWidth > 0 && rowWidth + w > budget) {
 			rows.push({ text: row, start: rowStart, prefix });
 			prefix = linePrefix;
@@ -572,7 +666,7 @@ function hardWrapRows(text: string, firstPrefix: string, linePrefix: string, fir
 			rowWidth = w;
 			rowStart = index;
 		} else {
-			// row 为空说明这是本行第一个 grapheme，记下它在源行里的偏移
+			// an empty row means this is the row's first grapheme — record its offset in the source line
 			if (row === "") rowStart = index;
 			row += segment;
 			rowWidth += w;
@@ -582,20 +676,20 @@ function hardWrapRows(text: string, firstPrefix: string, linePrefix: string, fir
 	return rows;
 }
 
-/** 一条**待上色**的命令行：`text` 是纯文本（含前缀与行尾 `…`），上色信息齐备。 */
+/** A command line **awaiting coloring**: `text` is plain text (prefix and end `…` included), coloring info complete. */
 interface PendingRow {
 	text: string;
 	prefix: string;
-	/** 正文起点在**源行**里的字符偏移（首片为 0，续片为碎片自身偏移）。 */
+	/** Character offset of the body's start within the **source line** (0 for the first fragment, the fragment's own offset after). */
 	sourceStart: number;
 	tokens: ShellToken[] | null;
-	/** 这一行挂上前缀后的整行预算（截断 `…` 用）。 */
+	/** This row's whole-line budget once its prefix is attached (for the truncation `…`). */
 	budget: number;
 }
 
 /**
- * 一条命令的渲染结果。`hiddenLines` 是**整个视觉行**没显示的条数（`0` 就没有标记行），
- * 被行尾 `…` 吃掉的那一行也计在内。
+ * Render result of one command. `hiddenLines` is the number of **whole visual rows** not shown (`0`
+ * = no marker row); the row eaten by the end-of-line `…` is counted too.
  */
 interface CommandRender {
 	lines: string[];
@@ -611,7 +705,7 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
 	while (i < line.length) {
 		const char = line[i]!;
 
-		// 跨行未闭合的引号：吃到本行的闭合引号为止，没有闭合就吃掉整行尾巴
+		// a quote left unclosed from a previous line: consume to this line's closing quote, or the rest of the line if none
 		if (quote) {
 			let j = i;
 			while (j < line.length) {
@@ -642,7 +736,7 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
 			continue;
 		}
 
-		// `#` 只在**词首**才是注释（`foo#bar` 里的 `#` 是普通字符）
+		// `#` starts a comment only at **word start** (the `#` in `foo#bar` is an ordinary char)
 		if (char === "#") {
 			tokens.push({ kind: "comment", start: i, end: line.length });
 			i = line.length;
@@ -657,7 +751,7 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
 			continue;
 		}
 
-		// 词：吃到空白 / 操作符 / 行尾为止，中途遇到引号就连引号一起吞
+		// word: consume to whitespace / operator / end of line; a quote met midway is swallowed with the word
 		let j = i;
 		let wordQuote: string | null = null;
 		while (j < line.length) {
@@ -683,51 +777,54 @@ function tokenizeShellLine(line: string, openQuote: string | null): { tokens: Sh
 		}
 		const word = line.slice(i, j);
 		tokens.push({ kind: classifyShellWord(word, commandExpected), start: i, end: j });
-		// 赋值前缀（`FOO=bar cmd`）后面仍然跟的是命令，其余词都把「该出命令了」清掉
+		// an assignment prefix (`FOO=bar cmd`) is still followed by a command; every other word clears the "command expected" flag
 		if (!SHELL_ASSIGN_PATTERN.test(stripOuterQuotes(word))) commandExpected = false;
 		i = j;
-		if (wordQuote) quote = wordQuote; // 引号没闭合 → 传给下一条源行
+		if (wordQuote) quote = wordQuote; // unclosed quote → hand the state to the next source line
 	}
 
 	return { tokens, openQuote: quote };
 }
 
 /**
- * 命令行前缀的上色。三类前缀三种待遇：
- *   - `Run ` —— **只把 `Run` 这个词加粗**（`toolTitle` 正常色 + bold），后面那个空格与
- *     命令正文一律不加粗（用户 2026-09-21 定的：只有 `Run` 这一个单词是标题）；
- *   - `│ ` —— **结构符**，与结果侧的 `└ ` 同一个 `muted`（`COMMAND_CHAIN_COLOR`），
- *     不加粗；
- *   - 两格缩进（命令还在跑、树还没接上）—— 原样空格、不染色；空串原样返回（同一条
- *     源行折出来的后续碎片没有前缀）。
+ * Coloring of the command-line prefix. Three prefix kinds, three treatments:
+ *   - `Run ` — **only the word `Run` is bold** (`toolTitle` normal color + bold); the space after it
+ *     and the command body are not bold (user decision 2026-09-21: only the single word `Run` is
+ *     the title);
+ *   - `│ ` — **structural glyph**, same `muted` as the result side's `└ ` (`COMMAND_CHAIN_COLOR`),
+ *     not bold;
+ *   - two-cell indent (command still running, tree not yet connected) — plain spaces, uncolored; an
+ *     empty string returns as-is (further fragments wrapped from the same source line have no prefix).
  *
- * 加粗必须**紧贴这个词**（`bold("Run")` 而不是 `bold(prefix)`）：粗体是 SGR `\x1b[1m…\x1b[22m`，
- * 包住前缀会把行尾那个空格也变粗 —— 与正文的间距看着会变宽。
+ * Bold must **hug the word** (`bold("Run")`, not `bold(prefix)`): bold is SGR `\x1b[1m…\x1b[22m`,
+ * and wrapping the prefix would bold the trailing space too — the gap before the body would look wider.
  */
 function styleCommandPrefix(prefix: string, theme: any): string {
 	if (prefix === "" || prefix === COMMAND_INDENT) return prefix;
 	if (prefix === COMMAND_CHAIN) return theme.fg(COMMAND_CHAIN_COLOR, prefix);
-	// `Run ` → `Run`（bold）+ ` `（普通）
+	// `Run ` → `Run` (bold) + ` ` (plain)
 	return theme.fg("toolTitle", theme.bold(prefix.slice(0, -1)) + prefix.slice(-1));
 }
 
 /**
- * 给**一行命令**上色：`prefix` 整段按**结构符**上色（`Run ` = `toolTitle`、`│ ` / 两格缩进 =
- * `muted`，见 `styleCommandPrefix`），`body` 是**不含前缀**的正文，按 token 上色。高亮关掉时
- * 正文整段 `toolTitle` + 粗体（改动前的观感，只是前缀换成了 `Run `）。
+ * Colorize **one command line**: `prefix` is colored wholesale as a **structural glyph** (`Run ` =
+ * `toolTitle`, `│ ` / two-cell indent = `muted`; see `styleCommandPrefix`), and `body` is the
+ * **prefix-free** body colored per token. With highlighting off, the body is wholly `toolTitle` +
+ * bold (the pre-change look, only with `Run ` as the prefix).
  *
- * 前缀的颜色**必须在这一段就闭合**（`\x1b[39m`，由 `theme.fg` 自己收尾）：`│ ` 是**结构符**
- * 而不是正文；要是让后面的 token 色透到前缀上，路径那行的 `│` 就会跟 path 色一起飘
- *（实测踩过）。
+ * The prefix color **must be closed within this segment** (`\x1b[39m`, closed by `theme.fg` itself):
+ * `│ ` is a **structural glyph**, not body; if a later token's color bled into the prefix, the `│`
+ * on a path line would drift along with the path color (observed).
  *
- * `sourceStart` 是 `body` 起点在**源行**里的字符偏移 —— token 的偏移也是源行坐标，折行
- * 碎片从源行任意位置开始，所以必须带着走，否则续行的语法高亮会整体错位。
+ * `sourceStart` is the character offset of `body`'s start within the **source line** — token offsets
+ * are also source-line coordinates and wrap fragments can start anywhere in the source line, so it
+ * must travel along or continuation lines' syntax highlighting shifts wholesale.
  */
 function styleCommandLine(prefix: string, body: string, tokens: ShellToken[] | null, sourceStart: number, theme: any): string {
 	const head = styleCommandPrefix(prefix, theme);
 	if (!tokens) return head + theme.fg("toolTitle", body);
 
-	// 正文一律不加粗（只有 `Run` 那个词是粗体，见 styleCommandPrefix）
+	// the body is never bold (only the word `Run` is — see styleCommandPrefix)
 	const style = (kind: ShellTokenKind, chunk: string) => {
 		const color = SHELL_TOKEN_COLORS[kind];
 		return color === null ? chunk : theme.fg(color, chunk);
@@ -745,17 +842,19 @@ function styleCommandLine(prefix: string, body: string, tokens: ShellToken[] | n
 		out += style(token.kind, body.slice(from - sourceStart, to - sourceStart));
 		cursor = to;
 	}
-	// token 连续覆盖整行，所以正常走不到这里；真走到就按老样子兜底，不丢字符
+	// tokens cover the whole line contiguously, so this is unreachable in normal flow; if reached, fall back plainly without dropping characters
 	if (cursor < sourceEnd) out += theme.fg("toolTitle", body.slice(cursor - sourceStart));
 	return out;
 }
 
 /**
- * 把行尾一个可见字符换成 `…`：`prefix + text` 的可见宽度保持不变（空正文原样返回）。
+ * Replace the last visible character of a line with `…`: the visible width of `prefix + text` stays
+ * unchanged (empty body returns as-is).
  *
- * 为什么不用 `truncateToWidth(row, budget, ELLIPSIS)`：目标串已经**装满**预算时它直接
- * 原样返回（`visibleWidth <= maxWidth` 就不动），而行满恰恰是最常见的溢出形态。
- * 宽字符占 2 列、装不下时会白空 1 列，可接受（与 `hardWrapRows` 的断行规则同源）。
+ * Why not `truncateToWidth(row, budget, ELLIPSIS)`: when the target string has **exactly filled** the
+ * budget it returns as-is (`visibleWidth <= maxWidth` is left alone), and a full line is precisely
+ * the most common overflow shape. A wide char takes 2 columns and may leave 1 blank column when it
+ * cannot fit — acceptable (same wrap rule as `hardWrapRows`).
  */
 function ellipsizeTail(prefix: string, text: string, budget: number): string {
 	if (text === "") return text;
@@ -772,19 +871,24 @@ function ellipsizeTail(prefix: string, text: string, budget: number): string {
 }
 
 /**
- * 渲染一条命令（可能多源行）：折行到 `limit` 个视觉行，装不下的归 `hiddenLines`。
+ * Render one command (possibly several source lines): wrap into `limit` visual rows; what does not
+ * fit goes into `hiddenLines`.
  *
- * 前缀：第 1 条源行用 `firstPrefix`（`Run `）起头，它折出来的续行、以及后面每条源行都用
- * `linePrefix`（`│ ` 或两格缩进）—— 于是续行的正文对齐到 `Run ` 的 `n` 列（见文件头）。
+ * Prefixes: the first source line starts with `firstPrefix` (`Run `); the continuations wrapped out
+ * of it and every later source line use `linePrefix` (`│ ` or two-cell indent) — so continuation
+ * bodies align to `Run `'s `n` column (see file header).
  *
- * 规则（详见文件头「命令行：2 行 + `Run ` 前缀」）：
- *   ① **只要有溢出**，最后保留的那个视觉行末尾就换成 `…`（不管溢出的是一行的尾巴
- *      还是后面几行）；没溢出就一个 `…` 也不画；
- *   ② `hiddenLines` = 最后保留行**之后**还剩多少个视觉行：本条源行折到但没显示的碎片各
- *      算 1 行，后面每条没轮到的源行再各算 1 行。
+ * Rules (see file header "command line: 2 lines + `Run ` prefix"):
+ *   ① **Whenever there is overflow**, the tail of the last kept visual row is replaced with `…`
+ *      (whether the overflow is one row's tail or several later rows); with no overflow, no `…` is
+ *      drawn at all;
+ *   ② `hiddenLines` = how many visual rows remain **after** the last kept row: each fragment of the
+ *      current source line that was wrapped but not shown counts 1, and each later source line not
+ *      reached counts 1.
  *
- * 折行、截断都在**纯文本**上做（`hardWrapRows` / `ellipsizeTail` 负责自带前缀的宽度），
- * 最后才逐行上色 —— 反过来会把 SGR 序列从中间切断。
+ * Wrapping and truncation both run on **plain text** (`hardWrapRows` / `ellipsizeTail` account for
+ * their own prefix widths), and coloring happens last, row by row — the other way around would cut
+ * SGR sequences in half.
  */
 function renderCommandLines(
 	lines: string[],
@@ -797,8 +901,8 @@ function renderCommandLines(
 	limit: number,
 	theme: any,
 ): CommandRender {
-	// 先全部按**纯文本**摆好（前缀 + 折行 + 行尾 `…`），最后一步再上色 —— 行尾 `…`
-	// 必须在纯文本上放，否则会把 SGR 序列从中间切断
+	// lay everything out as **plain text** first (prefix + wrap + end `…`), colorize last — the end `…`
+	// must go on plain text, or it would cut SGR sequences in half
 	const pending: PendingRow[] = [];
 	let hiddenLines = 0;
 	let hiddenTail = 0;
@@ -806,15 +910,15 @@ function renderCommandLines(
 
 	for (let index = 0; index < lines.length; index++) {
 		if (pending.length >= limit) {
-			// 后面每条源行都算一行没显示（它自己折几行不改变这个事实）
+			// every later source line counts as one row not shown (how many rows it would itself wrap into does not change that)
 			hiddenLines += lines.length - index;
 			break;
 		}
 		const line = lines[index]!;
-		// 第 1 条源行用 `Run ` 起头，其余源行用它自己的续行前缀
+		// the first source line starts with `Run `; the rest use their own continuation prefix
 		const head = pending.length === 0 ? firstPrefix : linePrefix;
 		const rows = hardWrapRows(line, head, linePrefix, Math.max(1, pending.length === 0 ? firstRowBudget : restRowBudget), restRowBudget);
-		// 引号状态同上一条源行一样跨行保留（分词只影响上色，与摆行顺序无关）
+		// quote state carries across source lines the same way (tokenization only affects coloring, not row order)
 		const tokenized = highlight ? tokenizeShellLine(line, quote) : { tokens: null, openQuote: quote };
 		quote = tokenized.openQuote;
 
@@ -831,7 +935,7 @@ function renderCommandLines(
 			});
 		}
 		if (rows.length > take) {
-			// 本条源行还有碎片没放下：它们就是“没显示的视觉行”
+			// this source line still has fragments unplaced: they are the "visual rows not shown"
 			hiddenTail = rows.length - take;
 			break;
 		}
@@ -839,7 +943,7 @@ function renderCommandLines(
 
 	hiddenLines += hiddenTail;
 	if (hiddenLines > 0 && pending.length > 0) {
-		// 还剩内容没显示：最后保留的那行末尾换成 `…`（宽度不变）
+		// content remains unshown: replace the tail of the last kept row with `…` (width unchanged)
 		const last = pending[pending.length - 1]!;
 		last.text = ellipsizeTail(last.prefix, last.text, last.budget);
 	}
@@ -852,14 +956,14 @@ function renderCommandLines(
 
 type ShellTokenKind = "space" | "comment" | "operator" | "command" | "flag" | "string" | "path" | "variable" | "word";
 
-/** 一个词法单元；`start`/`end` 是**源行内**的字符偏移（不含 `$ ` 前缀）。 */
+/** One lexical unit; `start`/`end` are character offsets **within the source line** (excluding the `$ ` prefix). */
 interface ShellToken {
 	kind: ShellTokenKind;
 	start: number;
 	end: number;
 }
 
-/** token → 主题色槽。`null` = 不上色（空白原样输出）。 */
+/** token → theme color slot. `null` = not colored (whitespace emitted as-is). */
 const SHELL_TOKEN_COLORS: Record<ShellTokenKind, ThemeColor | null> = {
 	space: null,
 	comment: "syntaxComment",
@@ -872,18 +976,18 @@ const SHELL_TOKEN_COLORS: Record<ShellTokenKind, ThemeColor | null> = {
 	word: "syntaxString",
 };
 
-/** `$VAR` / `${VAR}`。 */
+/** `$VAR` / `${VAR}`. */
 const SHELL_VAR_PATTERN = /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/;
-/** 赋值：`NAME=`。 */
+/** Assignment: `NAME=`. */
 const SHELL_ASSIGN_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /**
- * 操作符，**先长后短**按顺序取第一个匹配。重定向那条带可选的数字 fd，所以
- * `2>&1` 会被切成 `2>&`（操作符）+ `1`（词）而不是把 `2` 当成参数。
+ * Operators, matched **longest first** — first match wins. The redirect entry carries an optional
+ * numeric fd, so `2>&1` is cut as `2>&` (operator) + `1` (word) rather than treating `2` as an argument.
  */
 const SHELL_OPERATOR_PATTERNS = [/^&&/, /^\|\|/, /^\|&/, /^;;/, /^<<-?/, /^\d*(?:>>|>&|<&|<|>)/, /^[|&;()]/];
-/** 能起头的操作符字符（粗筛用，避免对每个字符都跑一遍正则 —— 长命令行下是 O(n²)）。 */
+/** Characters that can start an operator (coarse filter — avoids running the regex per character, which is O(n²) on long command lines). */
 const SHELL_OPERATOR_CHARS = new Set(["|", "&", ";", "(", ")", "<", ">"]);
-/** 这些操作符后面接的是新命令（`cmd1 | cmd2`），其余（重定向等）后面接的是参数。 */
+/** A new command follows these operators (`cmd1 | cmd2`); the rest (redirects etc.) are followed by arguments. */
 const SHELL_COMMAND_NEXT_OPS = new Set(["|", "||", "&&", ";", "&", "|&", "("]);
 
 function stripOuterQuotes(word: string): string {
@@ -891,7 +995,7 @@ function stripOuterQuotes(word: string): string {
 	return match ? match[2]! : word;
 }
 
-/** 纯数字后面紧跟 `<`/`>` 才是 fd 重定向（`2>`）；否则 `foo2` 里的 `2` 属于词。 */
+/** A bare number immediately before `<`/`>` is an fd redirect (`2>`); otherwise the `2` in `foo2` belongs to the word. */
 function isFdRedirectAt(line: string, pos: number): boolean {
 	let j = pos;
 	while (j < line.length && line[j]! >= "0" && line[j]! <= "9") j++;
@@ -899,7 +1003,7 @@ function isFdRedirectAt(line: string, pos: number): boolean {
 	return next === "<" || next === ">";
 }
 
-/** 在 `pos` 处匹配一个操作符；不是操作符返回 null。 */
+/** Match an operator at `pos`; null when there is none. */
 function matchShellOperatorAt(line: string, pos: number): string | null {
 	const char = line[pos]!;
 	if (!SHELL_OPERATOR_CHARS.has(char) && !(char >= "0" && char <= "9")) return null;
@@ -912,8 +1016,9 @@ function matchShellOperatorAt(line: string, pos: number): string | null {
 }
 
 /**
- * 词的归类。顺序有意义：赋值 > 引号串 > 选项 > `$VAR` > 路径 > 命令/参数。
- * `"--foo"` 算引号串而不是选项；`$HOME/x` 算变量而不是路径（`$` 优先）。
+ * Word classification. Order matters: assignment > quoted string > option > `$VAR` > path >
+ * command/argument. `"--foo"` is a quoted string, not an option; `$HOME/x` is a variable, not a path
+ * (`$` wins).
  */
 function classifyShellWord(word: string, commandExpected: boolean): ShellTokenKind {
 	const normalized = stripOuterQuotes(word);
@@ -921,47 +1026,53 @@ function classifyShellWord(word: string, commandExpected: boolean): ShellTokenKi
 	if (word.startsWith("'") || word.startsWith('"')) return "string";
 	if (word.startsWith("-") && word.length > 1) return "flag";
 	if (SHELL_VAR_PATTERN.test(normalized)) return "variable";
-	// 含 `/` 就是路径；额外的分支覆盖裸的 `.` / `..` / `~`
+	// containing `/` means a path; the extra branch covers bare `.` / `..` / `~`
 	if (normalized.includes("/") || /^\.{1,2}(?:\/|$)/.test(normalized) || normalized.startsWith("~/")) return "path";
 	return commandExpected ? "command" : "word";
 }
 
 /**
- * 给一条源行分词。token **连续覆盖整行**（含空白 token），所以折行碎片可以直接按
- * 偏移切片上色，不用再去猜碎片和 token 的对应关系。
+ * Tokenize one source line. Tokens **cover the whole line contiguously** (whitespace tokens
+ * included), so wrap fragments can be sliced and colored by offset directly — no guessing which
+ * fragment maps to which token.
  *
- * `openQuote` 是上一条源行留下的未闭合引号：多行字符串的第二行整段算 string，
- * 不会被当成一条新命令重新分词。分词**不会失败**（不像参照插件那样返回 undefined
- * 退回 highlightCode）—— 引号没闭合就一路吃到行尾并把状态传给下一条源行。
+ * `openQuote` is an unclosed quote left by the previous source line: the second line of a multi-line
+ * string counts as string wholesale instead of being re-tokenized as a new command. Tokenization
+ * **cannot fail** (unlike the reference plugin, which returns undefined and falls back to
+ * highlightCode) — an unclosed quote simply consumes to end of line and hands the state to the next
+ * source line.
  */
 
 /**
- * 给**一行命令**上色：`prefix` 整段 `toolTitle` 正常色（`Run ` / `│ ` / 两格缩进），`body`
- * 是**不含前缀**的正文，按 token 上色。高亮关掉时正文整段 `toolTitle` + 粗体（改动前的
- * 观感，只是前缀换成了 `Run `）。
+ * Colorize **one command line**: `prefix` is wholly `toolTitle` normal color (`Run ` / `│ ` /
+ * two-cell indent); `body` is the **prefix-free** body, colored per token. With highlighting off the
+ * body is `toolTitle` + bold (the pre-change look, only with `Run ` as the prefix).
  *
- * `sourceStart` 是 `body` 起点在**源行**里的字符偏移 —— token 的偏移也是源行坐标，折行
- * 碎片从源行任意位置开始，所以必须带着走，否则续行的语法高亮会整体错位。
+ * `sourceStart` is the character offset of `body`'s start within the **source line** — token offsets
+ * are also source-line coordinates and wrap fragments can start anywhere in the source line, so it
+ * must travel along or continuation lines' syntax highlighting shifts wholesale.
+ */
 
-/** pi 的 agent 目录（`PI_CODING_AGENT_DIR` 可覆盖，否则 `~/.pi/agent`）。 */
+/** pi's agent directory (`PI_CODING_AGENT_DIR` overrides; `~/.pi/agent` otherwise). */
 function resolveAgentDir(): string {
 	const envDir = process.env.PI_CODING_AGENT_DIR;
 	return envDir ? (envDir.startsWith("~") ? join(homedir(), envDir.slice(1)) : envDir) : join(homedir(), ".pi", "agent");
 }
 
 /**
- * `app.tools.expand` 的键名文本，给自建的提示行用。
+ * Key-name text for `app.tools.expand`, for the self-built hint line.
  *
- * 为什么不直接用 pi 导出的 `keyText` / `keyHint`：扩展里 `import` 到的
- * `@earendil-works/pi-coding-agent` / `pi-tui` 是 loader alias 指向的 **npm/dist 副本**，
- * 与 pi 运行时（bundle）用的是两个不同的模块实例。实测（在 `~/.pi/agent/npm` 下直接
- * `node` 跑）：`keyHint("app.tools.expand", "to expand")` **直接抛**
- * `Theme not initialized. Call initTheme() first.`（它读的是副本自己的 theme 单例，
- * 而 pi 只初始化了 bundle 那份），`keyText(...)` 则返回 `""`（副本的 keybindings
- * 表是空的）。而 renderResult 抛异常会被 pi 静默 catch 并退回 `createResultFallback()`，
- * 整个自定义渲染就没了 —— 所以这两个函数绝不能 import，只能读配置文件。
+ * Why not use pi's exported `keyText` / `keyHint` directly: the `@earendil-works/pi-coding-agent` /
+ * `pi-tui` that an extension `import`s is the **npm/dist copy** the loader alias points to — a
+ * different module instance from the one in pi's runtime (bundle). Measured (running `node` directly
+ * under `~/.pi/agent/npm`): `keyHint("app.tools.expand", "to expand")` **throws** `Theme not
+ * initialized. Call initTheme() first.` (it reads the copy's own theme singleton, while pi only
+ * initialized the bundle's), and `keyText(...)` returns `""` (the copy's keybindings table is empty).
+ * And a throw inside renderResult is silently caught by pi, falling back to
+ * `createResultFallback()` — the whole custom rendering gone. So those two functions must never be
+ * imported; the config file is read instead.
  *
- * 默认值 `ctrl+o` 就是 pi 的默认绑定（`docs/keybindings.md` 的 `app.tools.expand` 行）。
+ * The default `ctrl+o` is pi's default binding (the `app.tools.expand` row in `docs/keybindings.md`).
  */
 function expandKeyText(): string {
 	try {
@@ -971,15 +1082,15 @@ function expandKeyText(): string {
 		const text = keys.filter((k: unknown): k is string => typeof k === "string" && k.trim() !== "").join("/");
 		if (text) return text;
 	} catch {
-		// 没配置文件 / 解析失败 / 没绑这个键，都用默认值
+		// missing config file / parse failure / key unbound — all fall back to the default
 	}
 	return "ctrl+o";
 }
 
 /**
- * 归一耗时页脚门槛（毫秒）：未设置 / 空串 / 非法值（NaN、负数）一律落到默认 2000；
- * **`0` 是合法值**（永远显示，等于关掉这个优化）—— 所以不能用 `value || DEFAULT` 那种写法。
- * 与 `clampPreviewLines` 一样在扩展注册时读一次。
+ * Normalize the duration-footer threshold (ms): unset / empty / illegal values (NaN, negative) all
+ * fall to the default 2000; **`0` is a legal value** (always show — disables the optimization), so
+ * the `value || DEFAULT` idiom cannot be used. Read once at registration, like `clampPreviewLines`.
  */
 function resolveMinTimeFooterMs(raw: string | undefined): number {
 	if (raw === undefined || raw.trim() === "") return DEFAULT_MIN_TIME_FOOTER_MS;
@@ -988,8 +1099,9 @@ function resolveMinTimeFooterMs(raw: string | undefined): number {
 }
 
 /**
- * 把输出预览行数归一到 1-50 的整数；非法值（NaN / <=0 / 小数）一律落到默认 3。
- * 刻意用 Number 而不是 parseInt：parseInt("2.5") 会静默变成 2，而这里是归一到默认。
+ * Normalize the output-preview line count to an integer in 1-50; illegal values (NaN / <=0 /
+ * fraction) all fall to the default 3. Deliberately Number, not parseInt: parseInt("2.5") silently
+ * becomes 2, while here it should normalize to the default.
  */
 function clampPreviewLines(value: number): number {
 	if (!Number.isFinite(value) || value < 1 || value > 50 || !Number.isInteger(value)) return DEFAULT_OUTPUT_PREVIEW_LINES;
@@ -997,8 +1109,9 @@ function clampPreviewLines(value: number): number {
 }
 
 /**
- * 读 shellPath / shellCommandPrefix 设置，让覆盖后的 bash 工具和内置工具行为一致
- * （内置工具由 AgentSession 用 settings 里的这两个值构造）。
+ * Read the shellPath / shellCommandPrefix settings so the overridden bash tool behaves identically
+ * to the built-in one (the built-in tool is constructed by AgentSession from these two settings
+ * values).
  */
 function readShellOptions(): BashToolOptions {
 	const paths = [join(resolveAgentDir(), "settings.json"), join(process.cwd(), ".pi", "settings.json")];
@@ -1009,7 +1122,7 @@ function readShellOptions(): BashToolOptions {
 			const parsed = JSON.parse(readFileSync(path, "utf8"));
 			if (parsed && typeof parsed === "object") Object.assign(merged, parsed);
 		} catch {
-			// 缺文件 / 解析失败都按默认值处理
+			// missing file / parse failure — both fall back to defaults
 		}
 	}
 
@@ -1024,15 +1137,17 @@ function readShellOptions(): BashToolOptions {
 }
 
 /**
- * 剥掉组件渲染结果的前导空行。
+ * Strip leading blank lines from a component's rendered output.
  *
- * 内置 bash 的 renderResult 会在输出前插一个前导空行（`new Text("\n" + styledOutput)`），
- * 在默认 shell 下那是“命令与输出之间的一行间距”；但本扩展走 self 模式，命令与输出是
- * 两个独立的块，这一行会叠上两个 Box 各自的 paddingY，变成三行空白（实测）。
- * 用户 2026-09-21 定的形状里命令与输出要**紧贴**，所以这一行照旧剥掉。
- * 先判 ANSI 再 trim：行里可能带前景色转义序列，直接 trim() 不会为空。
- * 只剥**前导**空行：输出与 "Took" 之间那个空行（也是 `\n` 前缀）刻意保留，
- * 用来分隔正文与耗时页脚。
+ * The built-in bash renderResult inserts a leading blank line before the output (`new Text("\n" +
+ * styledOutput)`) — under the default shell that is "one row of spacing between command and output";
+ * but this extension runs in self mode where command and output are two separate blocks, and that
+ * row stacks with both Boxes' paddingY into three blank rows (observed). The user's 2026-09-21 shape
+ * wants command and output **flush**, so the row is stripped as before.
+ * Check ANSI before trim: a row may carry a foreground escape sequence and a direct trim() would
+ * not be empty.
+ * Only **leading** blanks are stripped: the blank between output and "Took" (also a `\n` prefix) is
+ * deliberately kept, separating body from duration footer.
  */
 function stripLeadingBlanks(inner: any) {
 	return {
@@ -1049,35 +1164,40 @@ function stripLeadingBlanks(inner: any) {
 }
 
 /**
- * 给命令的每一行补上**块左边距**（`• ` + 一列，见文件头「命令行首行的状态圆点」）：首行是
- * 状态圆点 `•` + 一个空格，其余行是两个空格。
+ * Add the **block left margin** to every command row (`• ` + one column; see the file header "the
+ * state dot on the command line's first row"): the first row is the state dot `•` + one space, all
+ * other rows are two spaces.
  *
- * 为什么这几格得由扩展自己画、而不是让 `Box` 的 `paddingX` 去补：`Box` 补出来的空白是**每行
- * 都一样**的，首行想要圆点就没地方画了。所以调用侧的 `Box` 用 `paddingX: 0`，左边距搬到这里
- * —— 于是首行是 `• Run …`、续行是 ` │ …` / `   …`，`Run` 的 `R`（列 2）与续行 / 结果树的
- * `│` `└`（也列 2）对齐，所有正文列（列 4）也对齐。
+ * Why these cells must be painted by the extension instead of `Box`'s `paddingX`: what `Box` pads
+ * is **the same on every row** — there would be nowhere to draw the first-row dot. So the caller's
+ * `Box` uses `paddingX: 0` and the left margin moved here — making the first row `• Run …`,
+ * continuation rows ` │ …` / `   …`, `Run`'s `R` (column 2) aligned with the `│` `└` of continuation
+ * / result rows (also column 2), and all body columns (column 4) aligned too.
  *
- * 结果侧那条路径（`withPreviewLimit` / `prefixTreeLines`）挂的是同一份缩进，只是没有圆点 —— 用户 2026-09-21
- * 第二轮定要把两侧一起右移一列，所以两边的宽度预算必须一起改（见 `INDENT_WIDTH`）。
+ * The result-side path (`withPreviewLimit` / `prefixTreeLines`) hangs the same indent, minus the dot
+ * — the user's second-round call on 2026-09-21 moved both sides one column right together, so the
+ * width budgets of both sides must change together (see `INDENT_WIDTH`).
  *
- * 搬进来之后孩子的渲染宽度比 `Box` 时宽，所以调用方要自己把用掉的列扣回去
- *（`renderCall` / `withPreviewLimit` 里的 `width - GUTTER_WIDTH - INDENT_WIDTH`）。
+ * Once moved inside, children render wider than they would inside `Box`, so callers must deduct the
+ * spent columns themselves (`width - GUTTER_WIDTH - INDENT_WIDTH` in `renderCall` /
+ * `withPreviewLimit`).
  */
 function withHeadBar(lines: string[], bar: string): string[] {
 	return lines.map((line, index) => (index === 0 ? `${bar} ${line}` : `  ${line}`));
 }
 
 /**
- * 这条命令当前该用哪个槽的颜色画那颗状态圆点（用户 2026-09-21 定；字形从 `▎` 换成 `•`
- * 时**着色逻辑一字未动**）：
+ * Which slot's color should paint the state dot for this command right now (user decision
+ * 2026-09-21; the coloring logic **did not change by one character** when the glyph changed from `▎`
+ * to `•`):
  *
- *   - 执行中（`isPartial`）→ `dim`（暗灰）
- *   - 执行完且成功 → `toolDiffAdded`（diff 新增行的绿）
- *   - 执行完且失败 → `toolDiffRemoved`（diff 删除行的红）
+ *   - running (`isPartial`) → `dim` (dark gray)
+ *   - finished OK → `toolDiffAdded` (the green of diff added-lines)
+ *   - finished failed → `toolDiffRemoved` (the red of diff removed-lines)
  *
- * 三个槽 pi 的 theme schema 都**必需**（内置 dark / light 与三个自建皮肤都有），所以
- * 不像 `bashOutput` 那样需要探测；取的是**前景** ANSI，后面补一个 `\x1b[39m` 收尾，
- * 颜色不会洇到后面的 `Run` 上。
+ * All three slots are **required** in pi's theme schema (present in built-in dark / light and all
+ * three custom skins), so unlike `bashOutput` no probe is needed; what is taken is the **foreground**
+ * ANSI followed by a `\x1b[39m` terminator, so the color cannot bleed onto the `Run` after it.
  */
 function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string {
 	const slot: ThemeColor = isPartial ? "dim" : isError ? "toolDiffRemoved" : "toolDiffAdded";
@@ -1085,47 +1205,52 @@ function stateBarAnsi(theme: any, isPartial: boolean, isError: boolean): string 
 }
 
 /**
- * 树形 gutter 占的列数（`│ ` / `└ ` = 1 个 box-drawing 字符 + 1 个空格 = 2 列）。
- * 输出子组件必须按 `width - GUTTER_WIDTH - INDENT_WIDTH` 渲染，否则加上前缀就超宽。
+ * Columns the tree gutter occupies (`│ ` / `└ ` = 1 box-drawing char + 1 space = 2 columns).
+ * Output child components must render at `width - GUTTER_WIDTH - INDENT_WIDTH`, or adding the prefix
+ * overflows.
  */
 const GUTTER_WIDTH = 2;
 /**
- * 整块**左边距**里、gutter 之外多让出来的那一列（用户 2026-09-21 第二轮定的：
- * 正文整体再右移一格，`• Run …` 而不是 `▎Run …`）。
+ * The one extra column yielded beyond the gutter inside the block's **left margin** (the user's
+ * second-round call on 2026-09-21: body shifted one more column right, `• Run …` rather than `▎Run …`).
  *
- * 命令侧与结果侧**用的是同一个值**：命令行首行是 `• `（圆点 + 空格）、结果树每行前面多这一格
- *（命令行的续行前缀 `│ ` 已经自带一个空格，所以它只在 `COMMAND_PROMPT` 的左侧再加这一列）。
- * 两边同宽才不会让命令与结果错开 —— 改一边必须改另一边。
+ * The command side and the result side **use the same value**: the command's first row is `• ` (dot
+ * + space) and every result-tree row gets this extra cell in front (a command continuation prefix
+ * `│ ` already carries one space, so it only needs this column added left of `COMMAND_PROMPT`).
+ * Equal width on both sides keeps command and result aligned — change one side and you must change
+ * the other.
  */
 const INDENT_WIDTH = 1;
-/** 树里“还有下文”的行：命令续行、命令折叠标记、输出的截断提示。 */
+/** Tree rows of "more follows": command continuations, the command collapse marker, output truncation hints. */
 const GUTTER_PIPE = COMMAND_CHAIN;
-/** 树里“正文内容”的续行缩进（与 `└ ` 等宽 + 块左边距，正文对齐）。 */
+/** Continuation indent for "body content" in the tree (same width as `└ ` + block left margin — body stays aligned). */
 const GUTTER_BODY = COMMAND_INDENT + " ".repeat(INDENT_WIDTH);
-/** 整块左边距里 gutter 之外的那一列（`INDENT_WIDTH` 个空格），挂在**每一行**结果前面。 */
+/** The one column beyond the gutter in the block's left margin (`INDENT_WIDTH` spaces), hung in front of **every** result row. */
 const INDENT = " ".repeat(INDENT_WIDTH);
 
 /**
- * 输出预览自己补的那条截断提示（`… (N earlier lines, <key> to expand)`）的形态。
+ * The shape of the truncation-hint line the output preview supplies itself (`… (N earlier lines,
+ * <key> to expand)`).
  */
 function isPreviewHintLine(line: string): boolean {
 	const plain = stripAnsiCodes(line);
-	// `... ` 是 pi 内置的写法（`truncateToWidth` 的省略号），`… ` 是我们在
-	// `trimPreviewLines` 里改写的那个，两种形态都要认。
+	// `... ` is pi's built-in spelling (`truncateToWidth`'s ellipsis); `… ` is the one we
+	// rewrite in `trimPreviewLines` — both shapes must be recognized.
 	return (plain.startsWith("... (") || plain.startsWith(`${ELLIPSIS} (`)) && plain.includes("earlier lines");
 }
 
 /**
- * 这个（剥掉 SGR 后的）纯文本是不是 pi 的**失败状态行**。
+ * Whether this (SGR-stripped) plain text is pi's **failure status line**.
  *
- * pi 把命令的失败状态**焊死在输出正文里** —— `core/tools/bash.ts` 三处
- * `throw new Error(appendStatus(text, status))`，而 `appendStatus` 是
- * `` `${text ? `${text}\n\n` : ""}${status}` ``。三个 status：退出码非 0 / 超时被杀 / 被中断，
- * 都是失败。
+ * pi welds the command's failure status **into the output body** — `core/tools/bash.ts` throws
+ * `throw new Error(appendStatus(text, status))` in three places, where `appendStatus` is
+ * `` `${text ? `${text}\n\n` : ""}${status}` ``. Three statuses: nonzero exit code / killed by
+ * timeout / aborted — all failures.
  *
- * 结果里没有独立字段、`details` 里也没标记，**想单独给它上色只能按文本形态认**。所以调用方
- * 还得用 `context.isError` 把“真的是错的那次”加上 —— 本函数只管形态那半边（见文件头
- * 「失败状态」一节）。
+ * The result has no separate field and `details` carries no marker, so **the only way to color it
+ * alone is recognizing the text shape**. That is why the caller must also add `context.isError` for
+ * "this run really errored" — this function only judges the shape half (see the file header
+ * "failure status" section).
  */
 function isFailureStatusLine(line: string): boolean {
 	const plain = stripAnsiCodes(line).trim();
@@ -1133,11 +1258,12 @@ function isFailureStatusLine(line: string): boolean {
 }
 
 /**
- * 把失败状态行换成 `error` 前景色（`prefixTreeLines` 上树前调用，只动颜色、不动文本）。
+ * Recolor the failure status line to the `error` foreground (called by `prefixTreeLines` before
+ * tree-mounting; touches color only, never the text).
  *
- * pi 写的是 `theme.fg("toolOutput", line)`（默认 gray）—— 那一行只有一个 SGR 前缀、末尾
- * 一个 `\u001b[39m`，所以直接拆掉重包一层 `error` 就行（不会丢内层样式：这一行本来就
- * 没有）。行尾补白原样接回去，于是可见宽度不变。
+ * pi writes `theme.fg("toolOutput", line)` (gray by default) — that row is a single SGR prefix plus
+ * a `\u001b[39m` at the end, so stripping and rewrapping in `error` just works (no inner styling is
+ * lost: there is none). The end padding is spliced back verbatim, so the visible width is unchanged.
  */
 function colorizeFailureStatus(line: string, theme: any): string {
 	if (!isFailureStatusLine(line)) return line;
@@ -1146,12 +1272,14 @@ function colorizeFailureStatus(line: string, theme: any): string {
 }
 
 /**
- * 把**整块结果**的行数组画成树形：**第一个实质内容行**挂 `└ `，它前面的行（截断提示）
- * 挂 `│ `，它后面的行缩进两格（`  `），空行原样保留。
+ * Paint the **whole result**'s line array into a tree: the **first substantive content row** gets
+ * `└ `, the rows before it (truncation hints) get `│ `, the rows after it get a two-cell indent
+ * (`  `), and blank rows stay blank.
  *
- * 用户定的形状（2026-09-21）：`└ ` 在**整块结果里只出现一次**、就在第一个实质输出行上；
- * 那之下的内容行（第二行正文、warnings、`Took Xs` 页脚）不再画竖线，只用等宽缩进对齐
- * 正文 —— 树在 `└` 那里就“落地”了，不再向下延伸：
+ * The user-specified shape (2026-09-21): `└ ` appears **once in the whole result**, on the first
+ * substantive output row; content rows below it (second body row, warnings, the `Took Xs` footer)
+ * draw no more verticals — only fixed-width indent aligns the body. The tree "lands" at `└` and
+ * does not extend further:
  *
  * ```
  * Run cat big.txt
@@ -1160,48 +1288,53 @@ function colorizeFailureStatus(line: string, theme: any): string {
  *   line 13
  * ```
  *
- * 三个不能想当然的点：
- *   ① **必须在所有 child 的行走完后再统一上前缀**（不能逐 child 各画一棵树）：
- *     `└ ` 只能在整块里出现一次，逐 child 画会让第二段（warnings / 页脚）又长出一个
- *     `└ ` —— 实测过，输出里会出现两行带拐角符的正文。
- *   ② **前导空行不上前缀**：那是命令与输出之间的分隔行（pi 的 `new Text("\n" + …)`），
- *     外层 `stripLeadingBlanks` 还要靠「这一行是空的」把它剥掉 —— 一旦挂上前缀就变成
- *     非空行，剥不掉了（行里可能带前景色转义序列，所以判空必须先剔 ANSI 再 trim，
- *     与 `stripLeadingBlanks` 的判法一致）。footer / warnings 段自己那个前导空行
- *     同理留成空行，当作结果内部的段落间距。
- *   ③ 截断提示行（`… (N earlier lines, …)`）在正文前面，所以它挂 `│ `（“下文还没完”），
- *     `└ ` 留给正文第一行。
- *   ④ **前缀自成一段 SGR**（`theme.fg("muted", GUTTER_PIPE)` 把它单独包起来），绝不让后面
- *     正文的颜色透上来 —— 拐角符 / 竖线是结构符，`└ ` 与它后面的正文因此是同一种灰。
- *   ⑤ **栅栏以上的空行也带 `│ `**（用户 2026-09-21 第二次报的：`│ … (326 earlier lines…)`
- *     与 `└ Node.js v26.4.0` 之间那个空行，光秃秃地空着就成了“断层”）。这类空行来自 pi 的
- *     预览窗口开头（`truncateToVisualLines` 从尾部倒着切，空行是原样带进来的）或失败状态
- *     前面的分隔空行；`prefixTreeLines` 在 `first`（第一个非空行）与 `start`（第一个实质
- *     内容行，或它上面的截断提示行）之间补 `│ `。**`└ ` 以下的空行不补** —— 树在那里就
- *     指到首行实质输出了，下面那截是缩进对齐的续行（更多输出、`[Full output: …]` 之类的
- *     warnings、`Took`），各自成段；再画竖线反而像树还没完（用户 2026-09-21 第三次反馈：
- *     `[Full output:` 上面那行不该有 `│`）。
+ * Three non-obvious points:
+ *   ① **Prefixes must be applied once over all children's rows** (not one tree per child): `└ ` may
+ *     appear only once in the whole block; per-child trees would grow another `└ ` in the second
+ *     section (warnings / footer) — observed: two cornered content rows appear in the output.
+ *   ② **Leading blank rows get no prefix**: that is the separator row between command and output
+ *     (pi's `new Text("\n" + …)`), and the outer `stripLeadingBlanks` still relies on "this row is
+ *     empty" to strip it — once prefixed it becomes non-empty and cannot be stripped (the row may
+ *     carry a foreground escape sequence, so the emptiness check must strip ANSI before trim — same
+ *     check as `stripLeadingBlanks`). A footer / warnings section's own leading blank is likewise
+ *     left blank, serving as intra-result paragraph spacing.
+ *   ③ The truncation-hint row (`… (N earlier lines, …)`) sits before the body, so it gets `│ `
+ *     ("more follows"); `└ ` is reserved for the body's first row.
+ *   ④ **The prefix is its own SGR segment** (`theme.fg("muted", GUTTER_PIPE)` wraps it alone) — the
+ *     color of the body after it must never bleed up; the corner / vertical are structural glyphs,
+ *     so `└ ` and the body after it share one gray.
+ *   ⑤ **Blank rows above the bar get `│ ` too** (the user's second report on 2026-09-21: the blank
+ *     row between `│ … (326 earlier lines…)` and `└ Node.js v26.4.0` sat bare and looked like a
+ *     "break"). Such blanks come from the head of pi's preview window (`truncateToVisualLines` cuts
+ *     backwards from the tail and blanks arrive as-is) or the separator blank before a failure
+ *     status; `prefixTreeLines` fills `│ ` between `first` (the first non-blank row) and `start`
+ *     (the first substantive content row, or the truncation-hint row above it). **Blanks below `└ `
+ *     are not filled** — the tree already points at the first substantive output row there, and the
+ *     stretch below is indent-aligned continuations (more output, warnings like `[Full output: …]`,
+ *     `Took`), each its own section; more verticals would look like the tree continues (the user's
+ *     third report on 2026-09-21: the row above `[Full output:` should not have `│`).
  *
- * 为什么不用 `setText(child,…)` 直接改子组件：它的 render 缓存在**首次渲染时以传入
- * width 为准**，把前缀送进去会让正文被它自己再折一次行（ansi 感知的贪心词折行），
- * 于是“先折行、后上色”的硬折行外套就白做了。逐 child 渲染 + 行数组挂前缀不改变各行
- * 宽度，缓存与实际显示始终一致（详见 `withPreviewLimit`）。
+ * Why not `setText(child,…)` to rewrite the child component directly: its render cache is fixed at
+ * **first-render width** — feeding the prefix in would let it re-wrap the body itself (ANSI-aware
+ * greedy word wrap), voiding the whole "wrap first, color after" hard-wrap shell. Rendering child by
+ * child + hanging prefixes on the line array never changes row widths, so cache and actual display
+ * stay consistent (see `withPreviewLimit`).
  */
 function prefixTreeLines(lines: string[], theme: any, isError = false): string[] {
 	const isBlank = (s: string) => stripAnsiCodes(s).trim() === "";
-	// 最前面那串空行是命令与结果之间的分隔行（`stripLeadingBlanks` 还得靠它判空），
-	// 所以 `first` 之前的空行保持空行 —— 树的起点在 `start`（第一个实质内容行，或它前面的截断提示行）。
+	// The leading run of blank rows is the separator between command and result (`stripLeadingBlanks` still relies on it for the empty check),
+	// so blanks before `first` stay blank — the tree's starting point is `start` (the first substantive content row, or the truncation-hint row above it).
 	let first = 0;
 	while (first < lines.length && isBlank(lines[first]!)) first++;
 	let start = first;
 	while (start < lines.length && (isBlank(lines[start]!) || isPreviewHintLine(lines[start]!))) start++;
 	if (start >= lines.length) return lines;
-	// 栅栏**以上**（`first` 之后、`start` 之前）的空行补 `│ ` —— 用户 2026-09-21 定的：
-	// 空行也不能把栅栏断开。这里的空行来自 pi 的预览窗口开头（`truncateToVisualLines`
-	// 从尾部倒着切，空行是原样带进来的）或失败状态前面的分隔空行 —— 光秃秃地空着就是“断层”。
-	// `└ ` **以下**的空行不再补：树在 `└ ` 那一行就指到首行实质输出了，下面那截是缩进对齐的
-	// 续行（更多输出、`[Full output: …]` 之类的 warnings、`Took`），各自成段；
-	// 再画竖线反而像树还没完（用户 2026-09-21 第二次反馈：`[Full output:` 上面那行不该有 `│`）。
+	// Blanks **above** the bar (after `first`, before `start`) get `│ ` — user decision 2026-09-21:
+	// a blank row must not break the bar. These blanks come from the head of pi's preview window (`truncateToVisualLines`
+	// cuts backwards from the tail, blanks arrive as-is) or the separator blank before a failure status — a bare blank reads as a "break".
+	// Blanks **below** `└ ` are not filled: at the `└ ` row the tree already points at the first substantive output, and the stretch below is
+	// indent-aligned continuations (more output, warnings like `[Full output: …]`, `Took`), each its own section;
+	// more verticals would look like the tree continues (user's second report 2026-09-21: the row above `[Full output:` should not have `│`).
 	const pipeBlank = (i: number) => i > first && i < start;
 	return lines.map((line, i) => {
 		if (isBlank(line)) return pipeBlank(i) ? INDENT + theme.fg("muted", GUTTER_PIPE) + line : line;
@@ -1212,29 +1345,31 @@ function prefixTreeLines(lines: string[], theme: any, isError = false): string[]
 }
 
 /**
- * 耗时页脚的**纯文本形态**：`Took 0.1s`（执行完）/ `Elapsed 1.2s`（流式执行中，每秒跳）。
- * 小数位数由 pi 的 `formatDuration` 决定（`(ms / 1000).toFixed(1)`，恒为一位）。
+ * The duration footer's **plain-text shape**: `Took 0.1s` (finished) / `Elapsed 1.2s` (streaming
+ * mid-run, ticking every second). The decimal places are fixed by pi's `formatDuration`
+ * (`(ms / 1000).toFixed(1)`, always one digit).
  */
 const TIME_FOOTER_PATTERN = /^(?:Took|Elapsed) \d+\.\d+s$/;
 
-/** 去掉 SGR 转义序列（页脚那行是 `theme.fg("muted", …)` 包着的，判形态 / 判空都得先剥）。 */
+/** Strip SGR escape sequences (the footer row is wrapped in `theme.fg("muted", …)` — both shape check and blank check must strip first). */
 function stripAnsiCodes(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 /**
- * 这个 child 是不是 pi 画的**耗时页脚**（`new Text("\n" + theme.fg("muted", "Took 0.1s"), 0, 0)`）。
+ * Whether this child is pi's **duration footer** (`new Text("\n" + theme.fg("muted", "Took 0.1s"), 0, 0)`).
  *
- * 两条缺一不可：
- *   ① `setText` 存在 = 是 pi-tui 的 `Text` —— 不能用 `instanceof`，理由与预览组件那条鸭子
- *      判定完全相同（扩展 import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，与 pi
- *      运行时 bundle 里的 `Text` 不是同一个类对象，`instanceof` 跨实例必然 false）；
- *   ② 剥 ANSI、trim 之后正好是 `Took 0.1s` / `Elapsed 1.2s` 这个形态。
- * 位置条件（**必须是末位 child**）由 `shouldHideTimeFooter` 带着判：pi 的
- * `rebuildBashResultRenderComponent` 按「输出 → warnings → 页脚」的顺序 addChild，
- * 所以页脚恒为末位。两条一起才敢下结论说末位那个就是页脚 —— 只看末位会把「输出正文恰好
- * 是一行 `Took 1.2s`」删掉（展开态下正文就是一个 `Text`），只看形态则会把碰巧长得像的
- * 末位子组件删掉。
+ * Both checks are required:
+ *   ① `setText` exists = it is pi-tui's `Text` — `instanceof` cannot be used, for exactly the same
+ *      reason as the preview component's duck check (the pi-tui an extension imports is the npm/dist
+ *      copy the loader alias points to, a different class object from the `Text` in pi's runtime
+ *      bundle; `instanceof` across instances is always false);
+ *   ② after stripping ANSI and trimming it is exactly the `Took 0.1s` / `Elapsed 1.2s` shape.
+ * The position condition (**must be the last child**) is judged alongside by `shouldHideTimeFooter`:
+ * pi's `rebuildBashResultRenderComponent` addChilds in "output → warnings → footer" order, so the
+ * footer is always last. Only both together justify calling the last child the footer — position
+ * alone would delete "output body happens to be one `Took 1.2s` row" (in expanded state the body is
+ * one `Text`), and shape alone would delete a lookalike last child.
  */
 function isTimeFooterChild(child: any): boolean {
 	if (typeof child?.setText !== "function" || typeof child.text !== "string") return false;
@@ -1242,14 +1377,15 @@ function isTimeFooterChild(child: any): boolean {
 }
 
 /**
- * 该不该把耗时页脚整个丢掉：**短于门槛的执行不画那一行**（默认 2000ms，见
- * `DEFAULT_MIN_TIME_FOOTER_MS`）。
+ * Whether the duration footer should be dropped wholesale: **executions shorter than the threshold
+ * do not draw that row** (default 2000ms, see `DEFAULT_MIN_TIME_FOOTER_MS`).
  *
- * `elapsedMs === undefined` 表示压根不知道耗时（`state.startedAt` 为空 —— `/resume` 恢复的
- * 历史块不调 `markExecutionStarted`）—— 那种情况下 pi 本来就没有页脚可画，所以一律返回
- * false、不动手：即展开态里「输出正文恰好是一行 `Took 1.2s`」不会被误删。
- * 门槛与耗时比的是**同一个量**（`endedAt - startedAt`，见 renderResult 里的 `elapsedMs`），
- * 不是页脚上那个四舍五入后的数字。
+ * `elapsedMs === undefined` means the duration is simply unknown (`state.startedAt` empty —
+ * `/resume`d history blocks never call `markExecutionStarted`) — in that case pi had no footer to
+ * draw anyway, so return false and keep hands off: "the output body happens to be one `Took 1.2s`
+ * row" in expanded state will not be deleted by mistake. The threshold is compared against the
+ * **same quantity** pi draws (`endedAt - startedAt`, see `elapsedMs` in renderResult), not the
+ * rounded number on the footer.
  */
 function shouldHideTimeFooter(lastChild: any, elapsedMs: number | undefined, minTimeFooterMs: number): boolean {
 	if (elapsedMs === undefined || elapsedMs >= minTimeFooterMs) return false;
@@ -1257,44 +1393,51 @@ function shouldHideTimeFooter(lastChild: any, elapsedMs: number | undefined, min
 }
 
 /**
- * 把 pi 内置 bash 渲染器的**输出预览**从 5 行裁到 `previewLines` 行，给整块结果挂上树形
- * gutter，并在短命令上丢掉耗时页脚、在无输出时补一行 `(no output)`。
+ * Trim pi's built-in bash renderer's **output preview** from 5 lines to `previewLines`, mount the
+ * tree gutter on the whole result, drop the duration footer on short commands, and supply `(no
+ * output)` when there is none.
  *
- * pi 的行数写死在它的 `BASH_PREVIEW_LINES = 5`（模块私有常量，改不了，也没有
- * 设置项），所以只能在拿到它的组件之后做后处理。详见文件头「输出预览行数」一节。
+ * pi's line count is hardcoded in its `BASH_PREVIEW_LINES = 5` (a module-private constant —
+ * unchangeable, and no setting), so the only option is post-processing its component after the fact.
+ * See the file header "output preview line count".
  *
- * 做法：**逐个 child 渲染**而不是拿整个 Container 的平铺行数组 —— 平铺数组里分不清
- * 哪几行属于预览（预览行、warnings 行、Took 行都是纯文本 + 不同前景色，按颜色猜很
- * 脆弱）。child 结构实测过：输出非空时 `children[0]` 就是预览组件，行形状固定是
- * `["", (提示行?), ...预览行]`；后面的 warnings / `Took Xs` 都是 `Text` 实例
- *（各自的 `\n` 前缀渲染成一行空行 + 正文）。
+ * The approach: **render child by child** rather than taking the whole Container's flattened row
+ * array — in a flat array you cannot tell which rows belong to the preview (preview rows, warning
+ * rows, and the Took row are all plain text in different foregrounds; guessing by color is fragile).
+ * The child structure was verified: with non-empty output `children[0]` is the preview component,
+ * whose row shape is fixed `["", (hint row?), ...preview rows]`; the warnings / `Took Xs` after it
+ * are `Text` instances (each one's `\n` prefix renders as one blank row + body).
  *
- * 预览组件的判定用**鸭子类型**（`typeof child.setText !== "function"`）而不是
- * `instanceof Text`：扩展 import 到的 pi-tui 是 loader alias 指向的 npm/dist 副本，
- * 与 pi 运行时（bundle）用的 Text 不是同一个类对象，`instanceof` 跨模块实例必然 false。
+ * The preview component is recognized by **duck typing** (`typeof child.setText !== "function"`)
+ * rather than `instanceof Text`: the pi-tui an extension imports is the npm/dist copy the loader
+ * alias points to — a different class object from the Text in pi's runtime bundle, so `instanceof`
+ * across module instances is always false.
  *
- * 所有 child 的行先**原样拼进一个数组**，最后统一交给 `prefixTreeLines` 画一次树 ——
- * `└ ` 于是自然落在**第一个实质内容行**上（输出段里的第一行正文；截断提示行在它上面，
- * 挂 `│ `），后面的输出行 / warnings / `Took` 页脚都只缩进两格。
+ * All children's rows are first **spliced verbatim into one array**, then handed to
+ * `prefixTreeLines` for a single tree pass — so `└ ` naturally lands on the **first substantive
+ * content row** (the first body row of the output section; the truncation-hint row above it gets
+ * `│ `), and later output rows / warnings / the `Took` footer only indent two cells.
  *
- * **展开态（ctrl+o）整块跳过**：pi 那时用的是 `new Text("\n" + styledOutput)`，输出全在
- * 一个 child 里、行数也不裁，所以连树都不挂 —— 展开态要的就是原样完整输出。
+ * **Expanded state (ctrl+o) skips the whole block**: pi then uses `new Text("\n" + styledOutput)` —
+ * one child holding all output, row count untrimmed — so not even the tree is mounted; expanded
+ * means verbatim full output.
  *
- * 耗时页脚的过滤（`shouldHideTimeFooter`）也在这里：末位 child 是 `Took X.Xs` 页脚、
- * 且实际耗时短于门槛时，把它整个跳过（连它那行前导空行一起 —— 那是正文与页脚之间的
- * 分隔行，页脚不画时不该留）。详见文件头「耗时页脚门槛」一节。
+ * The duration-footer filter (`shouldHideTimeFooter`) also lives here: when the last child is the
+ * `Took X.Xs` footer and the real duration is below the threshold, it is skipped wholesale
+ * (including its leading blank row — the separator between body and footer, which must not remain
+ * when the footer is not drawn). See the file header "duration-footer threshold".
  */
 function withPreviewLimit(
 	inner: any,
 	previewLines: number,
 	theme: any,
-	/** 展开态（ctrl+o）：整块按原样透传（不裁行、不挂树）。 */
+	/** Expanded state (ctrl+o): pass the whole block through verbatim (no trimming, no tree). */
 	expanded: boolean,
-	/** pi 当前给的是 partial 结果（流式中）—— 决定“还没输出”要不要画成 `(no output)`。 */
+	/** pi currently gives a partial result (mid-stream) — decides whether "no output yet" should render as `(no output)`. */
 	isPartial: () => boolean,
-	/** 这块结果是错的（`context.isError`）—— 只有它为真才认失败状态，免得误染正常输出。 */
+	/** This result is an error (`context.isError`) — failure status is only recognized when this is true, to avoid dyeing normal output. */
 	isError: boolean,
-	/** 真实耗时（毫秒；`undefined` = pi 根本没画页脚）。 */
+	/** Real duration (ms; `undefined` = pi drew no footer at all). */
 	elapsedMs: () => number | undefined,
 	minTimeFooterMs: number,
 ) {
@@ -1302,22 +1445,22 @@ function withPreviewLimit(
 		render(width: number): string[] {
 			const out: string[] = [];
 			let trimmed = false;
-			// 前缀占 gutter + 左边距共 3 列，所以**输出预览按 width - 3 渲染**：pi 的预览行是按
-			// 传进去的宽度折行 / 截断的（`truncateToVisualLines` 内部用 `Text.render(width)`），
-			// 按整宽渲染再加前缀就会超出终端宽度（`Box.applyBg` 只会裁，内容就丢了）。
+			// The prefix takes gutter + left margin = 3 columns, so **the output preview renders at width - 3**: pi's preview rows wrap / truncate
+			// against the width passed in (`truncateToVisualLines` internally calls `Text.render(width)`);
+			// rendering at full width and then prefixing would overflow the terminal (`Box.applyBg` only clips — content would be lost).
 			const contentWidth = Math.max(1, width - GUTTER_WIDTH - INDENT_WIDTH);
-			// 耗时页脚的判定放在 render 里而不是拿组件时就算死：流式模式下 pi 每秒
-			// `invalidate()` 一次（内置 renderResult 里那个 setInterval），跨过门槛的
-			// 那一刻页脚就能出现，不用等下一次 partial 结果。
+			// The duration-footer check lives inside render rather than being fixed when the component is grabbed: in streaming mode pi
+			// `invalidate()`s once per second (the setInterval in the built-in renderResult), so the footer can appear the moment
+			// the threshold is crossed, without waiting for the next partial result.
 			let children: any[] = inner.children ?? [];
 			if (shouldHideTimeFooter(children[children.length - 1], elapsedMs(), minTimeFooterMs)) {
 				children = children.slice(0, -1);
 			}
-			// 展开态（ctrl+o）要的就是原样完整输出：不裁行、不挂 gutter。pi 那时用的是
-			// `new Text("\n" + styledOutput)`，一个 child 装全部输出，直接透传 ——
-			// 只把失败状态那行染红（用户要的是提示见红，展开态也该红）。
-			// 左边距照挂（只挂 `INDENT_WIDTH` 那 1 列，没有 gutter）：展开态的输出正文列
-			// 与折叠态一样落在列 2 那一族里，切换 ctrl+o 时整块不会横跳。
+			// Expanded state (ctrl+o) means verbatim full output: no trimming, no gutter. pi uses
+			// `new Text("\n" + styledOutput)` there — one child holds all output, passed through —
+			// only the failure-status row is dyed red (the user wants the notice to be red; expanded state should be red too).
+			// The left margin is still mounted (only the `INDENT_WIDTH` column, no gutter): in expanded state the output body column
+			// lands in the same column-2 family as collapsed, so toggling ctrl+o does not make the block jump sideways.
 			if (expanded) {
 				const expandedWidth = Math.max(1, width - INDENT_WIDTH);
 				for (const child of children) {
@@ -1329,21 +1472,21 @@ function withPreviewLimit(
 			for (const child of children) {
 				const isOutput = !trimmed && typeof child.setText !== "function";
 				if (!isOutput) {
-					// pi 对空输出一个 child 都不加（内置渲染器的 `if (output)` 守卫），
-					// 于是用户只看见光秃的一行 `Run xxx`，分不清是“真的没输出”还是
-					// “渲染坏了”。在**输出本该出现的位置**补一行 `(no output)`（用户样例
-					// 里 `└ ` 就挂它前面），这样它排在 warnings / `Took` 之前。
-					// **执行中不补**：流式模式 pi 会先发一个空 partial 快照
-					//（`onUpdate({ content: [] })`），那时“还没输出”不等于“没有输出”。
+					// For empty output pi adds no child at all (the built-in renderer's `if (output)` guard),
+					// leaving the user a bare `Run xxx` line — cannot tell "really no output" from
+					// "rendering broke". A `(no output)` row is supplied **where the output would appear** (in the user's sample
+					// `└ ` hangs right in front of it), placing it before warnings / `Took`.
+					// **Not supplied mid-execution**: in streaming mode pi first sends an empty partial snapshot
+					// (`onUpdate({ content: [] })`), where "no output yet" does not mean "no output".
 					out.push(...(trimmed || isPartial() ? child.render(contentWidth) : [theme.fg("toolOutput", "(no output)"), ...child.render(contentWidth)]));
 					continue;
 				}
 				trimmed = true;
-				// **输出段按 contentWidth 渲染**：整块结果的行都要挂 2 列前缀，不先
-				// 扣掉的话按整宽折出来的正文会顶出终端宽度。
+				// **The output section renders at contentWidth**: every row of the result gets a 2-column prefix; rendering at full width
+				// without deducting it would push wrapped body past the terminal width.
 				out.push(...trimPreviewLines(child.render(contentWidth), previewLines, contentWidth, theme, isError));
 			}
-			// 最后统一上树：`└ ` 在整块里只出现一次（见 prefixTreeLines ①）
+			// Finally mount the tree in one pass: `└ ` appears once in the whole block (see prefixTreeLines ①)
 			return prefixTreeLines(out, theme, isError);
 		},
 		invalidate() {
@@ -1353,28 +1496,29 @@ function withPreviewLimit(
 }
 
 /**
- * 裁掉预览行里超出预算的部分（保留**尾部** —— pi 的预览本来就是输出的最后几行），
- * 并把被裁掉的行数补进提示行的计数。
+ * Trim preview rows beyond the budget (keeping the **tail** — pi's preview is the output's last rows
+ * anyway), and fold the trimmed count into the hint row's number.
  *
- * 提示行的两种情况：
- *   ① pi 已经给了提示行（输出 > 5 行）—— 就在它那一行**原地改数字**，
- *     这样 pi 的配色与真实键名（`keyHint` 渲出来的 dim 键名 + muted 描述）一字不动，
- *     不用重建样式。正则匹配的是 SGR 包裹里的纯 ASCII 数字与文本，所以直接在
- *     带样式的字符串上替换是安全的。
- *   ② pi 没给提示行（输出刚好 ≤ 5 行，但我们裁到了 3 行）—— 必须自己造一行，
- *     否则那 1~2 行就**静默消失**了。用传进来的 `theme`（pi 运行时真正初始化过的那份）
- *     复刻 pi 的格式与配色，键名读 `keybindings.json`（见 `expandKeyText`）。
+ * The hint row has two cases:
+ *   ① pi already emitted one (output > 5 rows) — rewrite its number **in place**, leaving pi's
+ *     colors and the real key name (the dim key name + muted description `keyHint` rendered)
+ *     untouched, no style rebuilding. The regex matches plain ASCII digits and text inside SGR
+ *     wrapping, so replacing on the styled string is safe.
+ *   ② pi emitted none (output ≤ 5 rows, but we trimmed to 3) — a row must be fabricated, or those
+ *     1-2 rows **silently disappear**. Replicate pi's format and colors with the passed-in `theme`
+ *     (the one pi's runtime actually initialized); the key name is read from `keybindings.json`
+ *     (see `expandKeyText`).
  */
 function trimPreviewLines(lines: string[], previewLines: number, width: number, theme: any, isError: boolean): string[] {
 	if (lines.length <= 1) return lines;
-	const head = lines[0]; // 前导空行（去留由外层 stripLeadingBlanks 决定）
+	const head = lines[0]; // leading blank row (kept or dropped at the outer stripLeadingBlanks' discretion)
 	const body = lines.slice(1);
 	const hintLine = isPreviewHintLine(body[0] ?? "") ? body[0] : undefined;
 	const rows = hintLine ? body.slice(1) : body;
 
-	// ① 尾部是 pi 的失败状态（见文件头「失败状态」一节）时，把它和它前面那一串分隔空行
-	// 单独摘出来：那些空行没有信息量，不该吃预览预算（把状态自己挤出可视区的正是它们）。
-	// **只在 `isError` 时认** —— 正常输出里出现同样字样（例如把这句话 echo 出来）不碰。
+	// ① When the tail is pi's failure status (see the file header "failure status"), lift it together with the run of separator blanks
+	// before it for separate handling: those blanks carry no information and must not eat preview budget (they are exactly what pushed
+	// the status itself out of view). **Only recognized under `isError`** — the same words appearing in normal output (e.g. echoed back) are left alone.
 	let status: string | undefined;
 	let separators: string[] = [];
 	let content = rows;
@@ -1386,11 +1530,11 @@ function trimPreviewLines(lines: string[], previewLines: number, width: number, 
 		content = rows.slice(0, cut);
 	}
 
-	// ② 预算：状态自己占一格，其余留给内容。
+	// ② Budget: the status takes one slot itself; the rest goes to content.
 	const budget = Math.max(1, previewLines - (status === undefined ? 0 : 1));
 
-	// ③ 窗口 = 内容的尾部 `budget` 行（pi 的预览本来保留的就是尾部）。窗口整段都是空行时
-	// 往上拉，让最近一行正文留在窗口里 —— 空行不该把预览独吞。
+	// ③ Window = the content's last `budget` rows (pi's preview keeps the tail anyway). When the whole window is blank rows,
+	// pull it upward so the most recent body row stays in the window — blank rows must not hog the preview.
 	let start = Math.max(0, content.length - budget);
 	let end = content.length;
 	if (content.length > 0 && content.slice(start).every((line) => isBlankResultLine(line))) {
@@ -1403,20 +1547,20 @@ function trimPreviewLines(lines: string[], previewLines: number, width: number, 
 	}
 	const window = content.slice(start, end);
 
-	// ④ 一行正文都留不下时（内容全被裁掉），把状态前面那串分隔空行补回来 —— 用户 2026-09-21
-	// 定的形状：空行要带 `│`，而不是光秃秃的空白（见文件头 ⑤）。有正文时不补：
-	// `└ ` 已经落在正文上，它下面再补一行 `│` 反而像没完。
+	// ④ When not a single body row survives (content fully trimmed), put back the separator blanks before the status — the user's
+	// 2026-09-21 shape: blanks carry `│`, not bare emptiness (see file header ⑤). Not restored when there is body:
+	// `└ ` already landed on the body, and another `│` below it would look unfinished.
 	const fillers = window.length === 0 && status !== undefined ? separators.slice(-budget) : [];
 
-	// 什么都没动（没状态、窗口就是全部内容、没补空行）→ 原样返回 `lines`：保住 pi 自己画的
-	// 行（提示行的配色与折行宽度都是它定的）。只把提示行的省略号统一成 `…`。
+	// Nothing moved (no status, the window is the whole content, no blanks restored) → return `lines` verbatim: keeps pi's own
+	// rows (the hint row's colors and wrap width are its decisions). Only the hint row's ellipsis is unified to `…`.
 	if (status === undefined && fillers.length === 0 && window.length === content.length && end === content.length) {
 		return hintLine === undefined ? lines : [head, withOurEllipsis(hintLine), ...rows];
 	}
 
-	// ⑤ 提示行的计数 = pi 原来那个数（它窗口之上的视觉行）+ 我们没显示的内容行。
-	// 状态前那串分隔空行不计（它们本来就不载信息：算进去会让一条内容全显示完的失败命令
-	// 凭空多出一行 `(2 earlier lines)`，实测踩过）。
+	// ⑤ The hint row's count = pi's original number (visual rows above its window) + our content rows not shown.
+	// The separator blanks before the status do not count (they carry no information: counting them would give a failed command
+	// whose content was fully shown a phantom `(2 earlier lines)` — observed).
 	const hidden =
 		(hintLine ? Number(/(\(\s*)(\d+)(\s*earlier lines)/.exec(hintLine)?.[2] ?? 0) : 0) + (content.length - window.length);
 	const rendered: string[] = [];
@@ -1431,39 +1575,44 @@ function trimPreviewLines(lines: string[], previewLines: number, width: number, 
 	return [head, ...rendered, ...fillers, ...window, ...(status === undefined ? [] : [status])];
 }
 
-/** pi 的提示行用三个点（`truncateToWidth` 的省略号），本扩展统一成单个 `…`。 */
+/** pi's hint row uses three dots (`truncateToWidth`'s ellipsis); this extension unifies to a single `…`. */
 function withOurEllipsis(line: string): string {
 	return line.replace("...", ELLIPSIS);
 }
 
-/** 结果里的一行（带样式）去掉 SGR 后是不是空的。 */
+/** Whether a (styled) result row is empty once SGR is stripped. */
 function isBlankResultLine(line: string): boolean {
 	return stripAnsiCodes(line).trim() === "";
 }
 
 /**
- * 在**同步窗口**内把主题的 `toolOutput` 临时换成 `bashOutput`，让 pi 内置 bash 结果渲染器
- * 画出来的输出正文用上自己的颜色槽（详见文件头「输出正文的独立颜色」一节）。
+ * Inside a **synchronous window**, temporarily swap the theme's `toolOutput` to `bashOutput`, so the
+ * output body painted by pi's built-in bash result renderer picks up its own color slot (see the
+ * file header "independent color for the output body").
  *
- * 为什么必须是「换主题表」而不是「把主题对象换给渲染器」：pi 的 bash 渲染器**根本不看传进去
- * 的那个 theme 参数**（`renderResult(result, options, _theme, context)`），它用的是模块级的
- * `theme` 单例（`Proxy` → `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`）。
- * 那个单例与传给扩展的渲染器参数**是同一个对象**（单例就是为跨 loader 共用而设计的），
- * 所以直接改它的 `fgColors` 表，渲染器下一次 `theme.fg("toolOutput", line)` 就会命中新色值。
+ * Why it must be "swap the theme table" and not "hand a different theme object to the renderer":
+ * pi's bash renderer **never looks at the theme parameter passed in** (`renderResult(result,
+ * options, _theme, context)`) — it uses the module-level `theme` singleton (`Proxy` →
+ * `globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]`). That singleton and the renderer
+ * parameter the extension receives **are the same object** (the singleton exists for cross-loader
+ * sharing), so mutating its `fgColors` table makes the renderer's next `theme.fg("toolOutput",
+ * line)` hit the new value.
  *
- * 四个要点：
- *   ① **只在同步窗口内换**：`base.renderResult()` 是同步的，输出行（含展开态那份）全部在
- *      这次调用里 `theme.fg("toolOutput", …)` 烘焙成字符串，所以 try/finally 里换进换出
- *      不会有第二个渲染插进来；换颜色也**不会**泄漏给其他工具（read / grep 的输出是它们
- *      自己的渲染器画的，不在这个窗口里）。
- *   ② **主题里没有 `bashOutput` 就什么都不做**（内置主题与 pi-coder-summer-night / pi-coder-catppuccin 都没
- *      这个 token）—— 探测方式是真调一次 `theme.getFgAnsi()`，pi 对未知 token 抛
- *      `Unknown theme color: …`。
- *   ③ `fgColors` 是 pi `Theme` 类的公开字段（`Map<string, string>`，存的是**已解析的
- *      SGR 前缀**）；哪天 pi 把它藏起来/改名，这里就自动退化成原样调用（返回前那个
- *      `typeof … .set` 判定），不会抛异常、只是颜色不生效。
- *   ④ 只动 `toolOutput`：命令标题 / `... (N earlier lines …)` 提示 / `Took Xs` 页脚走的是
- *      `toolTitle` / `muted`，命令行与折叠提示是扩展自绘的，一律不受影响。
+ * Four points:
+ *   ① **Swap only inside the synchronous window**: `base.renderResult()` is synchronous — the output
+ *      rows (expanded-state copy included) are all `theme.fg("toolOutput", …)`-baked into strings in
+ *      this one call, so swapping in/out under try/finally cannot catch a second render; nor does
+ *      the color **leak** to other tools (read / grep outputs are painted by their own renderers,
+ *      outside this window).
+ *   ② **If the theme has no `bashOutput`, do nothing** (built-in themes and pi-coder-summer-night /
+ *      pi-coder-catppuccin all lack the token) — the probe is one real `theme.getFgAnsi()` call; pi
+ *      throws `Unknown theme color: …` on unknown tokens.
+ *   ③ `fgColors` is a public field of pi's `Theme` class (`Map<string, string>`, holding **resolved
+ *      SGR prefixes**); if pi ever hides/renames it, this degrades to calling through unchanged (the
+ *      `typeof … .set` check before returning), never throws — the color just stops applying.
+ *   ④ Only `toolOutput` is touched: the command title / `... (N earlier lines …)` hint / `Took Xs`
+ *      footer go through `toolTitle` / `muted`, and the command line and collapse hints are
+ *      self-drawn — all unaffected.
  */
 function withBashOutputColor<T>(theme: any, render: () => T): T {
 	const fgColors = theme?.fgColors;
@@ -1485,43 +1634,43 @@ function withBashOutputColor<T>(theme: any, render: () => T): T {
 }
 
 export default function (pi: ExtensionAPI) {
-	// 折叠固定开启、保留 DEFAULT_LINES 个视觉行（原先的 `/bash-collapse` 指令已删除）。
-	// 输出预览行数：pi 内置写死 5（`BASH_PREVIEW_LINES`，模块私有常量 + 无设置项），
-	// 所以只能在扩展里后处理。/bash-preview 可改；PI_BASH_PREVIEW 启动时覆盖。
+	// Collapse is fixed on, keeping DEFAULT_LINES visual rows (the old `/bash-collapse` command was deleted).
+	// Output preview line count: pi's built-in is hardcoded at 5 (`BASH_PREVIEW_LINES`, module-private constant + no setting),
+	// so only post-processing in the extension can change it. /bash-preview adjusts; PI_BASH_PREVIEW overrides at startup.
 	let previewLines = clampPreviewLines(Number(process.env.PI_BASH_PREVIEW));
-	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
-	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines 一样在注册时读一次。
-	// 流式输出开关：默认关（非流式，对齐 opencode / codex）。PI_BASH_STREAM=on 恢复 pi 原生流式。
+	// Duration-footer threshold (ms): executions shorter than it draw no `Took X.Xs` row (see file header "duration-footer threshold").
+	// PI_BASH_MIN_TIME_MS=0 always shows. Read once at registration, like previewLines.
+	// Streaming output switch: default off (non-streaming, aligned with opencode / codex). PI_BASH_STREAM=on restores pi's native streaming.
 	const streaming = process.env.PI_BASH_STREAM?.trim().toLowerCase() === "on";
-	// 耗时页脚门槛（毫秒）：短于它的执行不画 `Took X.Xs` 那一行（详见文件头「耗时页脚门槛」）。
-	// PI_BASH_MIN_TIME_MS=0 永远显示。与 previewLines 一样在注册时读一次。
+	// Duration-footer threshold (ms): executions shorter than it draw no `Took X.Xs` row (see file header "duration-footer threshold").
+	// PI_BASH_MIN_TIME_MS=0 always shows. Read once at registration, like previewLines.
 	const minTimeFooterMs = resolveMinTimeFooterMs(process.env.PI_BASH_MIN_TIME_MS);
-	// 命令语法高亮开关：默认开。PI_BASH_HIGHLIGHT=off 启动时关闭（回到整行 toolTitle 粗体）。
-	// 刻意**不注册 /bash-highlight 指令** —— 这是个纯观感开关，env 一个入口就够，
-	// 没必要再占一条斜杠指令（与 /bash-preview / /bash-timeout 那种要随时查看的不同）。
-	// 展开态（ctrl+o）与折叠态走同一套分词，所以开关对两边同时生效。
+	// Command syntax-highlight switch: default on. PI_BASH_HIGHLIGHT=off disables at startup (back to whole-line toolTitle bold).
+	// Deliberately **no /bash-highlight command** — a pure visual toggle needs only the env entry point,
+	// no reason to spend a slash command on it (unlike /bash-preview / /bash-timeout which are checked on the fly).
+	// Expanded (ctrl+o) and collapsed share the same tokenizer, so the switch affects both.
 	const highlightEnabled = process.env.PI_BASH_HIGHLIGHT?.trim().toLowerCase() !== "off";
 
-	// ## 能力边界（seatbelt 沙箱）开关
+	// ## Capability boundary (seatbelt sandbox) switch
 	//
-	// PI_SANDBOX=off 整体关闭；非 darwin 平台自动关闭（没有 sandbox-exec，
-	// 宁可没有这层保护也不要让命令因为找不到二进制而全部失败）。
-	// 注册时读一次：这是个启动期开关，运行中改 env 不该让同一条命令忽而沙箱忽而不沙箱。
+	// PI_SANDBOX=off disables it entirely; non-darwin platforms disable it automatically (no sandbox-exec —
+	// better to lose this layer than fail every command with a missing binary).
+	// Read once at registration: this is a startup switch — changing env mid-run must not make the same command sandboxed one moment and not the next.
 	const sandboxOn = isSandboxEnabled();
-	// 沙箱内用哪个 shell 跑原命令。跟 readShellOptions() 保持一致：用户配了 shellPath 就用它，
-	// 否则 /bin/bash。注意这是**沙箱内**的 shell，与 pi 自己 spawn 的外层 shell 无关。
+	// Which shell runs the original command inside the sandbox. Consistent with readShellOptions(): the user's shellPath wins,
+	// else /bin/bash. Note this is the shell **inside** the sandbox, unrelated to the outer shell pi itself spawns.
 	const sandboxShellPath = readShellOptions().shellPath || "/bin/bash";
-	// 持久白名单（`~/.pi/agent/sandbox-allowlist.json`，`PI_SANDBOX_ALLOWLIST` 可改位置）。
-	// 与 sandbox-boundary 扩展共用同一个 globalThis 单例，所以一边记住另一边立刻生效。
+	// Persistent allowlist (`~/.pi/agent/sandbox-allowlist.json`, relocatable via `PI_SANDBOX_ALLOWLIST`).
+	// Shares one globalThis singleton with the sandbox-boundary extension, so one side remembering takes effect on the other immediately.
 	const allowlistPath = process.env.PI_SANDBOX_ALLOWLIST?.trim() || join(getAgentDir(), "sandbox-allowlist.json");
-	// 路径分类需要的 IO（realpath / isDirectory）由这里注入，sandbox.ts 保持纯逻辑。
+	// The IO that path classification needs (realpath / isDirectory) is injected here; sandbox.ts stays pure logic.
 	const pathEnv: PathEnv = {
 		home: homedir(),
 		realpath: (p) => {
 			try {
 				return realpathSync(p);
 			} catch {
-				return undefined; // 目标不存在（已被删）：只做词法判定
+				return undefined; // target does not exist (already deleted): lexical check only
 			}
 		},
 		isDirectory: (p) => {
@@ -1533,81 +1682,81 @@ export default function (pi: ExtensionAPI) {
 		},
 	};
 	const sessionScopes = getSessionScopes();
-	/** 取白名单 store。env 只在首次创建时用于加载过滤。 */
+	/** Get the allowlist store. env is only used for load-time filtering on first creation. */
 	const allowlist = (): AllowlistStore => getAllowlistStore(allowlistPath, pathEnv);
 
-	// cwd 只是兜底：内置 execute 用的是 ctx.cwd（每次调用的当前 session cwd）。
+	// cwd is only a fallback: the built-in execute uses ctx.cwd (the current session cwd of each call).
 	const base: ToolDefinition<any, any, any> = createBashToolDefinition(process.cwd(), readShellOptions());
 
 	pi.registerTool({
 		name: base.name,
 		label: base.label,
-		// 照抄 Claude Code：把默认期限和上限**写进工具描述**告诉模型，否则模型不知道
-		// 可以传 timeout，长命令就会被默认期限杀掉却不知道该调大。
-		// （内置描述结尾本来只是 "Optionally provide a timeout in seconds."，没给数字。）
+		// Copied from Claude Code: the default deadline and cap are **written into the tool description** for the model — otherwise
+		// it does not know it can pass timeout, and long commands get killed by the default without knowing to raise it.
+		// (The built-in description originally ended with just "Optionally provide a timeout in seconds." — no numbers.)
 		description: `${base.description} By default, your command will time out after ${defaultTimeoutSeconds()} seconds. You may specify an optional timeout in seconds (up to ${maxTimeoutSeconds()} seconds); larger values are clamped to that maximum.`,
 		parameters: base.parameters,
-		// prompt 元数据不会从内置工具继承，必须显式带上
+		// prompt metadata is not inherited from the built-in tool; it must be carried over explicitly
 		promptSnippet: base.promptSnippet,
 		promptGuidelines: base.promptGuidelines,
 		constrainedSampling: base.constrainedSampling,
 		executionMode: base.executionMode,
 		prepareArguments: base.prepareArguments,
-		// `renderShell: "self"` 是为了让“流式接命令字符时屏幕上一行都不出”成为可能。
-		// 默认 shell 下 ToolExecutionComponent 构造里常驻一个 `Spacer(1)`，而 render() 走
-		// `super.render(width)`（Container）会把所有子组件都画出来 —— 所以即使 renderCall
-		// 返回零行组件，仍会渲染出那一行空行（实测 `[""]`）。而 `hideComponent` 那条路
-		// 走不到：updateDisplay() 里只要 callRenderer 成功返回组件就把 `hasContent` 置 true，
-		// 三个分支全都置 true，所以末尾 `if (… && !hasContent …) hideComponent = true` 永远不成立。
-		// self 模式下 render() 绕过 super.render()，只画 selfRenderContainer，于是那个 Spacer
-		// 根本不会被渲染；且开头有 `contentLines.length === 0 → return []` 守卫，
-		// 真正做到“空就什么都不出”。顺带一个**刻意保留**的副作用：pi 不再给整块套 bgFn
-		//（默认 shell 下 contentBox 会套 toolPendingBg / toolSuccessBg / toolErrorBg），
-		// 而我们自己也不套 —— 于是 bash 块**没有任何底色**（用户 2026-09-21 定的，见文件头
-		// 「整块没有底色」）。其他工具走的不是这条路，它们的底色不受影响。
+		// `renderShell: "self"` is what makes "not a single row on screen while command chars stream in" possible.
+		// Under the default shell, ToolExecutionComponent's constructor keeps a permanent `Spacer(1)`, and render() goes
+		// through `super.render(width)` (Container), painting every child — so even when renderCall
+		// returns a zero-line component, that one blank row still renders (observed `[""]`). And the `hideComponent` path
+		// is unreachable: in updateDisplay() any successful callRenderer return sets `hasContent` true —
+		// all three branches set it, so the trailing `if (… && !hasContent …) hideComponent = true` never holds.
+		// In self mode render() bypasses super.render() and only paints selfRenderContainer, so that Spacer
+		// is never rendered; and the `contentLines.length === 0 → return []` guard at the top
+		// delivers a true "empty means nothing painted". A side effect (**deliberately kept**): pi no longer wraps the block in bgFn
+		// (under the default shell, contentBox wraps toolPendingBg / toolSuccessBg / toolErrorBg),
+		// and we do not wrap one either — so the bash block has **no background at all** (user decision 2026-09-21, see file header
+		// "the whole block has no background"). Other tools do not go through this path; their backgrounds are unaffected.
 		renderShell: "self",
-		// renderResult 委托内置 bash 的实现（输出预览 / 截断提示 / "Took Xs" 都是它画的），
-		// 只在外层包一个**不带底色**的 Box 挂左边距，页脚那行则在 withPreviewLimit 里按门槛滤掉。
-		// 注意传给内置的 `lastComponent` 必须是
-		// **内层**组件而不是我们的 Box —— 内置实现会 `context.lastComponent ?? new
-		// BashResultRenderComponent()` 然后对它 clear() / addChild()，喂个 Box 进去会嵌套错乱。
-		// 所以内层组件存在 context.state 里跨次复用（state 本来就用来存 startedAt/endedAt/interval）。
+		// renderResult delegates to the built-in bash implementation (output preview / truncation hint / "Took Xs" are all its),
+		// wrapped only in an **unbackgrounded** Box for the left margin; the footer row is filtered by threshold inside withPreviewLimit.
+		// Note the `lastComponent` passed to the built-in must be the
+		// **inner** component, not our Box — the built-in does `context.lastComponent ?? new
+		// BashResultRenderComponent()` then clear() / addChild() on it; feeding it a Box would nest wrongly.
+		// So the inner component lives in context.state for reuse across calls (state already stores startedAt/endedAt/interval).
 		renderResult(result, options, theme, context) {
 			const state = context.state;
-			// renderCall 靠这个标记决定要不要自己补下边界空行（结果还没到时才补）。
-			// 放在委托内置实现**之前**置位：万一内置实现抛异常，pi 会退回自己的
-			// fallback 结果组件，那时下边界已经由它那边负责了。
+			// renderCall uses this flag to decide whether to add the bottom boundary blank itself (only before the result arrives).
+			// Set **before** delegating to the built-in: if the built-in throws, pi falls back to its own
+			// fallback result component, which then owns the bottom boundary.
 			state.resultSeen = true;
-			// 输出正文换用主题的 `bashOutput` 槽（主题没定义就原样；详见 withBashOutputColor）
+			// output body switches to the theme's `bashOutput` slot (no-op if the theme lacks it; see withBashOutputColor)
 			const inner = withBashOutputColor(theme, () =>
 				base.renderResult(result, options, theme, { ...context, lastComponent: state.innerComponent }),
 			);
 			state.innerComponent = inner;
-			// isError 必须从 **context** 读，不能从 result 读：pi 调 resultRenderer 时传的是
-			// `{ content: this.result.content, details: this.result.details }`，**没有 isError 字段**
-			// （tool-execution.js 的 updateDisplay），isError 只在 getRenderContext() 里
-			// （`isError: this.result?.isError ?? false`）。读 result.isError 会永远拿到 undefined，
-			// 于是失败的命令也会染成 success 底色。
+			// isError must be read from **context**, not result: what pi passes to the resultRenderer is
+			// `{ content: this.result.content, details: this.result.details }` — **no isError field**
+			// (tool-execution.js's updateDisplay); isError only exists in getRenderContext()
+			// (`isError: this.result?.isError ?? false`). Reading result.isError would yield undefined forever,
+			// and failed commands would be dyed the success color.
 			//
-			// paddingY 必须用 0，且要剥掉 inner 的前导空行 —— 否则命令与输出之间会有
-			// **三个**空行（实测过）：① callBox 的下 padding、② resultBox 的上 padding、
-			// ③ 内置 renderResult 自己的 `new Text("\n" + styledOutput)` 前导空行。
-			// 第③行在默认 shell 下是“命令与输出之间的一行间距”（那时两者在同一个
-			// contentBox 里，只有这一行），但 self 模式下两者是两个独立的 Box，
-			// 各自的 paddingY 会叠加上去，所以这里把三者全部去掉，让输出紧贴命令。
-			// 整块外面也**不再补下边界空行**（用户 2026-09-21 定的：上下都不留白，
-			// 见文件头「整块没有底色、没有 boundary 空行」）。
-			// 耗时页脚门槛判据（见文件头「耗时页脚门槛」）：与 pi 画那行字用的是**同一个量**
-			// —— `state.endedAt ?? Date.now()` 减 `state.startedAt`（内置 renderResult 刚在上面
-			// 那次调用里补上了 endedAt）。做成**函数**、在 render 时才求值：流式模式下每秒
-			// invalidate 一次，跨过门槛的那一刻页脚自然出现，不用等下一次 partial 结果。
-			// startedAt 为空 = pi 根本没画页脚（`/resume` 恢复的历史块不调 markExecutionStarted），
-			// 这时返回 undefined，过滤逻辑一律不动手。
+			// paddingY must be 0, and inner's leading blanks must be stripped — otherwise there would be
+			// **three** blank rows between command and output (observed): ① callBox's bottom padding, ② resultBox's top padding,
+			// ③ the built-in renderResult's own `new Text("\n" + styledOutput)` leading blank.
+			// Row ③ under the default shell is "one row of spacing between command and output" (both then live in the same
+			// contentBox with only that row between), but in self mode they are two separate Boxes
+			// whose paddingY would stack, so all three are removed here and output sits flush under the command.
+			// Nor is a bottom boundary blank added outside the block (user decision 2026-09-21: no blank space top or bottom —
+			// see file header "no background, no boundary blanks").
+			// Duration-footer threshold check (see file header "duration-footer threshold"): the **same quantity** pi prints —
+			// `state.endedAt ?? Date.now()` minus `state.startedAt` (the built-in renderResult just filled endedAt in the call above).
+			// Made a **function**, evaluated at render time: in streaming mode pi invalidates once per second,
+			// so the footer appears naturally the moment the threshold is crossed, without waiting for the next partial.
+			// Empty startedAt = pi drew no footer at all (`/resume`d history blocks never call markExecutionStarted);
+			// return undefined then, and the filter logic keeps hands off entirely.
 			const elapsedMs = () => (state.startedAt === undefined ? undefined : (state.endedAt ?? Date.now()) - state.startedAt);
-			// `new Box(1, 0)`：**只有 bgFn 去了**（bash 块不带底色 —— pending / 成功 / 失败三种底
-			// 都不画，见文件头「整块没有底色」），`paddingX: 1` 保持不变 —— 结果侧那格左内边距是
-			// 与命令行 `• ` 对齐用的（`withPreviewLimit` 再挂 `INDENT_WIDTH` 那一列），去掉整块会
-			// 比命令行少一列；`paddingY: 0` 则让上下不留空行。
+			// `new Box(1, 0)`: **only the bgFn is gone** (the bash block carries no background — none of pending / success / failure
+			// is painted, see file header "no background"); `paddingX: 1` is unchanged — that left-padding cell on the result side
+			// aligns with the command line's `• ` (`withPreviewLimit` then mounts the `INDENT_WIDTH` column); removing it would leave
+			// the block one column short of the command line; `paddingY: 0` leaves no blank rows above or below.
 			const box = new Box(1, 0);
 			box.addChild(
 				stripLeadingBlanks(
@@ -1618,39 +1767,39 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			// 关流式就是把 onUpdate 摘掉：内置 execute 的每个更新点都有 !onUpdate 守卫，
-			// 于是渲染器只会收到最后那次 final 结果。返回值与 details 不受影响。
+			// Turning streaming off means stripping onUpdate: every update point in the built-in execute is !onUpdate-guarded,
+			// so the renderer only receives the final result. Return value and details are unaffected.
 			//
-			// 同时把**有效期限**注进 params：pi 内置 bash 无默认 timeout，不注入的话
-			// 一条不退出的命令会无限期挂着。注入只影响这次执行 —— session 里落盘的
-			// toolCall.arguments 是模型原样发来的那份，不会被改写。
+			// At the same time the **effective deadline** is injected into params: pi's built-in bash has no default timeout — without
+			// injection a command that never exits would hang forever. The injection only affects this run — the
+			// toolCall.arguments persisted to the session are the model's verbatim copy, never rewritten.
 			const nextParams = { ...params, timeout: effectiveTimeoutSeconds(params?.timeout) };
 			const runOnUpdate = streaming ? onUpdate : undefined;
 
-			// ## 能力边界（seatbelt 沙箱）
+			// ## Capability boundary (seatbelt sandbox)
 			//
-			// 强制点不是"枚举危险命令"，而是**操作系统**：命令在 sandbox-exec 里跑，
-			// 写入不限制，只有**删除**收窄到项目目录 + 临时目录 —— 边界外的 unlink
-			// 被内核直接 EPERM 拒绝（rename 也走 unlink，见 sandbox.ts 文件头）。
-			// 于是正常操作一次都不弹窗，越界删除先失败 —— 失败之后才问用户。
-			// 这是 Codex 的模型，也是唯一 fail-closed 的模型。
+			// The enforcement point is not "enumerating dangerous commands" but the **operating system**: the command runs inside
+			// sandbox-exec; writes are unrestricted and only **deletion** is narrowed to the project directory + temp directories —
+			// an out-of-boundary unlink is rejected by the kernel with EPERM (rename also goes through unlink — see the sandbox.ts header).
+			// So normal operations never prompt; an out-of-boundary delete fails first — the user is only asked after failure.
+			// This is Codex's model, and the only fail-closed one.
 			//
-			// 两层授权（用户 2026-09-24 定）：
-			// - **危险目录**（系统根 / bin / 应用安装目录 / 配置类）每次必问，只支持会话级豁免；
-			// - **普通目录**问一次，同意后把目录范围写进持久白名单，以后（含 headless）不再问。
-			// 记住一个目录 = 把它并进 profile 的 `(allow file-write-unlink …)`，删除在沙箱内
-			// 直接成功，命令的其余部分仍被沙箱管着 —— 所以常见路径零弹框零重跑。
+			// Two authorization layers (user decision 2026-09-24):
+			// - **dangerous directories** (system roots / bin / app install dirs / config kinds) ask every time, session-level exemption only;
+			// - **ordinary directories** ask once, and on approval the directory scope is written to the persistent allowlist — never asked again (headless included).
+			// Remembering a directory = merging it into the profile's `(allow file-write-unlink …)` — the delete succeeds inside
+			// the sandbox while the rest of the command stays sandboxed — hence zero prompts and zero reruns for common paths.
 			//
-			// 包裹只发生在这个局部 params 副本上：session 落盘的仍是模型原样发来的命令，
-			// 渲染器显示的也是原命令（不是那串 sandbox-exec 前缀）。
+			// The wrapping only happens on this local params copy: the session persists the model's verbatim command,
+			// and the renderer displays the original command too (not the sandbox-exec prefix string).
 			const command = typeof params?.command === "string" ? params.command : "";
 			if (!sandboxOn || command.trim() === "") {
 				return base.execute(toolCallId, nextParams, signal, runOnUpdate, ctx);
 			}
 
 			const boundary = boundaryFromEnv(ctx?.cwd ?? process.cwd());
-			// profile 带上持久白名单 + 会话豁免：已授权的目录在命令执行前就进了放行名单，
-			// 删除在沙箱内直接成功，不弹框也不重跑。
+			// The profile carries the persistent allowlist + session exemptions: authorized directories enter the allow line
+			// before the command runs, so deletes succeed inside the sandbox — no prompt, no rerun.
 			const extraRoots = [...allowlist().roots(), ...sessionScopes.roots()];
 			const wrapped = wrapWithSandbox(command, buildSeatbeltProfile(boundary, extraRoots), sandboxShellPath);
 
@@ -1658,39 +1807,39 @@ export default function (pi: ExtensionAPI) {
 			try {
 				return await base.execute(toolCallId, { ...nextParams, command: wrapped }, signal, runOnUpdate, ctx);
 			} catch (err) {
-				// 内置 bash 在非零退出时 throw，输出正文就在 message 里 —— 那正是判定
-				// "是不是沙箱拦的" 的地方。只认 EPERM / Operation not permitted：
-				// `Permission denied` 是 EACCES（文件权限位），不是沙箱，拿它当升级信号
-				// 会把"这文件本来就没权限"误报成"沙箱拦的"。
+				// The built-in bash throws on nonzero exit, and the output body lives in the message — exactly the place to check
+				// "was it the sandbox". Only EPERM / Operation not permitted count:
+				// `Permission denied` is EACCES (file permission bits), not the sandbox — using it as the escalation signal
+				// would misreport "this file was never permitted" as "sandbox-blocked".
 				const message = err instanceof Error ? err.message : String(err);
 				if (!looksLikeSandboxDenial(message)) throw err;
 				denialMessage = message;
 			}
 
-			// ---- 被沙箱拦下了：从失败输出里抽被拦路径，按目录走两层授权 ----
+			// ---- blocked by the sandbox: extract the denied paths from the failure output, go through two-layer authorization by directory ----
 			const deniedPaths = extractDeniedPaths(denialMessage ?? "");
 			if (deniedPaths.length === 0) {
-				// 抽不出路径 → 猜不出目标就不许进按目录的记忆逻辑（AGENTS.md
-				// 「Never derive a delete target」的同一口径）。
+				// No path extractable → when the target cannot be guessed, the by-directory memory logic must not run (same policy as
+				// AGENTS.md's "Never derive a delete target").
 				//
-				// 这里**不弹框**，也不拿到沙箱外裸跑：旧行为是「按整条命令会话级问一次，
-				// 同意后整条命令在边界之外重跑」，而那个兜底分支正是 heredoc 误报
-				// （`/bin/bash: cannot create temp file for here document: EPERM`）被抽成
-				// 「要删 /bin/bash」后弹危险目录框的入口。`extractDeniedPaths` 现在用排除法
-				// 从源头认不出这类非删除形状，抽不出路径就只剩两种可能：真不是删除
-				// （exec 失败、嵌套沙箱不可用），或是我们认不出的删除形状 —— 两种都该
-				// 原样报错，而不是把整条命令拿到整层边界之外裸跑（那等于为了一个认不出的
-				// 目标交出全部删除能力）。出口是 `/sandbox-boundary allow <目录>`，
-				// 授权后重试 —— 那条路径走的是同一个安全闸，不会把危险目录落盘。
+				// Here there is **no prompt** and no bare rerun outside the sandbox: the old behavior was "ask once at session level for the
+				// whole command, rerun it outside the boundary on approval" — and that fallback branch is exactly where the heredoc
+				// false positive (`/bin/bash: cannot create temp file for here document: EPERM`) got extracted as
+				// "deleting /bin/bash" and popped the dangerous-directory dialog. `extractDeniedPaths` now uses exclusion to reject
+				// such non-delete shapes at the source, so when no path is extracted only two possibilities remain: it truly was not a delete
+				// (exec failure, nested sandbox unavailable), or it is a delete shape we do not recognize — both deserve
+				// reporting as-is, not rerunning the whole command outside the entire boundary (that would hand over all deletion
+				// capability for an unrecognized target). The way out is `/sandbox-boundary allow <dir>` — authorize and retry;
+				// that path goes through the same safety gate and cannot persist a dangerous directory.
 				//
-				// 交互与非交互（headless）走同一条路：原样报错 + 一行 `[沙箱]` 提示。
+				// Interactive and non-interactive (headless) take the same path: report the error as-is plus a `[sandbox]` hint line.
 				throw new Error(
 					`${denialMessage}
 
 [Sandbox] Could not identify the blocked path; no confirmation dialog was shown. ` +
 						`If deletion is intended, authorize it with /sandbox-boundary allow <directory>, then retry.` +
 						`
-Deletion boundary: ${writableRoots(boundary).join("、")}`,
+Deletion boundary: ${writableRoots(boundary).join(", ")}`,
 				);
 			}
 
@@ -1701,9 +1850,9 @@ Deletion boundary: ${writableRoots(boundary).join("、")}`,
 				env: pathEnv,
 			});
 
-			// 永不删除档：**不弹框、无任何放行选项**。内核 deny 行已经把它拦下了
-			// （`buildSeatbeltProfile` 在 allow 行之后收回），这里只负责把原因说清楚。
-			// 交互与 headless 同一条路 —— 本来就没有「批准」这个动作可给。
+			// Never-delete tier: **no prompt, no override option at all**. The kernel deny line already blocked it
+			// (`buildSeatbeltProfile` revokes after the allow lines); here we only explain why.
+			// Interactive and headless take the same path — there is no "approve" action to give anyway.
 			if (classification.blocked.length > 0) {
 				throw new Error(
 					`${denialMessage}
@@ -1717,9 +1866,9 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 			}
 
 			if (classification.dangerous.length === 0 && classification.ordinary.length === 0) {
-				// 全部已授权却仍被拦：白名单可能刚被另一侧（sandbox-boundary / 手动 allow）
-				// 更新过，而本次的 profile 是更新前构建的。带上最新名单重跑一次；
-				// 仍被拦就报错 —— 不循环，也不升级到沙箱外。
+				// All authorized yet still blocked: the allowlist may have just been updated on the other side (sandbox-boundary / manual allow)
+				// while this run's profile was built before the update. Rerun once with the freshest list;
+				// still blocked → report the error — no looping, and no escalation outside the sandbox.
 				const retryRoots = [...allowlist().roots(), ...sessionScopes.roots()];
 				const retry = wrapWithSandbox(command, buildSeatbeltProfile(boundary, retryRoots), sandboxShellPath);
 				try {
@@ -1738,8 +1887,8 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				}
 			}
 
-			// 有未授权的路径：非交互环境 fail-closed（持久白名单在 headless 下生效，
-			// 能走到这里说明没有命中；危险目录与未授权的普通目录一律拒绝）。
+			// Unauthorized paths present: non-interactive environments are fail-closed (the persistent allowlist does apply under headless,
+			// so reaching here means it did not hit; dangerous directories and unauthorized ordinary directories are all refused).
 			if (!ctx?.hasUI) {
 				const denied = [...classification.dangerous.map((d) => d.path), ...classification.ordinary];
 				throw new Error(
@@ -1747,8 +1896,8 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 
 [Sandbox] This command deletes unauthorized paths outside the deletion boundary; escalation is unavailable in non-interactive mode.
 ` +
-						`Target: ${denied.join("、")}\n` +
-						`Deletion boundary: ${writableRoots(boundary).join("、")}\n` +
+						`Target: ${denied.join(", ")}\n` +
+						`Deletion boundary: ${writableRoots(boundary).join(", ")}\n` +
 						`Persistent allowlist: ${allowlist().roots().length} entries (view with /sandbox-boundary)`,
 				);
 			}
@@ -1759,16 +1908,16 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				if (paths.length > limit) shown.push(`  … plus ${paths.length - limit} matches`);
 				return shown.join("\n");
 			};
-			// 弹框前先算好「将记住的范围」，在弹框里明示 —— 用户批准的是这个范围，
-			// 不是无限授权。
+			// Before prompting, compute "the scope that will be remembered" and state it in the dialog — the user approves that scope,
+			// not unlimited authorization.
 			const ordinaryScopes = memoryScopesFor(classification.ordinary, pathEnv, boundary.cwd);
 			const dangerousScopes = classification.dangerous.map((d) => sessionScopeFor(d.path, pathEnv, boundary.cwd));
 
 			let choice: string | undefined;
 			if (hasDangerous) {
-				// 危险目录在场：用更严的那套选项。普通路径一并列出，但只能随本次批准
-				// （要永久记住它们得在没有危险路径的命令里单独走普通弹框）。
-				// pi 的 select 只有 (title, options)：正文必须拼进 title（destructive-guard 同一做法）。
+				// A dangerous directory present: use the stricter option set. Ordinary paths are listed too but can only ride along with this
+				// approval (to remember them permanently they need their own ordinary-tier prompt on a command without dangerous paths).
+				// pi's select only takes (title, options): the body must be spliced into the title (same approach as destructive-guard).
 				const lines = [
 					`⚠️ ${ESCALATION_TITLE} (high-risk directory)`,
 					"",
@@ -1792,7 +1941,7 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 					foldPaths(classification.ordinary),
 					"",
 					ordinaryScopes.length > 0
-						? `Remember these paths: ${ordinaryScopes.join("、")} (future deletions within these directories will not prompt)`
+						? `Remember these paths: ${ordinaryScopes.join(", ")} (future deletions within these directories will not prompt)`
 						: "No safe persistent scope can be determined for these paths; approve each request individually.",
 					"",
 					"Approval reruns the command, including any parts that already executed.",
@@ -1810,17 +1959,17 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 					`${denialMessage}
 
 [Sandbox] The user denied deletion outside the boundary: ` +
-						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join("、") +
-						` (deletion boundary: ${writableRoots(boundary).join("、")}）`,
+						[...classification.dangerous.map((d) => d.path), ...classification.ordinary].join(", ") +
+						` (deletion boundary: ${writableRoots(boundary).join(", ")})`,
 				);
 			}
 
-			// 按选择落授权：
-			// - `Allow for this session（并记住该目录）` → 普通路径的范围**落盘**（remember 内部
-			//   还有安全闸，危险范围落不进去）。名字里的 session 由括注与下面的 notify 共同
-			//   说清：它比 `Allow once` 多记住了目录，而且重启后仍生效。
-			// - `Allow for this session`（危险分支）→ 危险路径的会话范围进会话集合，重启即失效
-			// - `Allow once` → 只加宽这一次重跑的 profile，不进任何记忆
+			// Apply authorization per the choice:
+			// - `Allow for this session (and remember the directory)` → ordinary paths' scopes are **persisted** (remember still has
+			//   the safety gate inside; dangerous scopes cannot get in). The "session" in the name is explained by the parenthetical and
+			//   the notify below: it remembers more than `Allow once` — the directory — and still applies after restart.
+			// - `Allow for this session` (dangerous branch) → dangerous paths' session scopes enter the session set, expiring on restart
+			// - `Allow once` → only widens this one rerun's profile; nothing is remembered
 			const onceRoots: string[] = [];
 			if (choice === "Allow for this session (and remember the directory)") {
 				const remembered = allowlist().remember(ordinaryScopes, "confirm", pathEnv);
@@ -1829,7 +1978,7 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 						`Permanently remembered ${remembered.length} directories (persists across restarts); future deletions within them will not prompt`,
 						"info",
 					);
-				// 被安全闸挡掉的范围（算不出可记范围的）仍要放行这一次
+				// Scopes rejected by the safety gate (no rememberable scope could be computed) still pass for this one run
 				onceRoots.push(...ordinaryScopes.filter((s) => !remembered.includes(s)));
 			} else if (choice === "Allow for this session") {
 				sessionScopes.add(dangerousScopes);
@@ -1839,8 +1988,8 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				onceRoots.push(...ordinaryScopes, ...dangerousScopes);
 			}
 
-			// 带上刚批准的目录在沙箱内重跑（命令的其余部分仍被沙箱管着）。
-			// 仍被拦 → 报错，不循环、也不升级到沙箱外（手动 /sandbox-boundary allow 是出口）。
+			// Rerun inside the sandbox with the just-approved directories (the rest of the command stays sandboxed).
+			// Still blocked → report the error; no looping, no escalation outside the sandbox (manual /sandbox-boundary allow is the way out).
 			const widenedRoots = [...allowlist().roots(), ...sessionScopes.roots(), ...onceRoots];
 			const widened = wrapWithSandbox(command, buildSeatbeltProfile(boundary, widenedRoots), sandboxShellPath);
 			try {
@@ -1860,49 +2009,49 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 		},
 
 		renderCall(args, theme, context) {
-			// 内置 renderCall 靠这里记时（"Took 1.2s"），覆盖后需要自己维护
+			// The built-in renderCall relied on this to time ("Took 1.2s"); overridden, we maintain it ourselves
 			const state = context.state;
 			if (context.executionStarted && state.startedAt === undefined) {
 				state.startedAt = Date.now();
 				state.endedAt = undefined;
 			}
 
-			// 非流式模式下管住**命令文本的逐字刷新**，但要分两个时间点（对齐 codex / opencode）：
-			//   时间点一：命令字符全收完（argsComplete）→ 一次性把完整命令打到屏幕上；
-			//   时间点二：命令执行完 → 结果由 renderResult 补刷到命令下面。
-			// 两个点必须分开：用 isPartial 做阈值会把命令也压到结果之后才出，变成
-			// 「全等到结果才一次性出」，那不是想要的效果。
+			// In non-streaming mode, rein in the **command text's per-character refresh** — but split into two points in time (aligned with codex / opencode):
+			//   point one: all command chars received (argsComplete) → paint the complete command at once;
+			//   point two: command finished → the result is repainted under the command by renderResult.
+			// The two points must stay separate: gating on isPartial would hold the command back until after the result, becoming
+			// "everything waits for the result" — not the desired effect.
 			//
-			// 为什么命令会逐字刷：模型生成 tool call 时参数是流式的（toolcall_delta 一片
-			// 一片到），pi 每收一片就 updateArgs() → updateDisplay() → 重画一次 renderCall。
-			// 所以收完前返回**零行组件**（连占位行都不画），argsComplete 后才出完整命令。
-			// 实测这段时间占大头：`echo hello` 从 toolcall_start 到 tool_execution_end 约 290ms，
-			// 其中 args 流式 197ms、toolcall_end→execution_start 63ms、命令执行只 31ms。
+			// Why the command refreshes char by char: while the model generates the tool call, its arguments stream in (toolcall_delta
+			// piece by piece), and on each piece pi calls updateArgs() → updateDisplay() → repaints renderCall once.
+			// So until all chars arrive, return a **zero-line component** (not even a placeholder row); the complete command appears after argsComplete.
+			// Measured, this stretch dominates: `echo hello` takes ~290ms from toolcall_start to tool_execution_end —
+			// 197ms of args streaming, 63ms toolcall_end→execution_start, and only 31ms of actual command execution.
 			//
-			// argsComplete 在 assistant message_end 时置位（setArgsComplete），比
-			// tool_execution_start 早 ~60ms，正好是“命令收完”这个语义点。
-			// 返回零行组件是安全的：Box.render 开头有 `childLines.length === 0 → []` 守卫
-			// （paddingY 是在这之后才加的），所以不会画出空的块。
-			// （updateDisplay 每次都传全新的 context，getRenderContext 现拼对象，
-			// 所以 argsComplete 读得到实时值。）
+			// argsComplete is set at assistant message_end (setArgsComplete), ~60ms before
+			// tool_execution_start — exactly the "command fully received" semantic point.
+			// Returning a zero-line component is safe: Box.render begins with a `childLines.length === 0 → []` guard
+			// (paddingY is added only after it), so no empty box is painted.
+			// (updateDisplay passes a fresh context every time — getRenderContext builds the object on the spot,
+			// so argsComplete reads the live value.)
 			//
-			// **但 argsComplete 只在实时流里置位**，所以判定条件是「args 可能还在流」
-			// 而不是「args 还没收完」：pi 的 interactive-mode.js 只在 `message_end` 分支调
-			// `component.setArgsComplete()`，而 `/resume`（以及 renderInitialMessages /
-			// compaction_end / rebuildChatFromMessages）走的 `renderSessionItems` 重建历史时
-			// 只 `new ToolExecutionComponent(...)` + `component.updateResult(message)`，
-			// **从不调 setArgsComplete / markExecutionStarted** —— 历史块的 argsComplete
-			// 永远是 false。若只按 argsComplete 判定，恢复出来的 bash 块就只剩输出、
-			// 命令行整行消失（实测过：RESTORE 渲染出 ["", " hello"]，LIVE 渲染出
-			// ["", " $ echo hello", " hello", "", " Took 0.0s"]）。
-			// isPartial 正好补上这个缺口：构造时默认 true，只有 updateResult(result, false)
-			// 会置 false —— 实时流里那必然发生在 argsComplete 之后（tool_execution_end），
-			// 历史重建里则发生在第一次渲染之后。两种路径都能出命令，而流式阶段
-			// （isPartial 仍为 true）照旧一行都不画。
-			// 副作用（可接受）：实时流里按 Esc 中断一个还没收完参数的 tool call 时，
-			// message_end(aborted) 会 updateResult(isPartial=false) 而不置 argsComplete，
-			// 于是命令行会显示出来（args 不全时是 `$ ...` 占位）—— 能看到被中断的是
-			// 什么命令，比只显示一行报错更有用。
+			// **But argsComplete is only set in the live stream**, so the check is "args may still be streaming"
+			// rather than "args not finished": pi's interactive-mode.js only calls
+			// `component.setArgsComplete()` in the `message_end` branch, while `/resume` (and renderInitialMessages /
+			// compaction_end / rebuildChatFromMessages) rebuild history via `renderSessionItems`, which only does
+			// `new ToolExecutionComponent(...)` + `component.updateResult(message)` —
+			// **never calling setArgsComplete / markExecutionStarted** — so a history block's argsComplete
+			// stays false forever. Gating on argsComplete alone would leave resumed bash blocks with only output —
+			// the command line gone entirely (observed: RESTORE rendered ["", " hello"] while LIVE rendered
+			// ["", " $ echo hello", " hello", "", " Took 0.0s"]).
+			// isPartial plugs exactly this gap: true by default at construction, only updateResult(result, false)
+			// sets it false — in the live stream that necessarily happens after argsComplete (tool_execution_end);
+			// in history rebuilds it happens after the first render. Both paths emit the command, while the streaming phase
+			// (isPartial still true) still paints nothing at all.
+			// Side effect (acceptable): pressing Esc mid-stream to interrupt a tool call whose args have not finished
+			// makes message_end(aborted) call updateResult(isPartial=false) without setting argsComplete —
+			// so the command line does appear (with partial args as a `$ ...` placeholder) — seeing which command was
+			// interrupted is more useful than a bare error line.
 			if (!streaming && !context.argsComplete && context.isPartial === true) {
 				return {
 					render(): string[] {
@@ -1919,11 +2068,11 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 
 			const commandDisplay = invalid ? theme.fg("error", "[invalid arg]") : command ? command : theme.fg("toolOutput", "...");
 			const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
-			// invalid / 空命令走 pi-tui 折行分支，这一行没有正文可分词，所以 `Run` 的粗体在这里拼
+			// invalid / empty command goes through the pi-tui wrap branch; this row has no body to tokenize, so `Run`'s bold is assembled here
 			const styledFull = theme.fg("toolTitle", theme.bold(COMMAND_PROMPT.trimEnd()) + " ") + commandDisplay + timeoutSuffix;
 
-			// 缓存放在组件闭包里而不是 state：流式阶段 args 会不断变长，
-			// 而 state 是整行共享的，按 width 缓存会返回旧命令的行。
+			// Cache lives in the component closure, not state: during streaming the args keep growing,
+			// and state is shared by the whole row — caching by width there would return stale lines.
 			let cachedWidth: number | undefined;
 			let cachedExpanded: boolean | undefined;
 			let cachedResultSeen: boolean | undefined;
@@ -1931,12 +2080,12 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 
 			const component = {
 				render(width: number): string[] {
-					// `Box` 的 paddingX 是 0（左边距由 `withHeadBar` 画：首行 `• `、其余两格空格），
-					// 所以它给孩子的就是整宽 —— 这里把用掉的三列扣回去：gutter 2 + 左边距 1 + 右边界。
-					// 见文件头「命令行首行的状态圆点」。
+					// `Box`'s paddingX is 0 (the left margin is painted by `withHeadBar`: `• ` first row, two spaces elsewhere),
+					// so children get the full width — here the three spent columns are deducted back: gutter 2 + left margin 1 + right edge.
+					// See file header "the state dot on the command line's first row".
 					const wrapWidth = Math.max(20, (width || 80) - GUTTER_WIDTH - INDENT_WIDTH);
 					const limit = DEFAULT_LINES;
-					// 缓存键要带上 expanded / resultSeen，否则 ctrl+o 切换或结果到达后已渲染的行不会刷新
+					// The cache key must carry expanded / resultSeen, or toggling ctrl+o or a result arriving would not refresh rendered rows
 					const resultSeen = state.resultSeen === true;
 					if (
 						cachedLines &&
@@ -1947,20 +2096,20 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 						return cachedLines;
 
 					let result: string[];
-					// invalid（args.command 不是字符串）/ 空命令走 pi-tui 折行分支：这两种文本固定是
-					// `Run [invalid arg]` / `Run ...`，短到根本不会折行，而那个分支能原样保留
-					// 嵌套样式（error 色 / toolOutput 色），不用在硬折分支里重建
+					// invalid (args.command not a string) / empty command goes through the pi-tui wrap branch: the text is fixed to
+					// `Run [invalid arg]` / `Run ...`, far too short to ever wrap, and that branch preserves
+					// nested styling as-is (error color / toolOutput color) — no need to rebuild it in the hard-wrap branch
 					if (!context.expanded && !invalid) {
-						// 折叠态：**break-all 硬折行** + 视觉行数预算（`limit`，默认 2 行）。
-						// 详见文件头「命令行：2 行 + `Run ` 前缀」一节。
-						// 先把行尾 `…` 放在**纯文本**上，再整行上色 —— 反过来会把 SGR
-						// 序列从中间切断。
+						// collapsed state: **break-all hard wrap** + a visual-row budget (`limit`, default 2 rows).
+						// See file header "command line: 2 lines + `Run ` prefix".
+						// The end `…` goes on **plain text** first, then the whole row is colored — the other way would cut SGR
+						// sequences in half.
 						const commandLines = (command || "...").split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
-						// 首行（且仅首行）要给 timeout 后缀留位置，否则长命令会把后缀挤掉
+						// Only the first row (and only it) must leave room for the timeout suffix, or a long command pushes it off
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
-						// 执行中续行只用等宽缩进，`│ ` 是“命令已结束”的信号（用户定的观感，
-						// 见文件头「命令行：2 行 + `Run ` 前缀」）
+						// mid-run continuations use fixed-width indent; `│ ` is the "command finished" signal (the user's chosen look,
+						// see file header "command line: 2 lines + `Run ` prefix")
 						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
 						const { lines, hiddenLines } = renderCommandLines(
 							commandLines,
@@ -1974,26 +2123,26 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 							theme,
 						);
 						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
-						// 命令本身没显示完 → `… +N lines`（执行中不挂 `│ `，与续行一致）
+						// command itself not fully shown → `… +N lines` (no `│ ` mid-run, matching the continuations)
 						if (hiddenLines > 0) {
 							const hint = theme.fg("muted", `${linePrefix}${ELLIPSIS} +${hiddenLines} lines`);
 							result = [...result, truncateToWidth(hint, wrapWidth, ELLIPSIS)];
 						}
 					} else if (invalid || !command) {
-						// invalid（args.command 不是字符串）/ 空命令：文本固定是 `Run [invalid arg]`
-						// / `Run ...`，短到根本不会折行，而折行分支能原样保留嵌套样式
-						//（error 色 / toolOutput 色），不用在硬折分支里重建
+						// invalid (args.command not a string) / empty command: the text is fixed to `Run [invalid arg]`
+						// / `Run ...`, far too short to ever wrap, and the wrap branch preserves nested styling
+						// (error color / toolOutput color) — no need to rebuild it in the hard-wrap branch
 						result = wrapTextWithAnsi(styledFull, wrapWidth);
 					} else {
-						// 展开态（ctrl+o）：要的就是完整命令，**同样用 break-all 硬折行** —— 贪心词折行
-						// 在这里一样会把长路径整块挪到下一行再从中间断开（就是用户看到的 `Run ` 后面直接
-						// 折行），展开态只是不限行数，折行规则必须一致。
+						// expanded state (ctrl+o): the full command is wanted, **still with break-all hard wrap** — greedy word wrap
+						// would likewise move a long path wholesale to the next line and split it mid-string (the `Run `-then-wrap
+						// look the user saw); expanded only lifts the line cap — the wrap rules must match.
 						const commandLines = command.split("\n");
 						const suffixWidth = visibleWidth(timeoutSuffix);
 						const firstRowBudget = suffixWidth > 0 ? Math.max(4, wrapWidth - suffixWidth) : wrapWidth;
-						// 执行中续行用等宽缩进，完成后才换成 `│ `（与折叠态同一条规则）
+						// mid-run continuations use fixed-width indent, switching to `│ ` once finished (same rule as collapsed)
 						const linePrefix = resultSeen ? COMMAND_CHAIN : COMMAND_INDENT;
-						// 与折叠态共用同一套摆行逻辑，只把行数预算放开（`hiddenLines` 必为 0）
+						// shares the collapsed state's row-layout logic, only the line budget is lifted (`hiddenLines` is necessarily 0)
 						const { lines } = renderCommandLines(
 							commandLines,
 							COMMAND_PROMPT,
@@ -2008,11 +2157,11 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 						result = lines.map((row, idx) => row + (idx === 0 ? timeoutSuffix : ""));
 					}
 
-					// 状态圆点 `•` + 左侧留白：只挂在首行（用户 2026-09-21 定，见文件头「命令行首行的
-					// 状态圆点」）。结果侧在 `withPreviewLimit` / `prefixTreeLines` 里挂同一份缩进，两边对齐。
+					// The state dot `•` + left whitespace: hung on the first row only (user decision 2026-09-21, see file header "the
+					// state dot on the command line's first row"). The result side mounts the same indent inside `withPreviewLimit` / `prefixTreeLines` — both sides aligned.
 					result = withHeadBar(result, stateBarAnsi(theme, context.isPartial === true, context.isError === true));
 
-					// 行尾补白交给外层（`Box.render` 会把每行补满到它拿到的宽度），这里不用管。
+					// End-of-line padding is the outer layer's job (`Box.render` pads every row to its width); not our concern here.
 					cachedWidth = wrapWidth;
 					cachedExpanded = context.expanded;
 					cachedResultSeen = resultSeen;
@@ -2027,10 +2176,10 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				},
 			};
 
-			// `new Box(0, 0)`：**没有 bgFn**（bash 块不带底色 —— pending / 成功 / 失败三种底都不画，
-			// 状态由首行那颗圆点的颜色表达，见文件头「整块没有底色」）；两维 padding 也都是 0：
-			// 整块上下不留空行，左边距由组件自己画 —— 首行是 `• `、其余行两格空格（`withHeadBar`），
-			// 所以孩子拿到的是整宽、组件内部再扣回去（`width - 3`）。
+			// `new Box(0, 0)`: **no bgFn** (the bash block carries no background — none of pending / success / failure is painted;
+			// state is conveyed by the dot's color on the first row — see file header "no background"); both paddings are 0 too:
+			// no blank rows above or below the block, and the left margin is painted by the component itself — `• ` on the first row, two spaces elsewhere (`withHeadBar`),
+			// so children get the full width and the component deducts it back internally (`width - 3`).
 			const box = new Box(0, 0);
 			box.addChild(component);
 			return box;
@@ -2043,7 +2192,7 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 			const arg = args.trim().toLowerCase();
 
 			if (arg === "off") {
-				previewLines = 5; // pi 的 BASH_PREVIEW_LINES，等于不裁
+				previewLines = 5; // pi's BASH_PREVIEW_LINES — equivalent to not trimming
 				ctx.ui.notify("Bash output preview restored to Pi's default of 5 lines", "info");
 				return;
 			}
@@ -2053,8 +2202,8 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 				return;
 			}
 
-			// 用 Number 而不是 parseInt：parseInt("2.5") 会静默变成 2（与
-			// clampPreviewLines 的归一策略一致，小数应当被拒而不是静默截断）
+			// Number instead of parseInt: parseInt("2.5") silently becomes 2 (consistent with
+			// clampPreviewLines' normalize strategy — fractions should be rejected, not silently truncated)
 			const parsed = Number(arg);
 			const next = clampPreviewLines(parsed);
 			if (next !== parsed) {
@@ -2067,8 +2216,8 @@ If deletion is necessary, perform it yourself in a terminal (or disable this lay
 		},
 	});
 
-	// 只读查看当前生效的期限：默认值、上限、以及 env 有没有覆盖。
-	// 值在 execute 里每次调用时重算，所以这里显示的永远是下一次执行的真实期限。
+	// Read-only view of the effective deadline: default, cap, and whether env overrides.
+	// Values are recomputed per call in execute, so what is shown here is always the real deadline of the next run.
 	pi.registerCommand("bash-timeout", {
 		description: "Show Bash timeouts (default / maximum / environment overrides)",
 		handler: async (_args, ctx) => {
