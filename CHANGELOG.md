@@ -11,7 +11,7 @@
 - Add English folder documentation so the current GitHub directory listing
   displays English latest-commit subjects without rewriting upstream history.
 
-## pi-coder-tuned 0.1.0
+## 0.1.0
 
 - Forked from jayli/pi-coder 2.1.3 (`d68d965`), preserving MIT attribution.
 - English user-facing extension literals, prompts, and matching test expectations.
@@ -25,7 +25,7 @@
 
 The following entries describe the original package before the fork.
 
-## 2.1.3 — 2026-09-26
+### 2.1.3 — 2026-09-26
 
 Snapshot sync: a new **verify-loop** extension turns the "no completion claims without fresh verification evidence" discipline into code — a gate that forces one more turn when files changed but nothing ran afterwards, and a `/goal` evaluator that judges every turn against a user-set condition. Skill discovery gets no extension at all: the trigger rules moved into the global `AGENTS.md` (native discovery plus prompt reinforcement), and the short-lived `skill-router` experiment upstream was added and deleted before this sync, leaving only its rules behind. The delegation playbook regains the "actively look for parallel opportunities" bullets that a 19→5 condensation dropped, and the shipped `settings.json` turns on `pi-subagents`' watchdog reviewer. The extension count moves 28 → 29 and the suite 1131 → 1222 tests.
 
@@ -50,7 +50,7 @@ Snapshot sync: a new **verify-loop** extension turns the "no completion claims w
 - Upstream added and deleted a `skill-router` extension between this sync and the last one; its net effect is the skill-trigger rules now living in `AGENTS.md` / `AGENTS.core.md`, which this sync carries. Nothing named `skill-router` ships here.
 - `config/settings.json` now differs from the snapshot in **four** places instead of three: the watchdog's `main.model` joins the removed model selections, while `watchdog.enabled` itself is kept. A sync's `diff` on that file is expected to show exactly those four.
 
-## 2.1.2 — 2026-09-24
+### 2.1.2 — 2026-09-24
 
 Snapshot sync: the delete protection moves from a **lexical blacklist to an OS capability boundary**. A new `sandbox-boundary` extension closes the non-shell half, `bash` commands run inside a seatbelt profile, a second new extension (`core-rules`) keeps the distilled global rules in context, and plan mode is realigned with Claude Code — an approved plan becomes a document, the task-mirror machinery is gone, and the model's own `enter_plan_mode` now asks for **consent** with all routing criteria moved into its tool description. `destructive-guard` is **retired from the live environment** (the repository copy and its tests stay as the reference implementation of the blacklist route). The extension count moves 26 → 28 and the suite 953 → 1131 tests.
 
@@ -89,7 +89,7 @@ Snapshot sync: the delete protection moves from a **lexical blacklist to an OS c
 - `plan-mode` and `simple-task` are **independent again**; `recap` and `simple-task` still must be installed together through `gap.ts`. `sandbox-boundary` imports `bash-command-collapse/sandbox.ts` and `allowlist.ts`, so those two must be installed together.
 - The delete boundary is macOS-only: without `sandbox-exec` (or with `PI_SANDBOX=off`) both the bash profile and the `apply_patch` gate are disabled, and `destructive-guard` — if you install it — is the only remaining delete protection.
 
-## 2.1.1 — 2026-09-23
+### 2.1.1 — 2026-09-23
 
 Snapshot sync: a new **destructive-guard** extension gates deletes before any tool runs, plan mode stops drawing its own progress table and mirrors its steps into `simple-task` instead, and the global `AGENTS.md` gains the destructive-action and blast-radius discipline. The extension count moves 25 → 26 and the suite 839 → 953 tests.
 
@@ -116,7 +116,7 @@ Snapshot sync: a new **destructive-guard** extension gates deletes before any to
 - The suite grows from **839 to 953 tests**: 81 destructive-guard, 16 plan-mode (the 7-case mirror integration test plus 9 new index wiring cases) and 17 simple-task plan-mirror cases, ~38 s wall time.
 - `plan-mode` and `simple-task` must now be installed together (plan-mode statically imports the contract module); `recap` and `simple-task` already shared that requirement through `gap.ts`.
 
-## 2.1.0 — 2026-09-22
+### 2.1.0 — 2026-09-22
 
 Snapshot sync: a Claude Code style **plan mode** arrives as a new extension, the bash and read blocks lose their backgrounds and gain a `• ` status dot, `pi-coder-summer-night` is replaced by `pi-coder-1337`, `/recap` becomes idempotent, and the two older themes drop the `vars` entries nothing references any more. The extension count moves 24 → 25 and the suite 651 → 839 tests. The sync also removed the stale `themes/pi-coder-summer-night.json` that a plain `cp -R` had been leaving behind since 2.0.0.
 
@@ -149,7 +149,7 @@ Snapshot sync: a Claude Code style **plan mode** arrives as a new extension, the
 - The suite grows from **651 to 839 tests** (165 plan-mode assertions, 11 read render assertions, 5 bash render assertions, 1 statusline case and 1 recap case), ~36 s wall time.
 - `/recap`'s idempotence, the mode indicator's fixed slot and the two blocks' shared left edge are all recorded upstream in the handbook, because each of them is a decision that looks like it could be simplified and cannot.
 
-## 2.0.5 — 2026-09-21
+### 2.0.5 — 2026-09-21
 
 Snapshot sync: the bash tool call was rebuilt as a `Run ` command block on a single tree, a failed command is now recognized and painted red, and `user-message-bar` moved its default color from the added-line green to the skin's accent. The command shape and its 22 render assertions arrived together in a directory of their own, so the README's switch table no longer lists the long-gone `PI_BASH_TREE`, and the two count rows (`24 extensions`, test counts) were corrected.
 
@@ -171,7 +171,7 @@ Snapshot sync: the bash tool call was rebuilt as a `Run ` command block on a sin
 
 - The suite grows from **624 to 651 tests** (22 bash render assertions, five `user-message-bar` cases), ~36 s wall time. No other extension, theme or config file moved: the snapshot diff was exactly the files listed above.
 
-## 2.0.4 — 2026-09-20
+### 2.0.4 — 2026-09-20
 
 Snapshot sync: the statusline branch icon moved to a code point no font on this machine covers, all three themes dropped their pending-card background, and `pi-coder-catppuccin` joined the other two on the neutral grey thinking border. The `tool-pending-bar` extension that briefly marked pending cards landed upstream and was reverted before this sync, so it is not part of the snapshot.
 
@@ -187,7 +187,7 @@ Snapshot sync: the statusline branch icon moved to a code point no font on this 
 
 The test suite stays at **624 tests**, and no color value moved apart from the three `toolPendingBg` entries and catppuccin's new `thinkingGrey`: the `statusline` change is comments plus one exported constant, and `line.test.ts` pins the new code point.
 
-## 2.0.2 — 2026-09-20
+### 2.0.2 — 2026-09-20
 
 Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-summer-night` palette whose added-line color is now green, a re-tuned pending-card background in `pi-coder-ayu`, a shorter `recap` idle delay, a session-replacement crash fix in `user-message-bar` and a `statusline/` branch icon that no longer needs a Nerd Font.
 
@@ -214,7 +214,7 @@ Snapshot sync: a new extension, a resynced palette page, a rebuilt `pi-coder-sum
 
 - `config/settings.json` and `config/models.json`. The snapshot's `defaultProvider`, `defaultModel` and `modelThinkingLevels` keys stay out for the same reason as the gateway's provider registrations: they are machine-specific.
 
-## 2.0.0 — 2026-09-19
+### 2.0.0 — 2026-09-19
 
 Snapshot sync: the three themes were renamed with a `pi-coder-` prefix, so their names cannot collide with themes from another installed package.
 
@@ -229,7 +229,7 @@ Snapshot sync: the three themes were renamed with a `pi-coder-` prefix, so their
 - No color value moved: the three theme files are byte-identical to 1.1.1 apart from the `name` field, and the extension sources differ only in those comment lines.
 - The test suite stays at 596 tests.
 
-## 1.1.1 — 2026-09-19
+### 1.1.1 — 2026-09-19
 
 Snapshot sync: the bash and read display toggles were cut back to a fixed default plus environment variables.
 
@@ -245,7 +245,7 @@ Snapshot sync: the bash and read display toggles were cut back to a fixed defaul
 - Defaults before and after this sync are identical: folding on at 3 lines, tree indentation on, streaming off, `read` path collapse on.
 - The test suite stays at 596 tests; the removed command handlers were not covered.
 
-## 1.1.0 — 2026-09-18
+### 1.1.0 — 2026-09-18
 
 Snapshot sync: the environment gained an MCP client and a startup fix for pi's built-in footer, and the `ayu` theme was resynced.
 
@@ -264,7 +264,7 @@ Snapshot sync: the environment gained an MCP client and a startup fix for pi's b
 
 - `config/mcp.json` — the snapshot's entries hold absolute paths of local MCP server executables, the same class of machine-specific value as `models.json`'s gateway registrations. `config/models.json` and the three model-selection keys in `config/settings.json` remain out as well.
 
-## 1.0.0 — 2026-09-18
+### 1.0.0 — 2026-09-18
 
 First release. A complete pi coding-agent environment packaged for npm.
 
