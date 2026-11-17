@@ -91,11 +91,11 @@ describe("buildSummaryRequestPrompt", () => {
 		assert.match(prompt, /CJK\/full-width character counts as 2 columns/);
 	});
 
-	it("asks for a single line without decoration and mirrors the input language", () => {
+	it("asks for a single English line without decoration, regardless of input language", () => {
 		const prompt = buildSummaryRequestPrompt("hello", 30);
 		assert.match(prompt, /Output a single line/);
 		assert.match(prompt, /No line breaks, no quotes, no markdown/);
-		assert.match(prompt, /same language as the input/);
+		assert.match(prompt, /Write in English, even when the input uses another language/);
 	});
 
 	it("embeds the input prompt verbatim", () => {
@@ -125,54 +125,54 @@ describe("cleanSummaryText", () => {
 	});
 
 	it("strips a label prefix in ASCII and Chinese", () => {
-		assert.equal(cleanSummaryText("摘要：优化摘要逻辑"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("摘要：optimize the summary logic"), "optimize the summary logic");
 		assert.equal(cleanSummaryText("Summary: refactor the loader"), "refactor the loader");
-		assert.equal(cleanSummaryText("概括 : 修 bug"), "修 bug");
+		assert.equal(cleanSummaryText("概括 : fix the bug"), "fix the bug");
 	});
 
 	it("strips a bold-wrapped label and its closing markers", () => {
-		assert.equal(cleanSummaryText("**摘要：** 优化摘要逻辑"), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("**摘要**：优化摘要逻辑"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("**摘要：** optimize the summary logic"), "optimize the summary logic");
+		assert.equal(cleanSummaryText("**摘要**：optimize the summary logic"), "optimize the summary logic");
 	});
 
 	it("skips a label-only first line and uses the next line", () => {
-		assert.equal(cleanSummaryText("摘要：\n优化提示词摘要逻辑"), "优化提示词摘要逻辑");
+		assert.equal(cleanSummaryText("摘要：\noptimize the prompt summary"), "optimize the prompt summary");
 		assert.equal(cleanSummaryText("**Summary**\nrefactor the loader"), "refactor the loader");
 	});
 
 	it("takes only the first meaningful line", () => {
-		const reply = "优化摘要逻辑\n\n这段代码做的事情是把很长的提示词交给模型压缩，具体来说……";
-		assert.equal(cleanSummaryText(reply), "优化摘要逻辑");
+		const reply = "optimize the summary logic\n\nThis extra explanation must not reach the status bar.";
+		assert.equal(cleanSummaryText(reply), "optimize the summary logic");
 	});
 
 	it("strips wrapping quotes and book-title marks", () => {
-		assert.equal(cleanSummaryText('"优化摘要逻辑"'), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("「优化摘要逻辑」"), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("《优化摘要逻辑》"), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("`优化摘要逻辑`"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText('"optimize the summary logic"'), "optimize the summary logic");
+		assert.equal(cleanSummaryText("「optimize the summary logic」"), "optimize the summary logic");
+		assert.equal(cleanSummaryText("《optimize the summary logic》"), "optimize the summary logic");
+		assert.equal(cleanSummaryText("`optimize the summary logic`"), "optimize the summary logic");
 	});
 
 	it("strips whole-text bold wrapping", () => {
-		assert.equal(cleanSummaryText("**优化摘要逻辑**"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("**optimize the summary logic**"), "optimize the summary logic");
 		assert.equal(cleanSummaryText("__refactor the loader__"), "refactor the loader");
 	});
 
 	it("unwraps stacked decoration (label + quotes + bold)", () => {
-		assert.equal(cleanSummaryText('**"摘要：优化摘要逻辑"**'), "优化摘要逻辑");
+		assert.equal(cleanSummaryText('**"摘要：optimize the summary logic"**'), "optimize the summary logic");
 	});
 
 	it("strips list bullets and markdown chrome via flattenPrompt", () => {
-		assert.equal(cleanSummaryText("- 优化摘要逻辑"), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("# 优化摘要逻辑"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("- optimize the summary logic"), "optimize the summary logic");
+		assert.equal(cleanSummaryText("# optimize the summary logic"), "optimize the summary logic");
 	});
 
 	it("keeps the fenced content when the reply is a code fence", () => {
-		assert.equal(cleanSummaryText("```\n优化摘要逻辑\n```"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("```\noptimize the summary logic\n```"), "optimize the summary logic");
 	});
 
 	it("removes ANSI escapes, zero-width characters and control chars", () => {
-		assert.equal(cleanSummaryText("\u001b[31m优化摘要逻辑\u001b[0m"), "优化摘要逻辑");
-		assert.equal(cleanSummaryText("优化\u200b摘要逻辑"), "优化摘要逻辑");
+		assert.equal(cleanSummaryText("\u001b[31moptimize the summary logic\u001b[0m"), "optimize the summary logic");
+		assert.equal(cleanSummaryText("optimize\u200bthe summary logic"), "optimizethe summary logic");
 	});
 
 	it("returns empty for empty / decorative-only replies", () => {
@@ -190,8 +190,8 @@ describe("cleanSummaryText", () => {
 		assert.ok(cleaned.endsWith("😀…"));
 	});
 
-	it("keeps CJK text intact", () => {
-		const text = "把右侧摘要换成模型压缩后的一句话";
-		assert.equal(cleanSummaryText(text), text);
+	it("rejects Chinese task labels so the caller keeps its original prompt fallback", () => {
+		assert.equal(cleanSummaryText("构建多线程 SHA-256 哈希 CLI 工具并编译测试"), "");
+		assert.equal(cleanSummaryText("构建任务标签\nBuild and test the CLI"), "Build and test the CLI");
 	});
 });

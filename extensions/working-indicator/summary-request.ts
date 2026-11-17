@@ -59,6 +59,8 @@
  *   - Strip whole-text wrapping quotes (ASCII and CJK paired marks), `**bold**` wrappers, and
  *     "Summary:"-style label prefixes. At most three rounds, so stacked decorations like
  *     `**"Summary: xx"**` still come clean.
+ *   - Reject replies containing Han characters. Task labels are English-only; the caller falls
+ *     back to the truncated original prompt when the model ignores the requested language.
  *   - Hard char cap `MAX_SUMMARY_TEXT_CHARS` (cut on code points, never half a surrogate pair).
  *     The display layer truncates again by visible width; this only keeps a "model returned a
  *     hundred thousand chars" from dragging memory and width computation.
@@ -144,10 +146,10 @@ function clipToPoints(text: string, maxPoints: number): string {
  *   2. stay under `targetWidth` display columns (with the Han 2 / ASCII 1 accounting given),
  *      preferring short over long;
  *   3. keep "what to do + the object", dropping greetings / background / examples / repetition;
- *   4. answer in the same language as the original.
+ *   4. answer in English, regardless of the input language.
  *
- * Rule 4 does not hard-code Chinese: giving a Chinese summary for an English prompt reads
- * awkward, so letting the model follow the original is more natural.
+ * Rule 4 keeps the package's task labels English-first and prevents a model from switching
+ * the status bar to another language on its own.
  */
 export function buildSummaryRequestPrompt(prompt: string, targetWidth: number): string {
 	const input = clipToPoints(prompt, MAX_REQUEST_INPUT_CHARS);
@@ -158,7 +160,7 @@ export function buildSummaryRequestPrompt(prompt: string, targetWidth: number): 
 		`- Output a single line, at most about ${targetWidth} display columns wide. A CJK/full-width character counts as 2 columns, an ASCII character as 1. Stay clearly under the limit rather than at it.`,
 		'- No line breaks, no quotes, no markdown, no label like "Summary:", no explanation — only that line.',
 		"- Keep the action and its main object. Drop greetings, background, examples and repeated detail.",
-		"- Write in the same language as the input.",
+		"- Write in English, even when the input uses another language.",
 		"",
 		"Input:",
 		input,
@@ -226,6 +228,9 @@ export function cleanSummaryText(raw: string): string {
 			text = next;
 		}
 		if (text === "" || LABEL_ONLY_RE.test(text)) continue;
+		// The task label is English-only. If the model ignores that instruction, keep the
+		// caller's truncated original prompt instead of displaying a Chinese model reply.
+		if (/\p{Script=Han}/u.test(text)) continue;
 		return clipToPoints(text, MAX_SUMMARY_TEXT_CHARS);
 	}
 	return "";

@@ -174,7 +174,9 @@ Thinking (↓ 900 tokens · 22s)          Working (5s)
 
 The token count is **per segment**, not per turn: each reasoning segment and each tool-argument segment starts from zero, so a `bash` command's count reflects that command. Body text is deliberately not counted. `usage.output` is always `0` while streaming, so counts are estimated from streamed characters. Elapsed time is `42s`, `1m 23s` or `1h 23m 32s`. The label uses the normal foreground color while the statistics stay muted, which requires composing everything into the single string pi receives.
 
-The same extension draws the `●` on a running bash row.
+The same extension draws the `●` on a running bash row. Model-generated task labels are
+always requested in English, regardless of the prompt language. Replies containing Han
+characters are discarded so the status bar falls back to the original prompt instead.
 
 - `PI_BASH_SPINNER=off`, `PI_SPINNER_RAINBOW=off`, `PI_SPINNER_COLOR_HOLD` (default `19` frames per color).
 - `PI_WORKING_SUMMARY=off` — disable the prompt summary line entirely.

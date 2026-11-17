@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep model-generated working-indicator task labels in English. Discard Chinese
+  model replies so the status bar uses the original prompt as its fallback.
 - Bundle `stop-hook.ts`: prompt-to-settlement elapsed time and tool-call count
   before the recap, with random Done/Cooked/Brewed/Built/Baked/Crafted labels.
   Preserve timing across continuations and steering; wrap safely on narrow terminals.
